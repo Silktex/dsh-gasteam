@@ -777,6 +777,17 @@ describe('Team identity and provisioning', () => {
 })
 
 describe('Team shared task DAG', () => {
+  it('rejects a durable task revision that relabels immutable non-code criteria', async () => {
+    const { ctx, lead } = await setup([])
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'audit', description: 'write findings', nonCodeCriteria: 'cite evidence' })
+    lead.session.append('team/task', {
+      version: 1,
+      teamId: TeamId(lead.id),
+      task: { id: task.id, revision: 2, subject: task.subject, description: task.description, status: 'pending', blockedBy: [], writeScopes: [] },
+    })
+    expect(() => durable(lead)).toThrow(/immutable non-code criteria/)
+  })
+
   it('fails loudly when the durable numeric task id space is exhausted', async () => {
     const { ctx, lead } = await setup([])
     const id = TeamTaskId(`task-${Number.MAX_SAFE_INTEGER}`)
@@ -2308,7 +2319,7 @@ describe('Team supervisor recovery', () => {
 })
 
 describe('durable Team integration queue', () => {
-  async function queuedWorker(pinned = false, realGit = false) {
+  async function queuedWorker(pinned = false, realGit = false, reviewGate?: string) {
     const fixture = await gitFixture((root) => { roots.push(root) })
     const { ctx, lead, teamFiber } = await setup([textResponse('ready')], { worktreeProvider: 'git', integrationProvider: 'test', maxIntegrations: 1 }, fixture.repository)
     await ctx.plugin(GitWorktrees, fixture.config)
@@ -2341,7 +2352,10 @@ describe('durable Team integration queue', () => {
       })
     }
     ctx.agentTeams.registerIntegrationProvider(provider)
-    const admission = { id: 'submission-job' as TeamIntegrationId, repository: worktree.repository, sourceCommit: worktree.baseCommit, targetBranch: 'main' as typeof worktree.branch, verification: [{ command: 'configured-check', args: [] }] }
+    const sourceCommit = realGit ? (await execa('git', ['-C', worktree.cwd, 'rev-parse', 'HEAD'])).stdout as TeamCommitId : worktree.baseCommit
+    const admission = { id: 'submission-job' as TeamIntegrationId, repository: worktree.repository, sourceCommit, targetBranch: 'main' as typeof worktree.branch,
+      verification: realGit ? [{ command: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('worker.txt','utf8')!=='submitted')process.exit(1)"] }] : [{ command: 'configured-check', args: [] }],
+      ...(reviewGate === undefined ? {} : { reviewGate }) }
     const job = pinned ? await ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL) : await ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)
     return { ctx, lead, teamFiber, provider, job, admission, fixture, worktree }
   }
@@ -2445,6 +2459,94 @@ describe('durable Team integration queue', () => {
       expect(lead.session.snapshotEvents().filter(event => event.type === 'team/integration').map(event => event.data.integration.phase))
         .toEqual(['queued', 'running', 'verified', 'merged'])
     } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('keeps a gated real Git candidate off the target until an exact policy-authorized review receipt is durable', async () => {
+    const { ctx, lead, provider, job, fixture } = await queuedWorker(true, true, 'implementation-review')
+    try {
+      const verified = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      expect(verified).toMatchObject({ phase: 'verified', reviewGate: 'implementation-review' })
+      await expect(readFile(join(fixture.repository, 'worker.txt'), 'utf8')).rejects.toThrow()
+      expect(provider.promote).not.toHaveBeenCalled()
+      const receipt = { integrationId: job.id, sourceCommit: job.sourceCommit, targetCommit: verified!.targetCommit!,
+        candidateCommit: verified!.candidateCommit!, reviewGate: 'implementation-review', reviewId: 'accepted-review-1' }
+      await expect(ctx.agentTeams.approvePinnedIntegration(lead, receipt, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_REVIEW_DENIED' })
+      const removePolicy = ctx.agentTeams.registerExecutionPolicy({
+        taskMutation: () => {}, wake: () => {}, integrationApproval: (_root, request) => request.reviewId === 'accepted-review-1',
+      })
+      try {
+        await expect(ctx.agentTeams.approvePinnedIntegration(lead, { ...receipt, candidateCommit: 'a'.repeat(40) as TeamCommitId }, SIGNAL))
+          .rejects.toMatchObject({ code: 'TEAM_INTEGRATION_CONFLICT' })
+        expect(await ctx.agentTeams.approvePinnedIntegration(lead, receipt, SIGNAL)).toMatchObject({ reviewReceipt: receipt })
+        expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged', reviewReceipt: receipt })
+        expect(await readFile(join(fixture.repository, 'worker.txt'), 'utf8')).toBe('submitted')
+      } finally { removePolicy() }
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('invalidates a gated receipt on stale-target re-verification and retains it with the prior candidate', async () => {
+    const { ctx, lead, provider, job } = await queuedWorker(true, false, 'implementation-review')
+    const target2 = 'b'.repeat(40) as TeamCommitId
+    const candidate2 = 'c'.repeat(40) as TeamCommitId
+    const removePolicy = ctx.agentTeams.registerExecutionPolicy({ taskMutation: () => {}, wake: () => {}, integrationApproval: () => true })
+    try {
+      const first = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      const firstReceipt = { integrationId: job.id, sourceCommit: job.sourceCommit, targetCommit: first!.targetCommit!,
+        candidateCommit: first!.candidateCommit!, reviewGate: 'implementation-review', reviewId: 'accepted-review-1' }
+      await ctx.agentTeams.approvePinnedIntegration(lead, firstReceipt, SIGNAL)
+      provider.promote.mockRejectedValueOnce(new TeamError('target moved', 'TEAM_INTEGRATION_STALE'))
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'queued',
+        previousCandidates: [{ reviewReceipt: firstReceipt }] })
+      provider.target.mockResolvedValueOnce(target2)
+      provider.verify.mockResolvedValueOnce(candidate2)
+      const second = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      expect(second).toMatchObject({ phase: 'verified', targetCommit: target2, candidateCommit: candidate2 })
+      expect(second!.reviewReceipt).toBeUndefined()
+      await expect(ctx.agentTeams.approvePinnedIntegration(lead, firstReceipt, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_CONFLICT' })
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'verified' })
+      const secondReceipt = { ...firstReceipt, targetCommit: target2, candidateCommit: candidate2, reviewId: 'accepted-review-2' }
+      await ctx.agentTeams.approvePinnedIntegration(lead, secondReceipt, SIGNAL)
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged', reviewReceipt: secondReceipt })
+    } finally { removePolicy(); await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('replays an appended gated approval after its flush fails and after service reconstruction', async () => {
+    const { ctx, lead, provider, job, teamFiber } = await queuedWorker(true, false, 'implementation-review')
+    const removePolicy = ctx.agentTeams.registerExecutionPolicy({ taskMutation: () => {}, wake: () => {}, integrationApproval: () => true })
+    const persistedFlush = ctx.sessions.flush.bind(ctx.sessions)
+    let failReceiptFlush = true
+    const flush = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async session => {
+      if (session === lead.session && ctx.agentTeams.listIntegrations(lead)[0]?.reviewReceipt !== undefined && failReceiptFlush) {
+        failReceiptFlush = false
+        throw new Error('review receipt checkpoint failed')
+      }
+      return await persistedFlush(session)
+    })
+    try {
+      const verified = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      const receipt = { integrationId: job.id, sourceCommit: job.sourceCommit, targetCommit: verified!.targetCommit!,
+        candidateCommit: verified!.candidateCommit!, reviewGate: 'implementation-review', reviewId: 'accepted-review-1' }
+      await expect(ctx.agentTeams.approvePinnedIntegration(lead, receipt, SIGNAL)).rejects.toThrow('review receipt checkpoint failed')
+      flush.mockRestore()
+      expect(await ctx.agentTeams.approvePinnedIntegration(lead, receipt, SIGNAL)).toMatchObject({ reviewReceipt: receipt })
+      await teamFiber.dispose()
+      await ctx.plugin(TeamService, { integrationProvider: 'test' })
+      ctx.agentTeams.registerIntegrationProvider(provider)
+      expect(await ctx.agentTeams.approvePinnedIntegration(lead, receipt, SIGNAL)).toMatchObject({ reviewReceipt: receipt })
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged', reviewReceipt: receipt })
+    } finally { flush.mockRestore(); removePolicy(); await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('does not let the generic integration worker bypass a gated verified candidate', async () => {
+    const { ctx, lead, provider } = await queuedWorker(true, false, 'implementation-review')
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const fiber = await ctx.plugin(IntegrationWorker, { scanIntervalMs: 10 })
+    try {
+      await vi.advanceTimersByTimeAsync(10)
+      await vi.waitFor(() => { expect(ctx.agentTeams.listIntegrations(lead)[0]).toMatchObject({ phase: 'verified' }) })
+      await vi.advanceTimersByTimeAsync(50)
+      expect(provider.promote).not.toHaveBeenCalled()
+    } finally { await fiber.dispose(); await teamInternals(ctx).disposeRuntime() }
   })
 
   it('refuses promotion until an appended verified candidate is flushed successfully', async () => {

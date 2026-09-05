@@ -1,0 +1,25 @@
+{
+  "format": "agent-team-workflow/v1",
+  "id": "release-publication",
+  "version": 1,
+  "parameters": {
+    "release": { "type": "string", "required": true }
+  },
+  "steps": [
+    {
+      "id": "prepare",
+      "title": "Prepare {{release}}",
+      "retry": { "maxAttempts": 1, "backoffMs": 0 },
+      "artifacts": { "produces": ["release-candidate"] },
+      "acceptance": { "kind": "artifact-submitted", "artifact": "release-candidate" }
+    },
+    {
+      "id": "publish",
+      "title": "Publish {{release}}",
+      "dependsOn": ["prepare"],
+      "retry": { "maxAttempts": 1, "backoffMs": 0 },
+      "artifacts": { "requires": ["release-candidate"] },
+      "acceptance": { "kind": "externally-authorized-publication", "authorization": "release-manager" }
+    }
+  ]
+}

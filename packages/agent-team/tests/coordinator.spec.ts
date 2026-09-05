@@ -7,6 +7,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as CoordinatorTools from '../../tool-agent-team/src/coordinator.ts'
 import { schedulingViewSchema, schedulingControlSchema } from '../src/scheduling-schemas.ts'
+import { remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema } from '../src/remote-schemas.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -184,6 +185,81 @@ it('restores an unopened registered Lead under execution policy and automaticall
   expect(restored.agentTeams.listMembers(restored.agents.get(lead.id)!)).toHaveLength(2)
 })
 
+it('replays a workflow task creation crash through its Team-log admission key without duplicating the task or worker', async () => {
+  const { root, ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  const original = ctx.agentTeams.createPinnedTask.bind(ctx.agentTeams)
+  const sideEffect = vi.spyOn(ctx.agentTeams, 'createPinnedTask').mockImplementationOnce(async (caller, input) => {
+    await original(caller, input)
+    throw new Error('crash after Team task side effect')
+  })
+  await expect(running.createWorkflow(lead, { projectId: 'project', teamId: lead.id, templateId: 'investigation-report', templateVersion: 1,
+    parameters: { question: 'Why is restart safe?' }, executionId: 'workflow-crash-window' })).rejects.toThrow(/crash after Team task side effect/)
+  const task = ctx.agentTeams.listTasks(lead).find(task => task.subject === 'Investigate Why is restart safe?')!
+  expect(task).toBeDefined()
+  expect(running.inspectWorkflow(lead, 'workflow-crash-window').steps[0]).toMatchObject({ stepId: 'investigate', phase: 'pending' })
+  sideEffect.mockRestore()
+  await running.close()
+  await ctx.fiber.dispose()
+
+  const restoredCtx = await stack(root)
+  restoredCtx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution })
+  cleanup.push(() => restored.close())
+  const restoredLead = restoredCtx.agents.get(SessionId(lead.id))!
+  await restored.resumeWorkflow(restoredLead, 'workflow-crash-window')
+  expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(value => value.id === task.id)).toHaveLength(1)
+  expect(restored.view().workflows[0]!.steps).toContainEqual(expect.objectContaining({ stepId: 'investigate', taskId: task.id, phase: 'running' }))
+  expect(restored.view().attempts.filter(attempt => attempt.taskId === task.id)).toHaveLength(1)
+})
+
+it('accepts the first workflow report, hands its evidence to a fresh second-step worker, and keeps both concrete task bindings', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  const adapter = new MockAdapter([
+    textResponse('The credential expired at 10:42 UTC.'), textResponse('The credential expired at 10:42 UTC.'),
+    textResponse('The review confirms the expiry evidence.'), textResponse('The review confirms the expiry evidence.'),
+  ])
+  ctx.llm.registerAdapter(['mock'], adapter)
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  const workflow = await running.createWorkflow(lead, { projectId: 'project', teamId: lead.id, templateId: 'investigation-report', templateVersion: 1,
+    parameters: { question: 'Why did access fail?' }, executionId: 'workflow-handoff' })
+  const firstTask = workflow.steps[0]!.taskId!
+  const activeFirst = running.view().attempts.find(attempt => attempt.taskId === firstTask)!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(activeFirst.runtimeId))).toBeUndefined())
+  await running.reconcile()
+  await vi.waitFor(() => expect(running.view().attempts.find(attempt => attempt.taskId === firstTask)).toMatchObject({ phase: 'terminal', result: 'The credential expired at 10:42 UTC.' }))
+  const first = running.view().attempts.find(attempt => attempt.taskId === firstTask)!
+  await running.acceptReport(lead, 'project', { attemptId: first.attemptId, generation: first.generation, expectedRevision: first.revision,
+    expectedTaskRevision: ctx.agentTeams.getTask(lead, firstTask).revision, rationale: 'The report identifies a specific expiry time.' })
+  await vi.waitFor(() => expect(running.inspectWorkflow(lead, 'workflow-handoff').steps).toContainEqual(expect.objectContaining({ stepId: 'report', phase: 'running', taskId: expect.any(String) })))
+  const restored = running.inspectWorkflow(lead, 'workflow-handoff')
+  const secondTask = restored.steps.find(step => step.stepId === 'report')!.taskId!
+  await vi.waitFor(() => expect(running.view().attempts.filter(attempt => attempt.taskId === secondTask)).toHaveLength(1))
+  const second = running.view().attempts.find(attempt => attempt.taskId === secondTask)!
+  expect(second.runtimeId).not.toBe(first.runtimeId)
+  expect(restored.steps).toMatchObject([{ stepId: 'investigate', taskId: firstTask, phase: 'completed' }, { stepId: 'report', taskId: secondTask, phase: 'running' }])
+  const prompts = adapter.requests.map(request => request.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'))
+  expect(prompts.some(prompt => prompt.includes('The credential expired at 10:42 UTC.') && prompt.includes('The report identifies a specific expiry time.'))).toBe(true)
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(second.runtimeId))).toBeUndefined())
+  await running.reconcile()
+  const terminalSecond = running.view().attempts.find(attempt => attempt.taskId === secondTask)!
+  expect(terminalSecond).toMatchObject({ phase: 'terminal', result: 'The review confirms the expiry evidence.' })
+  await running.acceptReport(lead, 'project', { attemptId: terminalSecond.attemptId, generation: terminalSecond.generation, expectedRevision: terminalSecond.revision,
+    expectedTaskRevision: ctx.agentTeams.getTask(lead, secondTask).revision, rationale: 'The final review confirms the accepted investigation evidence.' })
+  await vi.waitFor(() => expect(running.inspectWorkflow(lead, 'workflow-handoff').steps.every(step => step.phase === 'completed')).toBe(true))
+  await running.reconcile()
+  expect(await running.resumeWorkflow(lead, 'workflow-handoff')).toBeUndefined()
+  expect(ctx.agentTeams.listTasks(lead).filter(task => task.subject.includes('access fail'))).toHaveLength(2)
+  expect(running.view().attempts).toHaveLength(2)
+})
+
 it('releases a reservation when policy validation fails before runtime start and lets unrelated work run', async () => {
   const { ctx, lead, coordinator, request, config } = await fixture()
   await coordinator.register(lead, request)
@@ -298,6 +374,9 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   expect(status.isError).not.toBe(true)
   expect(JSON.parse(status.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')))
     .toMatchObject({ projectId: 'project', requests: [{ taskId: task.id, revision: 1 }] })
+  const reports = await call('team_report_status', { project_id: 'project' })
+  expect(reports.isError).not.toBe(true)
+  expect(JSON.parse(reports.content.flatMap(block => block.type === 'text' ? [block.text] : []).join(''))).toEqual([])
   expect((await call('team_dispatch_priority', { project_id: 'project', task_id: task.id, expected_revision: 1, priority: 50 })).isError).not.toBe(true)
   expect((await call('team_dispatch_priority', { project_id: 'project', task_id: task.id, expected_revision: 1, priority: 60 })).isError).toBe(true)
   expect((await call('team_dispatch_pause', { project_id: 'project', expected_revision: 0, paused: true })).isError).not.toBe(true)
@@ -308,6 +387,7 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   const outsider = ctx.agentLoop.create(SessionId('scheduling-outsider'), { provider: 'mock', model: 'mock' })
   expect(() => ctx.agentTeams.remoteScheduling(outsider, { projectId: 'project' })).toThrow(/authorized/)
   expect((await call('team_dispatch_status', { project_id: 'project' }, outsider)).isError).toBe(true)
+  expect((await call('team_report_status', { project_id: 'project' }, outsider)).isError).toBe(true)
   expect(() => schedulingControlSchema.parse({ action: 'priority', projectId: 'project', taskId: task.id, expectedRevision: 2, priority: 0, injected: true })).toThrow()
   expect((await call('team_dispatch_cancel', { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' })).isError).not.toBe(true)
   expect(ctx.agentTeams.remoteScheduling(lead, { projectId: 'project' }).requests[0]!.cancelReason).toBe('Tool cancellation')
@@ -449,6 +529,69 @@ it.each([true, false])('automatically submits real worker output and protects ac
   expect(ctx.agentTeams.listIntegrations(lead)).toHaveLength(1)
 })
 
+it('pins opt-in final-candidate retention across restart and removes the clean merged Git worktree only after its deadline', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture(true)
+  const commands = [{ command: 'node', args: ['-e', "if(require('node:fs').readFileSync('shared.txt','utf8').trim()!=='retained')process.exit(1)"] }]
+  await coordinator.register(lead, { ...request, verification: { revision: 1, commands } })
+  await coordinator.acceptTask(lead, 'project', { subject: 'Retention artifact', description: 'Commit and clean after the configured delay' })
+  await coordinator.close()
+  await ctx.plugin(GitIntegration, { providerName: 'test', targetBranch: 'main', verification: commands, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
+  let wrote = false
+  ctx.llm.registerAdapter(['mock'], new class extends MockAdapter {
+    override async *stream(options: Parameters<MockAdapter['stream']>[0]) {
+      if (!wrote) {
+        const worker = ctx.agents.list().find(agent => ctx.agentTeams.tryMembership(agent)?.role === 'teammate')!
+        const cwd = worker.session.header.cwd!
+        await writeFile(join(cwd, 'shared.txt'), 'retained\n')
+        await runGit(cwd, ['add', 'shared.txt'], new AbortController().signal, 30_000)
+        await runGit(cwd, ['commit', '-m', 'retention artifact'], new AbortController().signal, 30_000)
+        wrote = true
+      }
+      yield* super.stream(options)
+    }
+  }([textResponse('Committed retention artifact'), textResponse('Lead acknowledgement')]))
+  const delayMs = 60_000
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxRepairAttempts: 0, candidateRetention: { delayMs, commandTimeoutMs: 30_000 } } })
+  cleanup.push(() => running.close())
+  const active = running.view().attempts[0]!
+  await vi.waitFor(() => { expect(ctx.agents.get(SessionId(active.runtimeId))).toBeUndefined() })
+  await running.reconcile()
+  const queued = running.view().candidateRetention[0]!
+  const candidate = ctx.agentTeams.listIntegrations(lead)[0]!
+  expect(queued).toMatchObject({ phase: 'queued', cwd: candidate.cwd, candidateCommit: candidate.candidateCommit, deadline: queued.eligibleAt + delayMs })
+  expect(await readFile(join(candidate.cwd, 'shared.txt'), 'utf8')).toBe('retained\n')
+  await running.close()
+
+  // Disabled retention and a paused project leave a due intent and its worktree untouched.
+  const disabled = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => disabled.close())
+  const disabledClock = vi.spyOn(Date, 'now').mockReturnValue(queued.deadline)
+  try { await disabled.reconcile() } finally { disabledClock.mockRestore() }
+  expect(disabled.view().candidateRetention).toEqual([expect.objectContaining({ phase: 'queued' })])
+  expect(await readFile(join(candidate.cwd, 'shared.txt'), 'utf8')).toBe('retained\n')
+  await disabled.close()
+
+  // A changed deployment delay cannot change a durable eligibility deadline.
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, candidateRetention: { delayMs: 0, commandTimeoutMs: 1 } } })
+  cleanup.push(() => restored.close())
+  expect(restored.view().candidateRetention).toEqual([expect.objectContaining({ submissionId: queued.submissionId, phase: 'queued', deadline: queued.deadline, commandTimeoutMs: 30_000 })])
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(queued.deadline)
+  try {
+    await restored.pause(lead, 'project', 0, true)
+    await restored.reconcile()
+    expect(restored.view().candidateRetention).toEqual([expect.objectContaining({ submissionId: queued.submissionId, phase: 'queued' })])
+    expect(await readFile(join(candidate.cwd, 'shared.txt'), 'utf8')).toBe('retained\n')
+    await restored.pause(lead, 'project', 1, false)
+    await restored.reconcile()
+  } finally { clock.mockRestore() }
+  expect(restored.view().candidateRetention).toEqual([expect.objectContaining({ submissionId: queued.submissionId, phase: 'released' })])
+  await expect(readFile(join(candidate.cwd, 'shared.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await restored.close()
+  const replayed = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, candidateRetention: { delayMs: 0 } } })
+  cleanup.push(() => replayed.close())
+  expect(replayed.view().candidateRetention).toEqual([expect.objectContaining({ submissionId: queued.submissionId, phase: 'released' })])
+})
+
 
 it('runs a diamond dependency graph to verified acceptance without manual dispatch or completion', async () => {
   const { ctx, lead, coordinator, request, config } = await fixture(true)
@@ -563,4 +706,120 @@ it.each([true, false, 'conflict', 'cancel'] as const)('automatically repairs fai
   if (!repairSucceeds) expect(view.dispatchStatus[0]!.blockers.some(block => block.detail.includes('repair budget exhausted'))).toBe(true)
   const original = view.attempts[0]!
   await expect(running.submit(lead, 'project', { attemptId: original.attemptId, generation: original.generation, expectedRevision: original.revision, sourceCommit: view.submissions[0]!.sourceCommit, evidence: original.result! })).rejects.toThrow(/Superseded/)
+})
+
+it('requires explicit audited review for non-code work and releases dependents only after acceptance', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture(true)
+  await coordinator.register(lead, request)
+  const report = await coordinator.acceptTask(lead, 'project', { subject: 'Investigation', description: 'Explain the findings', nonCodeCriteria: 'Identify the cause and cite evidence' })
+  const dependent = await coordinator.acceptTask(lead, 'project', { subject: 'Follow up', description: 'Use accepted findings', blockedBy: [report.id] })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Cause identified with evidence in the report'))))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  let attempt = running.view().attempts[0]!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined())
+  await running.reconcile()
+  attempt = running.view().attempts[0]!
+  expect(running.view().submissions).toEqual([])
+  expect(ctx.agentTeams.getTask(lead, report.id).status).toBe('pending')
+  expect(running.view().attempts).toHaveLength(1)
+  const review = { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision,
+    expectedTaskRevision: report.revision, rationale: 'The report identifies the cause and supporting evidence.' }
+  const unrelated = ctx.agentLoop.create(SessionId('unrelated-reviewer'), { provider: 'mock', model: 'mock' })
+  await expect(running.acceptReport(unrelated, 'project', review)).rejects.toThrow(/authorized/)
+  await expect(running.acceptReport(lead, 'project', { ...review, expectedRevision: 1 })).rejects.toThrow(/Stale/)
+  await expect(running.acceptReport(lead, 'project', { ...review, rationale: '' })).rejects.toThrow()
+  expect(running.reviewReports(lead, 'project')).toMatchObject([{ phase: 'awaiting-review', report: attempt.result, criteria: 'Identify the cause and cite evidence', expectedRevision: attempt.revision, expectedTaskRevision: report.revision }])
+  ctx.provide('workspaceCoordinator', running)
+  const tools = await ctx.plugin(CoordinatorTools)
+  const remoteQueue = ctx.agentTeams.remoteReviewReports(lead, { projectId: 'project' })
+  expect(reviewableReportsSchema.parse(remoteQueue)).toMatchObject([{ phase: 'awaiting-review', attemptId: attempt.attemptId }])
+  expect(() => remoteAcceptReportRequestSchema.parse({ projectId: 'project', ...review, injected: true })).toThrow()
+  const accepted = await ctx.agentTeams.remoteAcceptReport(lead, { projectId: 'project', ...review })
+  expect(reviewableReportSchema.parse(accepted)).toMatchObject({ phase: 'accepted', reviewerId: lead.id })
+  const toolStatus = await ctx.tools.execute({ callId: ToolCallId('report-status'), name: 'team_report_status', arguments: { project_id: 'project' }, agent: lead, signal: new AbortController().signal })
+  expect(toolStatus.isError).not.toBe(true)
+  expect(JSON.parse(toolStatus.content.flatMap(block => block.type === 'text' ? [block.text] : []).join(''))).toMatchObject([{ phase: 'accepted', rationale: review.rationale }])
+  const toolReplay = await ctx.tools.execute({ callId: ToolCallId('report-accept'), name: 'team_report_accept', arguments: { project_id: 'project', attempt_id: attempt.attemptId, generation: attempt.generation, expected_revision: attempt.revision, expected_task_revision: report.revision, rationale: review.rationale }, agent: lead, signal: new AbortController().signal })
+  expect(toolReplay.isError).not.toBe(true)
+  await tools.dispose()
+  expect(accepted).toMatchObject({ phase: 'accepted', report: attempt.result, criteria: 'Identify the cause and cite evidence', reviewerId: lead.id })
+  expect(ctx.agentTeams.getTask(lead, report.id).status).toBe('completed')
+  expect(await running.acceptReport(lead, 'project', review)).toEqual(accepted)
+  expect(ctx.agentTeams.getTask(lead, report.id).revision).toBe(2)
+  await expect(running.acceptReport(lead, 'project', { ...review, rationale: 'Different acceptance' })).rejects.toThrow(/immutable|different/)
+  await running.reconcile()
+  expect(running.view().attempts.map(attempt => attempt.taskId)).toEqual([report.id, dependent.id])
+  expect(running.view().dispatchStatus.find(row => row.taskId === report.id)!.state).toBe('accepted')
+  await expect(running.submit(lead, 'project', { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision, sourceCommit: 'a'.repeat(40), evidence: attempt.result! })).rejects.toThrow(/non-code/)
+})
+
+it('replays a pending non-code report intent after a fresh-context crash boundary and fences cancellation', async () => {
+  const { root, ctx, lead, coordinator, request, config } = await fixture(true)
+  await coordinator.register(lead, request)
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'Audit', description: 'Write a report', nonCodeCriteria: 'State the observed fact' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 4 }, () => textResponse('Observed fact with evidence'))))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  let attempt = running.view().attempts[0]!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined())
+  await running.reconcile()
+  attempt = running.view().attempts[0]!
+  const review = { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision,
+    expectedTaskRevision: task.revision, rationale: 'The report explicitly states the observed fact.' }
+  const receipt = vi.spyOn(ctx.agentTeams, 'acceptReportedTask').mockRejectedValueOnce(new Error('simulated crash after intent'))
+  await expect(running.acceptReport(lead, 'project', review)).rejects.toThrow(/simulated crash/)
+  expect(running.view().reports).toMatchObject([{ phase: 'pending', report: 'Observed fact with evidence' }])
+  await expect(running.controlScheduling(lead, { action: 'cancel', projectId: 'project', taskId: task.id, expectedRevision: 1, reason: 'Too late after review intent' })).rejects.toThrow(/entered report acceptance/)
+  receipt.mockRestore()
+  await running.close()
+  await ctx.fiber.dispose()
+  const restoredCtx = await stack(root, true)
+  restoredCtx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 4 }, () => textResponse('follow-up report'))))
+  const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution })
+  cleanup.push(() => restored.close())
+  const restoredLead = restoredCtx.agents.get(SessionId(lead.id))!
+  expect(restored.view().reports).toMatchObject([{ phase: 'accepted', rationale: review.rationale }])
+  expect(restoredCtx.agentTeams.getTask(restoredLead, task.id)).toMatchObject({ status: 'completed', revision: 2 })
+
+  const later = await restored.acceptTask(restoredLead, 'project', { subject: 'Cancelled report', description: 'Do not accept', nonCodeCriteria: 'Never accept after cancellation' })
+  await restored.reconcile()
+  const active = restored.view().attempts.find(item => item.taskId === later.id)!
+  await restored.controlScheduling(restoredLead, { action: 'cancel', projectId: 'project', taskId: later.id, expectedRevision: 1, reason: 'Operator cancelled review' })
+  expect(restored.reviewReports(restoredLead, 'project').filter(item => item.taskId === later.id)).toEqual([])
+  await expect(restored.acceptReport(restoredLead, 'project', { attemptId: active.attemptId, generation: active.generation, expectedRevision: active.revision,
+    expectedTaskRevision: later.revision, rationale: 'Too late' })).rejects.toThrow(/Cancelled|quiescent/)
+})
+
+it('replays the exact Team report receipt after its durable acknowledgement crashes in a fresh context', async () => {
+  const { root, ctx, lead, coordinator, request, config } = await fixture(true)
+  await coordinator.register(lead, request)
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'Receipt boundary', description: 'Persist receipt first', nonCodeCriteria: 'State the durable observation' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 4 }, () => textResponse('Durable observation'))))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  let attempt = running.view().attempts[0]!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined())
+  await running.reconcile()
+  attempt = running.view().attempts[0]!
+  const review = { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision,
+    expectedTaskRevision: task.revision, rationale: 'The durable observation satisfies the criteria.' }
+  const acknowledgement = vi.spyOn(ctx.sessions, 'flush').mockRejectedValueOnce(new Error('first receipt flush failed')).mockRejectedValueOnce(new Error('second receipt flush failed'))
+  await expect(running.acceptReport(lead, 'project', review)).rejects.toThrow(/first receipt flush failed/)
+  expect(ctx.agentTeams.getTask(lead, task.id)).toMatchObject({ status: 'completed', revision: 2 })
+  expect(running.view().reports).toMatchObject([{ phase: 'pending' }])
+  await expect(running.acceptReport(lead, 'project', review)).rejects.toThrow(/second receipt flush failed/)
+  expect(running.view().reports).toMatchObject([{ phase: 'pending' }])
+  acknowledgement.mockRestore()
+  await running.close()
+  await ctx.fiber.dispose()
+  const restoredCtx = await stack(root, true)
+  const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution })
+  cleanup.push(() => restored.close())
+  const restoredLead = restoredCtx.agents.get(SessionId(lead.id))!
+  expect(restored.view().reports).toMatchObject([{ phase: 'accepted', attemptId: attempt.attemptId }])
+  expect(restoredCtx.agentTeams.getTask(restoredLead, task.id)).toMatchObject({ status: 'completed', revision: 2 })
 })

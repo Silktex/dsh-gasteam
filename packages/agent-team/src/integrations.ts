@@ -10,16 +10,25 @@ import type { TeamMembership } from './roster.ts'
 import { acquireIntegrationOwnership } from './integration-ownership.ts'
 import { TeamError, errorMessage } from './error.ts'
 import { TeamId } from './types.ts'
-import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationSnapshot } from './types.ts'
+import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationReviewReceipt, TeamIntegrationSnapshot, TeamIntegrationSpec } from './types.ts'
 
 const admissionSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/),
   sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), repository: z.string().min(1), targetBranch: z.string().min(1),
   verification: z.array(z.object({ command: z.string().min(1), args: z.array(z.string()) }).strict()).min(1),
+  reviewGate: z.string().min(1).max(256).optional(),
 }).strict()
-function matchesAdmission(spec: TeamIntegrationSnapshot | Omit<TeamIntegrationSnapshot, 'id' | 'memberId' | 'provider' | 'phase'>, admission: TeamIntegrationAdmission): boolean {
+const reviewReceiptSchema = z.object({
+  integrationId: z.string().min(1), sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  targetCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), candidateCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  reviewGate: z.string().min(1).max(256), reviewId: z.string().min(1).max(256),
+}).strict()
+function matchesAdmissionInputs(spec: TeamIntegrationSpec | TeamIntegrationSnapshot, admission: TeamIntegrationAdmission): boolean {
   return spec.sourceCommit === admission.sourceCommit && spec.repository === admission.repository
     && spec.targetBranch === admission.targetBranch && isDeepStrictEqual(spec.verification, admission.verification)
+}
+function matchesAdmission(spec: TeamIntegrationSnapshot, admission: TeamIntegrationAdmission): boolean {
+  return matchesAdmissionInputs(spec, admission) && spec.reviewGate === admission.reviewGate
 }
 
 /** Owns queue admission and one integration runner per Team. */
@@ -34,7 +43,8 @@ export class TeamIntegrations {
    * @param maxPending - maximum unfinished requests.
    */
   constructor(private readonly ctx: Context, private readonly journal: TeamJournal,
-    private readonly providerName: string | undefined, private readonly maxPending: number) {}
+    private readonly providerName: string | undefined, private readonly maxPending: number,
+    private readonly authorizeReview: (membership: TeamMembership, receipt: TeamIntegrationReviewReceipt) => boolean = () => false) {}
 
   /**
    * Register a provider for the mounting plugin lifetime.
@@ -81,8 +91,9 @@ export class TeamIntegrations {
       const provider = this.provider(this.providerName)
       const id = admission?.id ?? randomUUID() as TeamIntegrationId
       const spec = await provider.resolve(worktree, id, signal)
-      if (admission !== undefined && !matchesAdmission(spec, admission)) throw new TeamError('Resolved worker commit or integration policy differs from the submission', 'TEAM_INTEGRATION_CONFLICT')
-      const job: TeamIntegrationSnapshot = { ...spec, id, memberId: member.id, provider: provider.name, phase: 'queued' }
+      if (admission !== undefined && !matchesAdmissionInputs(spec, admission)) throw new TeamError('Resolved worker commit or integration policy differs from the submission', 'TEAM_INTEGRATION_CONFLICT')
+      const job: TeamIntegrationSnapshot = { ...spec, id, memberId: member.id, provider: provider.name, phase: 'queued',
+        ...(admission?.reviewGate === undefined ? {} : { reviewGate: admission.reviewGate }) }
       await this.journal.appendAndFlush(membership.root, 'team/integration', { version: 1, teamId: membership.id, integration: job })
       return structuredClone(job)
     })
@@ -95,6 +106,40 @@ export class TeamIntegrations {
    */
   list(membership: TeamMembership): TeamIntegrationSnapshot[] {
     return structuredClone(this.journal.state(membership.root).integrations)
+  }
+
+  /**
+   * Persist a host-authorized workflow review receipt for exactly one verified candidate.
+   * @param membership - exact Lead authority.
+   * @param receipt - external review identity and candidate binding.
+   * @returns the durably authorized integration snapshot.
+   */
+  async approve(membership: TeamMembership, receipt: TeamIntegrationReviewReceipt): Promise<TeamIntegrationSnapshot> {
+    this.assertLead(membership)
+    reviewReceiptSchema.parse(receipt)
+    return await this.journal.transact(membership.root.id, async () => {
+      const job = this.journal.state(membership.root).integrations.find(candidate => candidate.id === receipt.integrationId)
+      if (job === undefined) throw new TeamError('integration review receipt has no admitted integration', 'TEAM_INTEGRATION_CONFLICT')
+      if (job.reviewReceipt !== undefined) {
+        if (!isDeepStrictEqual(job.reviewReceipt, receipt)) throw new TeamError('integration already has a different review receipt', 'TEAM_INTEGRATION_CONFLICT')
+        // A prior receipt append may have succeeded before its flush failed, including after promotion.
+        await this.ctx.sessions.flush(membership.root.session)
+        return structuredClone(job)
+      }
+      if (job.phase !== 'verified' || job.reviewGate === undefined || job.targetCommit === undefined || job.candidateCommit === undefined
+        || job.sourceCommit !== receipt.sourceCommit || job.targetCommit !== receipt.targetCommit || job.candidateCommit !== receipt.candidateCommit
+        || job.reviewGate !== receipt.reviewGate) {
+        throw new TeamError('integration review receipt does not match the current verified candidate', 'TEAM_INTEGRATION_CONFLICT')
+      }
+      if (!this.authorizeReview(membership, structuredClone(receipt))) {
+        throw new TeamError('integration review receipt was not authorized by the host', 'TEAM_INTEGRATION_REVIEW_DENIED')
+      }
+      const approved = { ...job, reviewReceipt: structuredClone(receipt) }
+      await this.journal.appendAndFlush(membership.root, 'team/integration', {
+        version: 1, teamId: TeamId(membership.root.id), integration: approved,
+      })
+      return structuredClone(approved)
+    })
   }
 
   /**
@@ -137,6 +182,7 @@ export class TeamIntegrations {
       if (job.phase !== 'verified' || job.targetCommit === undefined || job.candidateCommit === undefined) {
         throw new TeamError('integration has no verified candidate', 'TEAM_INTEGRATION_CONFLICT')
       }
+      if (job.reviewGate !== undefined && job.reviewReceipt === undefined) return structuredClone(job)
       // A prior failed flush can leave a verified event visible only in memory.
       await this.ctx.sessions.flush(root.session)
       try {
@@ -148,10 +194,11 @@ export class TeamIntegrations {
         if (history.length >= 3) {
           return await this.record(membership, { ...job, phase: 'failed', error: `Target movement retry limit reached: ${errorMessage(error)}. Candidate checkouts are retained.` })
         }
-        const { targetCommit, candidateCommit, ...inputs } = job
+        const { targetCommit, candidateCommit, reviewReceipt, ...inputs } = job
         return await this.record(membership, {
           ...inputs, phase: 'queued', cwd: `${history[0]?.cwd ?? job.cwd}.retry-${history.length + 1}`,
-          previousCandidates: [...history, { cwd: job.cwd, targetCommit, candidateCommit, error: errorMessage(error) }],
+          previousCandidates: [...history, { cwd: job.cwd, targetCommit, candidateCommit, error: errorMessage(error),
+            ...(reviewReceipt === undefined ? {} : { reviewReceipt }) }],
         })
       }
       return await this.record(membership, { ...job, phase: 'merged' })

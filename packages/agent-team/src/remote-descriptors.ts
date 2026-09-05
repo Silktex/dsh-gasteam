@@ -1,6 +1,6 @@
 /** Host lookup and JSON codecs for Team task and scoped scheduling operations. */
 import type { InvocationDescriptor, InvocationParameterDescriptor, TypertCodec } from '@deepseek-ai/dsh-typert-protocol'
-import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema } from './remote-schemas.ts'
+import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, reviewReportsRequestSchema, createWorkflowSchema, workflowQuerySchema, workflowViewSchema, nullableWorkflowViewSchema } from './remote-schemas.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from './scheduling-schemas.ts'
 import type { TeamService } from './index.ts'
 
@@ -23,7 +23,12 @@ function invocation(method: string, implementation: keyof TeamService & string, 
 export const descriptors: readonly InvocationDescriptor[] = [
   invocation('scheduling', 'remoteScheduling', codec('SchedulingView', schedulingViewSchema), codec('SchedulingQuery', schedulingQuerySchema)),
   invocation('controlScheduling', 'remoteControlScheduling', codec('SchedulingView', schedulingViewSchema), codec('SchedulingControl', schedulingControlSchema)),
+  invocation('reviewReports', 'remoteReviewReports', codec('ReviewableReport[]', reviewableReportsSchema), codec('ReviewReportsRequest', reviewReportsRequestSchema)),
+  invocation('acceptReport', 'remoteAcceptReport', codec('ReviewableReport', reviewableReportSchema), codec('RemoteAcceptReportRequest', remoteAcceptReportRequestSchema)),
   invocation('createTask', 'remoteCreateTask', codec('TeamTaskMutationResult', taskResultSchema), codec('CreateTeamTaskRequest', createTaskSchema)),
   invocation('updateTask', 'remoteUpdateTask', codec('TeamTaskMutationResult', taskResultSchema), codec('UpdateTeamTaskRequest', updateTaskSchema)),
+  invocation('createWorkflow', 'remoteCreateWorkflow', codec('WorkflowRuntimeView', workflowViewSchema), codec('CreateWorkflowRequest', createWorkflowSchema)),
+  invocation('inspectWorkflow', 'remoteInspectWorkflow', codec('WorkflowRuntimeView', workflowViewSchema), codec('WorkflowQuery', workflowQuerySchema)),
+  invocation('resumeWorkflow', 'remoteResumeWorkflow', codec('WorkflowRuntimeView | undefined', nullableWorkflowViewSchema), codec('WorkflowQuery', workflowQuerySchema)),
   invocation('view', 'remoteView', codec('TeamView', teamViewSchema)),
 ]

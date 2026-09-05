@@ -11,7 +11,9 @@ import type { TeamTaskGraphViolation } from './task-graph.ts'
 import { TeamId, TeamTaskId } from './types.ts'
 import type {
   CreateTeamTaskRequest,
+  CreatePinnedTeamTaskRequest,
   IntegratedTaskAcceptance,
+  ReportedTaskAcceptance,
   TeamTaskSnapshot,
   TeamTaskView,
   UpdateTeamTaskRequest,
@@ -42,6 +44,7 @@ export class TeamTaskBoard {
     private readonly maxResultLength: number,
     private readonly validateMutation: (caller: Agent, root: Agent, request: UpdateTeamTaskRequest) => void = () => {},
     private readonly validateAcceptance: (root: Agent, request: IntegratedTaskAcceptance) => boolean = () => false,
+    private readonly validateReportAcceptance: (root: Agent, request: ReportedTaskAcceptance) => boolean = () => false,
   ) {}
 
   /**
@@ -52,6 +55,7 @@ export class TeamTaskBoard {
    */
   async create(membership: TeamMembership, request: CreateTeamTaskRequest): Promise<TeamTaskView> {
     const { root } = membership
+    if (request.nonCodeCriteria !== undefined && membership.role !== 'lead') throw new TeamError('Non-code acceptance criteria require a Lead', 'TEAM_LEAD_ONLY')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
       const active = state.tasks.filter(task => task.status !== 'deleted').length
@@ -67,6 +71,7 @@ export class TeamTaskBoard {
         revision: 1,
         subject: requiredText(request.subject, 'subject', 200),
         description: requiredText(request.description, 'description', 16_384),
+        ...(request.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384) }),
         status: 'pending',
         blockedBy: this.dependencies(request.blockedBy ?? [], state),
         writeScopes: this.writeScopes(request.writeScopes ?? []),
@@ -74,6 +79,54 @@ export class TeamTaskBoard {
       this.assertTaskGraph(state, task)
       await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
       return this.taskView(root, state, task)
+    })
+  }
+
+  /**
+   * Host-only workflow admission. `admissionKey` becomes the durable Team task
+   * identity in the same flushed event as the task, so replay cannot create a
+   * second task after a crash between host return and caller acknowledgement.
+   */
+  async createPinned(membership: TeamMembership, request: CreatePinnedTeamTaskRequest): Promise<TeamTaskView> {
+    const { root } = membership
+    if (membership.role !== 'lead') throw new TeamError('Pinned task admission requires a Lead', 'TEAM_LEAD_ONLY')
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(request.admissionKey)) throw new TeamError('Pinned task admission key is invalid', 'TEAM_INVALID_ARGUMENT')
+    const taskId = TeamTaskId(`workflow-${request.admissionKey}`)
+    const subject = requiredText(request.subject, 'subject', 200)
+    const description = requiredText(request.description, 'description', 16_384)
+    const nonCodeCriteria = requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384)
+    return this.journal.transact(root.id, async () => {
+      const state = this.journal.state(root)
+      const existing = state.tasks.find(task => task.id === taskId)
+      if (existing) {
+        if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria
+          || existing.blockedBy.length !== 0 || existing.writeScopes.length !== 0) throw new TeamError('Pinned task replay has different immutable inputs', 'TEAM_INVALID_ARGUMENT')
+        return this.taskView(root, state, existing)
+      }
+      const active = state.tasks.filter(task => task.status !== 'deleted').length
+      if (active >= this.maxTasks) throw new TeamError(`Team task limit ${this.maxTasks} reached`, 'TEAM_TASK_LIMIT')
+      const task: TeamTaskSnapshot = { id: taskId, revision: 1, subject, description, nonCodeCriteria, status: 'pending', blockedBy: [], writeScopes: [] }
+      this.assertTaskGraph(state, task)
+      await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
+      return this.taskView(root, state, task)
+    })
+  }
+
+  /** Accept a coordinator-reviewed report only while its durable intent remains authorized. */
+  async acceptReported(membership: TeamMembership, request: ReportedTaskAcceptance): Promise<TeamTaskView> {
+    const { root } = membership
+    if (membership.role !== 'lead') throw new TeamError('Report acceptance requires a Lead', 'TEAM_LEAD_ONLY')
+    return this.journal.transact(root.id, async () => {
+      if (!this.validateReportAcceptance(root, request)) throw new TeamError('No coordinator grant for this report acceptance', 'TEAM_MANAGED_TASK')
+      const state = this.journal.state(root)
+      const task = state.tasks.find(task => task.id === request.taskId)
+      if (!task || task.nonCodeCriteria === undefined) throw new TeamError('Task does not accept a non-code report', 'TEAM_TASK_INVALID_TRANSITION')
+      const result = JSON.stringify({ reportId: request.reportId })
+      if (task.status === 'completed' && task.result === result) return this.taskView(root, state, task)
+      if (task.revision !== request.expectedRevision || task.status !== 'pending' || task.ownerId !== undefined || !this.taskReady(state, task)) throw new TeamError('Task changed or prerequisites remain unaccepted', 'TEAM_TASK_INVALID_TRANSITION')
+      const accepted: TeamTaskSnapshot = { ...task, revision: task.revision + 1, status: 'completed', result: requiredText(result, 'report receipt', this.maxResultLength) }
+      await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task: accepted })
+      return this.taskView(root, this.journal.state(root), accepted)
     })
   }
 
@@ -86,6 +139,7 @@ export class TeamTaskBoard {
       const state = this.journal.state(root)
       const task = state.tasks.find(task => task.id === request.taskId)
       const job = state.integrations.find(job => job.id === request.integrationId)
+      if (task?.nonCodeCriteria !== undefined) throw new TeamError('Task requires audited report acceptance', 'TEAM_TASK_INVALID_TRANSITION')
       if (!task || !job || job.phase !== 'merged' || !job.candidateCommit || !job.targetCommit) throw new TeamError('Task acceptance requires a verified merged integration', 'TEAM_INTEGRATION_CONFLICT')
       const result = JSON.stringify({ submissionId: request.submissionId, integrationId: job.id, sourceCommit: job.sourceCommit,
         candidateCommit: job.candidateCommit, targetCommit: job.targetCommit })
@@ -330,6 +384,7 @@ export class TeamTaskBoard {
       revision: task.revision,
       subject: task.subject,
       description: task.description,
+      ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }),
       status: task.status,
       blockedBy: structuredClone(task.blockedBy),
       writeScopes: structuredClone(task.writeScopes),

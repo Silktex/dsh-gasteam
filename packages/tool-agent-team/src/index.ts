@@ -87,6 +87,7 @@ const TASK_VIEW_SCHEMA = {
     revision: { type: 'integer', required: true },
     subject: { type: 'string', required: true },
     description: { type: 'string', required: true },
+    nonCodeCriteria: { type: 'string' },
     status: { type: 'string', required: true, enum: ['pending', 'in_progress', 'completed', 'deleted'] },
     ownerName: { type: 'string' },
     blockedBy: { type: 'array', required: true, items: { type: 'string' } },
@@ -469,10 +470,11 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
 
     register(scoped.tools.register(defineTool({
       name: 'team_task_create',
-      description: 'Create one unowned pending task on the shared Team task board.',
+      description: 'Create one unowned pending task. A Lead may set non-code criteria to require an audited report instead of Git integration.',
       parameters: {
         subject: { type: 'string', required: true, description: 'Concise task title.' },
         description: { type: 'string', required: true, description: 'Complete task details and acceptance criteria.' },
+        non_code_criteria: { type: 'string', description: 'Immutable explicit acceptance criteria for report-only non-code work. Lead only.' },
         blocked_by: { type: 'array', items: { type: 'string' }, description: 'Task ids that must complete first.' },
         write_scopes: {
           type: 'array',
@@ -485,6 +487,7 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
         return await ctx.agentTeams.createTask(callingAgent(exec.agent, 'team_task_create'), {
           subject: args.subject,
           description: args.description,
+          ...args.non_code_criteria === undefined ? {} : { nonCodeCriteria: args.non_code_criteria },
           ...args.blocked_by === undefined ? {} : { blockedBy: args.blocked_by.map(TeamTaskId) },
           ...args.write_scopes === undefined ? {} : { writeScopes: args.write_scopes },
         })

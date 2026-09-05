@@ -97,6 +97,60 @@ it.each(['task-receipt', 'promotion', 'ambiguous-promotion'] as const)('reconcil
   }
 }, 30_000)
 
+it.each(['report-intent', 'report-receipt'] as const)('replays non-code %s across a SIGKILL without another worker', async (boundary) => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-report-crash-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed-report', directory)
+    processes.push(seed)
+    await seed.barrier()
+    await seed.stop(true)
+    processes.pop()
+    const crashed = processFixture(boundary === 'report-intent' ? 'restore-report-intent-crash' : 'restore-report-receipt-crash', directory)
+    processes.push(crashed)
+    const persisted = await crashed.barrier<{ barrier: string; reports: { phase: string }[]; tasks: { status: string; revision: number }[]; attempts: { attemptId: string }[] }>()
+    expect(persisted.barrier).toBe(boundary)
+    expect(persisted.reports).toEqual([expect.objectContaining({ phase: 'pending' })])
+    expect(persisted.tasks[0]).toMatchObject({ status: boundary === 'report-intent' ? 'pending' : 'completed', revision: boundary === 'report-intent' ? 1 : 2 })
+    await crashed.stop(true)
+    processes.pop()
+    const replay = processFixture('restore-report', directory)
+    processes.push(replay)
+    const restored = await replay.barrier<{ barrier: string; reports: { phase: string; attemptId: string }[]; tasks: { status: string; revision: number }[]; attempts: { attemptId: string }[] }>()
+    expect(restored.barrier).toBe('report-replayed')
+    expect(restored.reports).toEqual([expect.objectContaining({ phase: 'accepted', attemptId: persisted.attempts[0]!.attemptId })])
+    expect(restored.tasks).toEqual([expect.objectContaining({ status: 'completed', revision: 2 })])
+    expect(restored.attempts).toHaveLength(1)
+  } finally {
+    try { for (const process of processes.reverse()) await process.stop() }
+    finally { await rm(directory, { recursive: true, force: true }) }
+  }
+}, 30_000)
+
+it('replays report-workflow task admission after SIGKILL without duplicate task or worker', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-workflow-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const crashed = processFixture('seed-workflow-crash', directory)
+    processes.push(crashed)
+    const sideEffect = await crashed.barrier<{ barrier: string; task: { id: string }; workflows: unknown[] }>()
+    expect(sideEffect.barrier).toBe('workflow-task-side-effect')
+    await crashed.stop(true)
+    processes.pop()
+    const restored = processFixture('restore-workflow', directory)
+    processes.push(restored)
+    const replay = await restored.barrier<{ barrier: string; workflows: { executionId: string; steps: { stepId: string; taskId?: string; phase: string }[] }[]; tasks: { id: string }[]; attempts: { taskId: string; generation: number }[] }>()
+    expect(replay.barrier).toBe('workflow-replayed')
+    const workflow = replay.workflows.find(value => value.executionId === 'workflow-process-crash')!
+    expect(workflow.steps[0]).toMatchObject({ stepId: 'investigate', taskId: sideEffect.task.id, phase: 'running' })
+    expect(replay.tasks.filter(task => task.id === sideEffect.task.id)).toHaveLength(1)
+    expect(replay.attempts.filter(attempt => attempt.taskId === sideEffect.task.id)).toEqual([expect.objectContaining({ generation: 1 })])
+  } finally {
+    try { for (const process of processes.reverse()) await process.stop() }
+    finally { await rm(directory, { recursive: true, force: true }) }
+  }
+}, 30_000)
+
 it('completes a persisted diamond DAG on the built coordinator timer without browser or dispatch calls', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-dag-process-'))
   const processes: ReturnType<typeof processFixture>[] = []

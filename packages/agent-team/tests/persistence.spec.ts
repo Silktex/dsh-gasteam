@@ -206,16 +206,22 @@ for (const backend of backends) {
         expect(failedMember?.phase).toBe('failed')
         expect(failedMember?.error).toContain('child Session recovery failed')
       }, { timeout: 5_000 })
-
       const receipt = await second.ctx.agentTeams.sendMessage(activeHandle.agent, {
         target: 'recoverable',
         content: [{ type: 'text', text: 'resume after reconciliation' }],
         delivery: 'wakeup',
         signal: SIGNAL,
       })
-      expect(receipt.status).toBe('accepted')
+      // Startup mailbox recovery may already own this message's dispatch when
+      // sendMessage observes it. In that case the durable enqueue is returned
+      // as queued; the receiver receipt below is the authoritative outcome.
+      expect(['accepted', 'queued']).toContain(receipt.status)
       await vi.waitFor(() => { expect(second.ctx.agents.get(childId)).toBeUndefined() }, { timeout: 5_000 })
       await vi.waitFor(() => { expect(durable(activeHandle.agent).pendingMessages).toEqual([]) })
+      const childEvents = (await second.ctx.sessionPersistence.inspect(childId, SIGNAL)).events
+      const receipts = childEvents.filter(event => event.type === 'user/message'
+        && event.data.source.kind === 'team-message' && event.data.source.messageId === receipt.messageId)
+      expect(receipts).toHaveLength(1)
 
       await activeHandle.dispose()
       await failedHandle.dispose()

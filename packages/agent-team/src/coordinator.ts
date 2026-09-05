@@ -11,6 +11,7 @@ import { DurableJournal } from './durable-journal.ts'
 import { ProjectCatalog } from './projects.ts'
 import type { ProjectRecord, RegisterProjectRequest } from './projects.ts'
 import { teamProjectionDefinition } from './projection.ts'
+import { TeamTaskId } from './types.ts'
 import type { CreateTeamTaskRequest, TeamTaskSnapshot, TeamTaskView } from './types.ts'
 import type {} from './index.ts'
 import { CoordinatorExecution, executionConfigSchema } from './coordinator-execution.ts'
@@ -18,8 +19,14 @@ import type { ExecutionConfig, ExecutionBlock, DispatchStatus } from './coordina
 import { schedulingQuerySchema, schedulingControlSchema } from './scheduling-schemas.ts'
 import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
 import type { SubmitRequest, SubmissionRecord } from './submissions.ts'
+import { reviewReportsRequestSchema } from './reports.ts'
+import type { AcceptReportRequest, ReportAcceptanceRecord, ReviewableReport } from './reports.ts'
 import type { DispatchRequest } from './dispatch-queue.ts'
 import type { AttemptRecord } from './assignments.ts'
+import { WorkflowStore } from './workflows.ts'
+import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime.ts'
+import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
+import { investigationReportTemplate } from './workflow-templates.ts'
 
 export type CoordinatorId = Branded<'CoordinatorId'>
 declare module '@deepseek-ai/cordis' {
@@ -65,7 +72,7 @@ export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
 export const Config: schema<Config> = schema.object({
   directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000),
-  execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
+  execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
 })
 
 /** Opt-in server lifecycle: startup is awaited before service publication; scans do not overlap. */
@@ -98,11 +105,15 @@ export interface CoordinatorView {
   readonly id: CoordinatorId
   readonly projects: CoordinatorProjectView[]
   readonly submissions: SubmissionRecord[]
+  readonly reports: ReportAcceptanceRecord[]
+  /** Coordinator-visible intent/outcome diagnostics; no model/RPC retention controls yet. */
+  readonly candidateRetention: import('./candidate-retention.ts').CandidateRetentionRecord[]
   readonly attempts: AttemptRecord[]
   readonly executionBlocks: ExecutionBlock[]
   readonly dispatchRequests: DispatchRequest[]
   readonly dispatchStatus: DispatchStatus[]
   readonly readyTasks: { projectId: string; teamId: string; taskId: string }[]
+  readonly workflows: WorkflowRuntimeView[]
 }
 
 /** Owns the complete workspace while its coordinator journal remains open. No fabricated Agent authority. */
@@ -112,6 +123,8 @@ export class WorkspaceCoordinator {
   private readonly controller = new AbortController()
   private projects: CoordinatorProjectView[] = []
   private execution: CoordinatorExecution | undefined
+  private workflowStore: WorkflowStore | undefined
+  private workflows: WorkflowRuntime | undefined
 
   private constructor(
     private readonly ctx: Context,
@@ -128,6 +141,8 @@ export class WorkspaceCoordinator {
     }, reduce)
     let catalog: ProjectCatalog | undefined
     let execution: CoordinatorExecution | undefined
+    let workflowStore: WorkflowStore | undefined
+    let workflows: WorkflowRuntime | undefined
     try {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
       catalog = await ProjectCatalog.open(config.directory)
@@ -135,9 +150,17 @@ export class WorkspaceCoordinator {
       const ownedCatalog = catalog
       execution = await CoordinatorExecution.open(ctx, config.directory, config.execution, () => ownedCatalog.list())
       coordinator.execution = execution
+      workflowStore = await WorkflowStore.open(config.directory)
+      workflows = await WorkflowRuntime.open(config.directory, workflowStore, execution.reportStore(), {
+        createPinnedTask: async intent => await execution!.createPinnedWorkflowTask(intent),
+      }, [investigationReportTemplate])
+      coordinator.workflowStore = workflowStore
+      coordinator.workflows = workflows
       await coordinator.reconcile()
       return coordinator
     } catch (error) {
+      await workflows?.close()
+      await workflowStore?.close()
       await execution?.close()
       try { await catalog?.close() } finally { await journal.close() }
       throw error
@@ -168,6 +191,39 @@ export class WorkspaceCoordinator {
     })
   }
 
+  /** Create the only supported non-code workflow under the caller's registered Lead project. */
+  createWorkflow(caller: Agent, request: CreateWorkflowRequest): Promise<WorkflowRuntimeView> {
+    const snapshot = createWorkflowRequestSchema.parse(structuredClone(request))
+    return this.run(async () => {
+      const project = this.authorize(caller, snapshot.projectId)
+      if (snapshot.teamId !== caller.id) throw new Error('Workflow team must be the registered calling Lead')
+      if (!this.workflows) throw new Error('Workflow runtime is unavailable')
+      const created = await this.workflows.create(snapshot, project)
+      await this.scan()
+      return this.workflows.inspect(created.executionId)!
+    })
+  }
+
+  /** Inspect a workflow only through its owning registered Lead project grant. */
+  inspectWorkflow(caller: Agent, executionId: string): WorkflowRuntimeView {
+    const workflow = this.workflows?.inspect(executionId)
+    if (!workflow) throw new Error('Workflow execution is missing')
+    this.authorize(caller, workflow.projectId)
+    if (workflow.teamId !== caller.id) throw new Error('Workflow is owned by a different Lead')
+    return workflow
+  }
+
+  /** Resume durable workflow task admission after a process restart or transient host failure. */
+  resumeWorkflow(caller: Agent, executionId: string): Promise<WorkflowRuntimeView | undefined> {
+    return this.run(async () => {
+      const workflow = this.inspectWorkflow(caller, executionId)
+      const project = this.authorize(caller, workflow.projectId)
+      const resumed = await this.workflows!.resume(executionId, project)
+      await this.scan()
+      return resumed === undefined ? undefined : this.workflows!.inspect(executionId)!
+    })
+  }
+
   pause(caller: Agent, projectId: string, expectedRevision: number, paused: boolean): Promise<Control> {
     return this.run(async () => {
       this.authorize(caller, projectId)
@@ -194,6 +250,39 @@ export class WorkspaceCoordinator {
     })
   }
 
+  /** The registered exact Lead records a rationale, then atomically drives the report receipt. */
+  acceptReport(caller: Agent, projectId: string, request: AcceptReportRequest): Promise<ReportAcceptanceRecord> {
+    const snapshot = structuredClone(request)
+    return this.run(async () => {
+      const project = this.authorize(caller, projectId)
+      if (!this.execution) throw new Error('Coordinator execution is unavailable')
+      const accepted = await this.execution.acceptReport(caller, project, snapshot)
+      await this.scan()
+      return accepted
+    })
+  }
+
+  /** Read report evidence only through the registered Lead's project grant. */
+  reviewReports(caller: Agent, projectId: string): ReviewableReport[] {
+    const query = reviewReportsRequestSchema.parse({ projectId })
+    this.authorize(caller, query.projectId)
+    const view = this.view()
+    const accepted = view.reports.filter(report => report.projectId === query.projectId && report.teamId === caller.id)
+    const recordedAttempts = new Set(accepted.map(report => report.attemptId))
+    const queued = view.attempts.flatMap((attempt): ReviewableReport[] => {
+      if (attempt.projectId !== query.projectId || attempt.teamId !== caller.id || recordedAttempts.has(attempt.attemptId)
+        || attempt.phase !== 'terminal' || attempt.stopEvidence?.kind !== 'stopped' || attempt.stopReason || !attempt.result) return []
+      if (view.attempts.findLast(candidate => candidate.projectId === attempt.projectId && candidate.teamId === attempt.teamId && candidate.taskId === attempt.taskId)?.attemptId !== attempt.attemptId) return []
+      if (view.dispatchRequests.some(request => request.projectId === attempt.projectId && request.teamId === attempt.teamId && request.taskId === attempt.taskId && request.cancelReason !== undefined)) return []
+      const task = this.ctx.agentTeams.getTask(caller, TeamTaskId(attempt.taskId))
+      if (task.nonCodeCriteria === undefined || task.status !== 'pending') return []
+      return [{ projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, attemptId: attempt.attemptId,
+        generation: attempt.generation, expectedRevision: attempt.revision, expectedTaskRevision: task.revision,
+        report: attempt.result, criteria: task.nonCodeCriteria, phase: 'awaiting-review' }]
+    })
+    return structuredClone([...queued, ...accepted])
+  }
+
   scheduling(caller: Agent, request: SchedulingQuery): SchedulingView {
     const { projectId } = schedulingQuerySchema.parse(request)
     this.authorize(caller, projectId)
@@ -218,10 +307,11 @@ export class WorkspaceCoordinator {
   reconcile(): Promise<void> { return this.run(() => this.scan()) }
 
   view(): CoordinatorView {
-    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [] }
+    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [], reports: [], candidateRetention: [] }
     return structuredClone({
       ...execution,
       id: this.journal.snapshot().id!, projects: this.projects,
+      workflows: this.workflowViews(),
       // Dependency acceptance is added by the scheduler/integration slices. No dependent work is prematurely eligible.
       readyTasks: this.projects.flatMap(project => project.paused ? [] : project.teams.flatMap(team =>
         team.status !== 'available' ? [] : team.tasks.filter(task => task.status === 'pending' && task.blockedBy.every(id => team.tasks.find(task => task.id === id)?.status === 'completed')
@@ -235,6 +325,8 @@ export class WorkspaceCoordinator {
     if (this.closing !== undefined) return this.closing
     this.controller.abort(new Error('Coordinator is closing'))
     return this.closing = this.pending.then(async () => {
+      await this.workflows?.close()
+      await this.workflowStore?.close()
       await this.execution?.close()
       try { await this.catalog.close() } finally { await this.journal.close() }
     }).catch((error: unknown) => {
@@ -293,5 +385,52 @@ export class WorkspaceCoordinator {
     }
     this.projects = projects
     await this.execution?.scan(projects)
+    let workflowTaskCreated = false
+    for (const project of projects) if (!project.paused) {
+      const dispatched = await this.workflows?.scan(project.project)
+      workflowTaskCreated ||= (dispatched?.length ?? 0) > 0
+    }
+    // Workflow task admission changes the Lead log after the first projection.
+    // Re-read it and let the ordinary coordinator queue reserve the fresh step attempt.
+    if (workflowTaskCreated) {
+      await this.refreshProjects()
+      await this.execution?.scan(this.projects)
+    }
+  }
+
+  private workflowViews(): WorkflowRuntimeView[] {
+    if (!this.workflows) return []
+    return this.workflowStore!.list().flatMap(execution => {
+      const workflow = this.workflows!.inspect(execution.id)
+      return workflow ? [workflow] : []
+    })
+  }
+
+  private async refreshProjects(): Promise<void> {
+    const projects: CoordinatorProjectView[] = []
+    for (const project of this.catalog.list()) {
+      const control = this.journal.snapshot().controls.find(value => value.projectId === project.id)
+      const teams: CoordinatorTeamView[] = []
+      for (const teamId of project.teamIds) {
+        this.controller.signal.throwIfAborted()
+        let tasks: TeamTaskSnapshot[] = []
+        let reconciliation: Reconciliation = { projectId: project.id, teamId, status: 'available', diagnostic: '' }
+        try {
+          const stored = await this.ctx.sessionPersistence.inspect(SessionId(teamId), this.controller.signal)
+          let state = teamProjectionDefinition.init(stored.meta)
+          for (const event of stored.events) state = teamProjectionDefinition.apply(state, event)
+          if (state.failure !== undefined) throw new Error(state.failure)
+          tasks = state.tasks.filter(task => task.status !== 'deleted')
+        } catch (error) {
+          this.controller.signal.throwIfAborted()
+          reconciliation = { ...reconciliation, status: 'unavailable', diagnostic: (error instanceof Error ? error.message : String(error)).slice(0, 16_384) }
+        }
+        const prior = this.journal.snapshot().reconciliations.find(value => value.projectId === project.id && value.teamId === teamId)
+        if (prior?.status !== reconciliation.status || prior.diagnostic !== reconciliation.diagnostic) await this.journal.append(() => ({ type: 'team/reconciliation', reconciliation }))
+        teams.push({ ...reconciliation, tasks })
+      }
+      projects.push({ project, paused: control?.paused ?? false, controlRevision: control?.revision ?? 0, teams })
+    }
+    this.projects = projects
   }
 }

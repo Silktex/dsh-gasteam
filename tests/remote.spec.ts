@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { descriptors } from '../packages/agent-team/src/remote-descriptors.ts'
-import { createTaskSchema, updateTaskSchema, teamViewSchema, taskResultSchema } from '../packages/agent-team/src/remote-schemas.ts'
+import {
+  createTaskSchema,
+  updateTaskSchema,
+  teamViewSchema,
+  taskResultSchema,
+  remoteAcceptReportRequestSchema,
+  reviewableReportSchema,
+  reviewableReportsSchema,
+  createWorkflowSchema,
+  workflowQuerySchema,
+  workflowViewSchema,
+} from '../packages/agent-team/src/remote-schemas.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from '../packages/agent-team/src/scheduling-schemas.ts'
 import { TYPERT } from '../packages/agent-team/src/typert.ts'
 import { TYPERT_REMOTE } from '../packages/agent-team/src/remote.ts'
@@ -12,11 +23,25 @@ describe('Team RPC codecs', () => {
       .toEqual([
         ['scheduling', 'remoteScheduling', ['agentId', 'request']],
         ['controlScheduling', 'remoteControlScheduling', ['agentId', 'request']],
+        ['reviewReports', 'remoteReviewReports', ['agentId', 'request']],
+        ['acceptReport', 'remoteAcceptReport', ['agentId', 'request']],
         ['createTask', 'remoteCreateTask', ['agentId', 'request']],
         ['updateTask', 'remoteUpdateTask', ['agentId', 'request']],
+        ['createWorkflow', 'remoteCreateWorkflow', ['agentId', 'request']],
+        ['inspectWorkflow', 'remoteInspectWorkflow', ['agentId', 'request']],
+        ['resumeWorkflow', 'remoteResumeWorkflow', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],
       ])
     expect(descriptors.every(value => value.parameters[0]?.source === 'lookup')).toBe(true)
+  })
+
+  it('validates scoped investigation workflow controls', () => {
+    const request = { projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1, parameters: { question: 'Why?' } }
+    expect(createWorkflowSchema.parse(request)).toEqual(request)
+    expect(() => createWorkflowSchema.parse({ ...request, templateVersion: 0 })).toThrow()
+    expect(workflowQuerySchema.parse({ executionId: 'workflow-1' })).toEqual({ executionId: 'workflow-1' })
+    expect(workflowViewSchema.parse({ executionId: 'workflow-1', projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1,
+      steps: [{ stepId: 'investigate', phase: 'running', taskId: 'workflow-intent' }] })).toMatchObject({ executionId: 'workflow-1' })
   })
 
   it('validates scheduling controls and preserves typed blocker responses', () => {
@@ -35,6 +60,29 @@ describe('Team RPC codecs', () => {
     expect(updateTaskSchema.parse({ taskId: 'task-1', expectedRevision: 1, action: 'complete', result: 'Tests passed' }).action).toBe('complete')
     expect(() => updateTaskSchema.parse({ taskId: 'task-1', action: 'complete' })).toThrow()
     expect(() => updateTaskSchema.parse({ taskId: 'task-1', expectedRevision: 1, action: 'invented' })).toThrow()
+  })
+
+  it('round-trips terminal reports and rejects malformed acceptance requests', () => {
+    const report = {
+      projectId: 'project', teamId: 'team', taskId: 'task', attemptId: 'attempt',
+      generation: 2, expectedRevision: 7, expectedTaskRevision: 3,
+      report: 'The worker completed the requested change.',
+      criteria: 'State the observed evidence and verification.', phase: 'awaiting-review' as const,
+    }
+    expect(reviewableReportSchema.parse(report)).toEqual(report)
+    expect(reviewableReportsSchema.parse([report])).toEqual([report])
+
+    const request = {
+      projectId: 'project', attemptId: 'attempt', generation: 2,
+      expectedRevision: 7, expectedTaskRevision: 3,
+      rationale: 'The report satisfies the stated criteria.',
+    }
+    expect(remoteAcceptReportRequestSchema.parse(request)).toEqual(request)
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, rationale: '   ' })).toThrow()
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, expectedRevision: 0 })).toThrow()
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, expectedTaskRevision: -1 })).toThrow()
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, expectedTaskRevision: undefined })).toThrow()
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, stale: true })).toThrow()
   })
 
   it('preserves batch and integration fields and rejects incomplete views', () => {

@@ -26,8 +26,10 @@ class FixtureSessionQuery extends SessionQueryEngine {
 }
 
 const [mode, directory] = process.argv.slice(2)
-if (!directory || !['seed', 'seed-repair', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-worker-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
+if (!directory || !['seed', 'seed-repair', 'seed-report', 'seed-workflow-crash', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-workflow', 'restore-worker-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'restore-report-intent-crash', 'restore-report-receipt-crash', 'restore-report', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
 const repairMode = mode.includes('repair')
+const reportMode = mode.includes('report')
+const workflowMode = mode.includes('workflow')
 const verification = [{ command: process.execPath, args: repairMode ? ['-e', "if(!require('node:fs').existsSync('repaired.txt'))process.exit(1)"] : ['--version'] }]
 const acceptanceMode = mode === 'restore-repair-crash' || mode === 'restore-repair' || mode === 'restore-stale-target' || mode === 'restore-worker-recovery' || mode === 'restore-ambiguous-promotion' || mode === 'restore-promotion-crash' || mode === 'restore-acceptance-crash' || mode === 'restore-acceptance' || mode === 'restore-dag'
 const ctx = new Context()
@@ -46,8 +48,8 @@ try {
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentService)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
-  await ctx.plugin(TeamService, acceptanceMode ? { worktreeProvider: 'git', integrationProvider: 'git' } : (mode === 'restore-execution' || mode === 'restore-worker-crash') ? { worktreeProvider: 'git' } : {})
-  if (mode === 'restore-execution' || mode === 'restore-worker-crash' || acceptanceMode) await ctx.plugin(GitWorktrees, { directory: join(directory, 'workers') })
+  await ctx.plugin(TeamService, acceptanceMode ? { worktreeProvider: 'git', integrationProvider: 'git' } : (mode === 'restore-execution' || mode === 'restore-worker-crash' || reportMode || workflowMode) ? { worktreeProvider: 'git' } : {})
+  if (mode === 'restore-execution' || mode === 'restore-worker-crash' || acceptanceMode || reportMode || workflowMode) await ctx.plugin(GitWorktrees, { directory: join(directory, 'workers') })
   if (mode === 'integration-owner') {
     let error
     try { integrationRelease = await acquireIntegrationOwnership(join(directory, 'repository'), 'main', new AbortController().signal) }
@@ -87,7 +89,7 @@ try {
             && block.text.includes(`"assignmentId":"${records[0].assignmentId}"`))).length,
         pid: process.pid })
     }
-  } else if (mode === 'seed-repair' || mode === 'seed' || mode === 'seed-paused' || mode === 'seed-dag') {
+  } else if (mode === 'seed-repair' || mode === 'seed-report' || mode === 'seed-workflow-crash' || mode === 'seed' || mode === 'seed-paused' || mode === 'seed-dag') {
     const lead = ctx.agentLoop.create(rootId, { provider: 'mock', model: 'mock' }, { cwd: join(directory, 'repository') })
     const repository = join(directory, 'repository')
     await mkdir(repository)
@@ -99,15 +101,28 @@ try {
     await writeFile(join(repository, 'initial.txt'), 'fixture\n')
     await git('add', 'initial.txt')
     await git('commit', '-m', 'fixture')
-    await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 60_000 })
+    await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 60_000,
+      ...(workflowMode ? { execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } } : {}) })
     coordinator = ctx.workspaceCoordinator
     await coordinator.register(lead, {
       id: 'fixture', repository, targetBranch: 'main', teamIds: [rootId], capacity: 2,
       verification: { revision: 1, commands: verification },
     })
-    const task = await coordinator.acceptTask(lead, 'fixture', {
-      subject: 'Resume without a browser', description: 'Accepted ready work must be found on startup.',
-    })
+    if (mode === 'seed-workflow-crash') {
+      ctx.llm.registerAdapter(['mock'], progressAdapter().adapter)
+      const createPinned = ctx.agentTeams.createPinnedTask.bind(ctx.agentTeams)
+      ctx.agentTeams.createPinnedTask = async (...args) => {
+        const task = await createPinned(...args)
+        await send({ barrier: 'workflow-task-side-effect', task, workflows: coordinator.view().workflows, attempts: coordinator.view().attempts })
+        await new Promise(() => {})
+      }
+      await coordinator.createWorkflow(lead, { projectId: 'fixture', teamId: rootId, templateId: 'investigation-report', templateVersion: 1,
+        parameters: { question: 'Why did restart preserve this workflow?' }, executionId: 'workflow-process-crash' })
+      throw new Error('Workflow crash fixture unexpectedly returned')
+    }
+    const task = await coordinator.acceptTask(lead, 'fixture', mode === 'seed-report'
+      ? { subject: 'Durable report', description: 'Record an evidence-backed finding.', nonCodeCriteria: 'State the observed evidence.' }
+      : { subject: 'Resume without a browser', description: 'Accepted ready work must be found on startup.' })
     if (mode === 'seed-dag') {
       const left = await coordinator.acceptTask(lead, 'fixture', { subject: 'Left', description: 'Left branch artifact', blockedBy: [task.id] })
       const right = await coordinator.acceptTask(lead, 'fixture', { subject: 'Right', description: 'Right branch artifact', blockedBy: [task.id] })
@@ -116,6 +131,64 @@ try {
     if (mode === 'seed-paused') await coordinator.pause(lead, 'fixture', 0, true)
     await ctx.sessions.flush(lead.session)
     await send({ barrier: 'persisted', rootId, taskId: task.id, pid: process.pid, coordinatorId: coordinator.view().id })
+  } else if (mode === 'restore-workflow') {
+    ctx.llm.registerAdapter(['mock'], progressAdapter().adapter)
+    await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 25,
+      execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
+    coordinator = ctx.workspaceCoordinator
+    await new Promise(resolve => {
+      const timer = setInterval(() => {
+        const workflow = coordinator.view().workflows.find(value => value.executionId === 'workflow-process-crash')
+        if (!workflow?.steps[0]?.taskId || !coordinator.view().attempts.some(attempt => attempt.taskId === workflow.steps[0].taskId)) return
+        clearInterval(timer); resolve()
+      }, 20)
+    })
+    await send({ barrier: 'workflow-replayed', workflows: coordinator.view().workflows, tasks: ctx.agentTeams.listTasks(ctx.agents.get(rootId)), attempts: coordinator.view().attempts })
+  } else if (reportMode) {
+    const { adapter } = progressAdapter()
+    adapter.stream = async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Observed evidence from the isolated worker.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Observed evidence from the isolated worker.' } }
+      yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    ctx.llm.registerAdapter(['mock'], adapter)
+    await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 25,
+      execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
+    coordinator = ctx.workspaceCoordinator
+    const lead = ctx.agents.get(rootId)
+    if (!lead) throw new Error('Coordinator did not restore the registered Lead')
+    if (mode === 'restore-report') {
+      await new Promise(resolve => {
+        const timer = setInterval(() => {
+          if (coordinator.view().reports[0]?.phase === 'accepted') { clearInterval(timer); resolve() }
+        }, 20)
+      })
+      await send({ barrier: 'report-replayed', reports: coordinator.view().reports, tasks: ctx.agentTeams.listTasks(lead), attempts: coordinator.view().attempts })
+    } else {
+      await new Promise(resolve => {
+        const timer = setInterval(() => {
+          const attempt = coordinator.view().attempts[0]
+          if (!attempt || attempt.phase !== 'terminal' || !attempt.result) return
+          clearInterval(timer)
+          const request = { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision,
+            expectedTaskRevision: ctx.agentTeams.getTask(lead, attempt.taskId).revision, rationale: 'The report states the observed evidence.' }
+          const accept = ctx.agentTeams.acceptReportedTask.bind(ctx.agentTeams)
+          ctx.agentTeams.acceptReportedTask = async (...args) => {
+            if (mode === 'restore-report-intent-crash') {
+              await send({ barrier: 'report-intent', reports: coordinator.view().reports, tasks: ctx.agentTeams.listTasks(lead), attempts: coordinator.view().attempts })
+              await new Promise(() => {})
+            }
+            const task = await accept(...args)
+            await send({ barrier: 'report-receipt', reports: coordinator.view().reports, tasks: [task], attempts: coordinator.view().attempts })
+            await new Promise(() => {})
+          }
+          void coordinator.acceptReport(lead, 'fixture', request)
+        }, 20)
+      })
+      await new Promise(() => {})
+    }
   } else if (acceptanceMode) {
     const repository = join(directory, 'repository')
     const git = (...args) => execa('git', args, { cwd: repository })

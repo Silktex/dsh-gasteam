@@ -15,7 +15,7 @@ const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const text = z.string().trim().min(1).max(16_384)
 const checkpointSchema = z.object({
-  task: z.object({ subject: text, description: text }).strict(),
+  task: z.object({ subject: text, description: text, nonCodeCriteria: text.optional() }).strict(),
   workflowId: id.optional(), step: text,
   artifacts: z.array(z.object({ kind: z.enum(['commit', 'file', 'report']), ref: text }).strict()).max(256),
   nextAction: text,

@@ -89,6 +89,7 @@ const teamTaskSnapshotSchema = z.object({
   revision: positiveSafeInteger,
   subject: z.string(),
   description: z.string(),
+  nonCodeCriteria: z.string().min(1).refine(value => value.trim().length > 0).optional(),
   status: z.enum(['pending', 'in_progress', 'completed', 'deleted']),
   ownerId: sessionIdSchema.optional(),
   blockedBy: z.array(teamTaskIdSchema),
@@ -427,6 +428,9 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       }
       if (prior !== undefined && task.revision !== prior.revision + 1) {
         throw new Error(`team task "${task.id}" revision is not contiguous`)
+      }
+      if (prior !== undefined && prior.nonCodeCriteria !== task.nonCodeCriteria) {
+        throw new Error(`team task "${task.id}" changed immutable non-code criteria`)
       }
       if (task.status === 'completed' && task.result === undefined) {
         throw new Error(`completed team task "${task.id}" has no result evidence`)

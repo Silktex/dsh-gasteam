@@ -20,3 +20,5 @@ export type {
 } from './types.ts'
 
 export type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
+export type { AcceptReportRequest, RemoteAcceptReportRequest, ReportAcceptanceRecord, ReviewReportsRequest, ReviewableReport } from './reports.ts'
+export type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'

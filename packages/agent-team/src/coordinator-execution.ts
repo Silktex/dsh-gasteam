@@ -12,21 +12,29 @@ import type { AttemptRecord } from './assignments.ts'
 import { runGit } from './git-command.ts'
 import { SubmissionStore, submitRequestSchema } from './submissions.ts'
 import type { SubmitRequest, SubmissionRecord } from './submissions.ts'
+import { ReportStore, acceptReportRequestSchema } from './reports.ts'
+import type { AcceptReportRequest, ReportAcceptanceRecord } from './reports.ts'
 import { TeamTaskId } from './types.ts'
 import type { TeamIntegrationAdmission, TeamIntegrationId } from './types.ts'
 import { DispatchQueue } from './dispatch-queue.ts'
 import type { DispatchRequest, DispatchWork } from './dispatch-queue.ts'
 import { DshAssignmentRuntime } from './dsh-assignment-runtime.ts'
 import { DurableJournal } from './durable-journal.ts'
+import { CandidateRetentionStore } from './candidate-retention.ts'
+import type { CandidateRetentionRecord } from './candidate-retention.ts'
+import { GitCandidateCleanup } from './git-candidate-cleanup.ts'
 import { TeamError } from './error.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
 import type {} from './index.ts'
+import type { WorkflowTaskCreateIntent } from './workflow-runtime.ts'
 
 export const executionConfigSchema = z.object({
   modelProvider: z.string().trim().min(1), model: z.string().trim().min(1),
   maxRepairAttempts: z.number().int().min(0).max(10).optional(),
   dispatchIntervalMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** Disabled unless explicitly set. The delay is pinned when a merged candidate is first observed. */
+  candidateRetention: z.object({ delayMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), commandTimeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(30_000) }).strict().optional(),
   maxConcurrent: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict()
 export type ExecutionConfig = z.input<typeof executionConfigSchema>
@@ -57,11 +65,13 @@ export class CoordinatorExecution {
 
   private constructor(
     private readonly ctx: Context,
-    private readonly config: ExecutionConfig | undefined,
+    private readonly config: z.output<typeof executionConfigSchema> | undefined,
     private readonly projects: () => ProjectRecord[],
     private readonly assignments: AssignmentStore,
     private readonly queue: DispatchQueue,
     private readonly submissions: SubmissionStore,
+    private readonly reports: ReportStore,
+    private readonly retention: CandidateRetentionStore,
     private readonly failures: DurableJournal<ExecutionBlock[], { type: 'work/blocked'; block: ExecutionBlock }>,
   ) {
     this.runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true)
@@ -83,6 +93,18 @@ export class CoordinatorExecution {
           && job.repository === submission.repository && job.targetBranch === submission.targetBranch
           && isDeepStrictEqual(job.verification, submission.verification.commands)
           && isDeepStrictEqual(project.verification, submission.verification)
+      },
+      reportAcceptance: (root, request) => {
+        const report = this.reports.list().find(record => record.id === request.reportId)
+        if (!report || report.teamId !== root.id || report.taskId !== request.taskId) return false
+        const project = this.projects().find(project => project.id === report.projectId && project.teamIds.includes(root.id))
+        const attempt = this.assignments.list().findLast(record => sameWork(record, report))
+        let task
+        try { task = this.ctx.agentTeams.getTask(root, TeamTaskId(report.taskId)) } catch { return false }
+        return project !== undefined && attempt?.attemptId === report.attemptId && attempt.generation === report.generation
+          && attempt.revision === report.expectedRevision && attempt.phase === 'terminal' && attempt.stopEvidence?.kind === 'stopped' && !attempt.stopReason && attempt.result === report.report
+          && task.nonCodeCriteria === report.criteria && (task.revision === report.expectedTaskRevision || (task.status === 'completed' && task.result === JSON.stringify({ reportId: report.id })))
+          && !this.queue.list().some(request => sameWork(request, report) && request.cancelReason !== undefined)
       },
       wake: (_root, targetId) => {
         const record = this.assignments.list().find(record => record.runtimeId === targetId)
@@ -108,16 +130,41 @@ export class CoordinatorExecution {
         const queue = await DispatchQueue.open(directory)
         try {
           const submissions = await SubmissionStore.open(directory)
-          return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, failures)
+          try {
+            const reports = await ReportStore.open(directory)
+            try {
+              let retention: CandidateRetentionStore | undefined
+              try {
+                retention = await CandidateRetentionStore.open(directory)
+                await retention.recoverInterrupted()
+                return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures)
+              } catch (error) { await retention?.close(); throw error }
+            } catch (error) { await reports.close(); throw error }
+          } catch (error) { await submissions.close(); throw error }
         } catch (error) { await queue.close(); throw error }
       } catch (error) { await failures.close(); throw error }
     } catch (error) { await assignments.close(); throw error }
   }
 
-  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[] } {
+  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[]; reports: ReportAcceptanceRecord[]; candidateRetention: CandidateRetentionRecord[] } {
     const now = Date.now()
-    return { submissions: this.submissions.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(),
+    return { submissions: this.submissions.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
       dispatchStatus: this.queue.list().map(request => this.status(request, views, now)) }
+  }
+
+  /** Shared read-only ReportStore handle; WorkspaceCoordinator owns the single writer lifecycle. */
+  reportStore(): ReportStore { return this.reports }
+
+  /** Materialize one workflow task through the Team log's stable host-only admission key. */
+  async createPinnedWorkflowTask(intent: WorkflowTaskCreateIntent): Promise<{ taskId: string }> {
+    if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    const project = this.projects().find(project => project.id === intent.projectId && project.teamIds.includes(intent.teamId))
+    if (!project) throw new Error('Workflow task escapes its registered project Lead')
+    const lead = await this.leadFor(project, intent.teamId)
+    const task = await this.ctx.agentTeams.createPinnedTask(lead, {
+      admissionKey: intent.intentId, subject: intent.subject, description: intent.description, nonCodeCriteria: intent.nonCodeCriteria,
+    })
+    return { taskId: task.id }
   }
 
   private status(request: DispatchRequest, views: readonly CoordinatorProjectView[], now: number): DispatchStatus {
@@ -130,7 +177,8 @@ export class CoordinatorExecution {
     if (failure && !repair) block('execution-failure', failure.diagnostic)
     if (request.cancelReason !== undefined) block('cancelled', request.cancelReason)
     if (attempt) {
-      if (this.submissions.list().some(submission => submission.attemptId === attempt.attemptId && submission.phase === 'accepted')) return { ...request, state: 'accepted', attemptId: attempt.attemptId, blockers: [] }
+      if (this.submissions.list().some(submission => submission.attemptId === attempt.attemptId && submission.phase === 'accepted')
+        || this.reports.list().some(report => report.attemptId === attempt.attemptId && report.phase === 'accepted')) return { ...request, state: 'accepted', attemptId: attempt.attemptId, blockers: [] }
       if (!repair && attempt.phase === 'terminal' && request.cancelReason === undefined) block(attempt.result && !attempt.stopReason && !failure ? 'awaiting-acceptance' : 'recovery-required',
         failure?.diagnostic ?? (attempt.result && !attempt.stopReason ? 'Worker report awaits verified task acceptance' : attempt.stopReason ?? 'Attempt stopped; explicit recovery is required'))
       if (!repair) return { ...request, state: attempt.phase === 'terminal' ? request.cancelReason === undefined ? 'finished' : 'cancelled' : 'assigned', attemptId: attempt.attemptId, blockers }
@@ -176,6 +224,15 @@ export class CoordinatorExecution {
       } catch (error) { await this.block(record, error) }
     }
     if (this.config === undefined) return
+    // A report intent is durable before the Team receipt. Replay it before dispatching
+    // dependents, so a crash between those two writes cannot lose acceptance.
+    for (const report of this.reports.list()) {
+      if (report.phase !== 'pending') continue
+      const project = views.find(view => view.project.id === report.projectId)
+      if (!project || project.paused) continue
+      try { await this.applyReport(await this.leadFor(project.project, report.teamId), report) }
+      catch (error) { await this.block(report, error) }
+    }
     for (const submission of this.submissions.list()) {
       if (submission.phase !== 'pending') continue
       const project = views.find(view => view.project.id === submission.projectId)
@@ -198,11 +255,14 @@ export class CoordinatorExecution {
       for (const record of this.assignments.list()) {
         if (record.phase !== 'terminal' || !record.result || record.stopReason
           || this.submissions.list().some(submission => submission.attemptId === record.attemptId)
+          || this.reports.list().some(report => report.attemptId === record.attemptId)
           || this.queue.list().some(request => sameWork(request, record) && request.cancelReason !== undefined)) continue
         const project = views.find(view => view.project.id === record.projectId)
         if (!project || project.paused) continue
         try {
           const lead = await this.leadFor(project.project, record.teamId)
+          const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(record.taskId))
+          if (task.nonCodeCriteria !== undefined) continue
           const member = this.ctx.agentTeams.listMembers(lead).find(member => member.id === record.runtimeId && member.name === record.attemptId)
           if (member?.worktree?.phase !== 'ready') throw new Error('Reported attempt has no ready worktree for submission')
           const sourceCommit = await runGit(member.worktree.cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], new AbortController().signal, 30_000)
@@ -245,6 +305,7 @@ export class CoordinatorExecution {
         await this.submissions.accepted(submission.id)
       } catch (error) { await this.block(submission, error) }
     }
+    await this.scanCandidateRetention(views)
     const attemptedThisScan = new Set<number>()
     while (true) {
       const active = this.assignments.list().filter(record => record.phase !== 'terminal')
@@ -266,11 +327,14 @@ export class CoordinatorExecution {
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
           workerId: randomUUID(), runtimeId: randomUUID(), provider: 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
-          checkpoint: { task: { subject: task.subject, description: task.description }, step: repair ? 'repair' : 'implement',
+          checkpoint: { task: { subject: task.subject, description: task.description,
+            ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
             artifacts: repair ? [{ kind: 'commit', ref: repair.sourceCommit }, { kind: 'file', ref: repair.candidateCwd }] : [],
             nextAction: repair
               ? 'Repair the failed submission in this new worktree. Inspect the retained candidate and diagnostic; apply the pinned source commit, resolve conflicts against the current target, fix failing checks, commit the repaired artifact, and report evidence. Preserve all previous checkouts.'
-              : 'Perform the task in your isolated worktree, commit code changes, and report artifacts and verification evidence.' },
+              : task.nonCodeCriteria === undefined
+                ? 'Perform the task in your isolated worktree, commit code changes, and report artifacts and verification evidence.'
+                : `Produce a clear evidence-backed report that satisfies these acceptance criteria: ${task.nonCodeCriteria}. Do not create a Git submission; the Lead must review and explicitly accept the report.` },
         })
         const lead = await this.leadFor(view.project, work.teamId)
         startInvoked = true
@@ -305,10 +369,56 @@ export class CoordinatorExecution {
     if (records.findLast(record => sameWork(record, attempt))?.attemptId !== attempt.attemptId) throw new Error('Superseded attempt cannot submit')
     if (attempt.phase !== 'terminal' || attempt.stopEvidence?.kind !== 'stopped' || attempt.stopReason) throw new Error('Submission requires a quiescent reported attempt')
     if (!attempt.result || this.queue.list().some(request => sameWork(request, attempt) && request.cancelReason !== undefined)) throw new Error('Cancelled or unreported attempt cannot submit')
+    const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
+    if (task.nonCodeCriteria !== undefined) throw new Error('non-code work requires explicit report acceptance, not Git submission')
     const submission = await this.submissions.submit({ ...input, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
       runtimeId: attempt.runtimeId, repository: project.repository, targetBranch: project.targetBranch, verification: project.verification })
     try { return await this.queueSubmission(lead, submission) }
     catch (error) { await this.block(submission, error); throw error }
+  }
+
+  async acceptReport(lead: Agent, project: ProjectRecord, request: AcceptReportRequest): Promise<ReportAcceptanceRecord> {
+    if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    const input = acceptReportRequestSchema.parse(request)
+    const existing = this.reports.list().find(record => record.attemptId === input.attemptId)
+    if (existing) {
+      if (existing.projectId !== project.id || existing.teamId !== lead.id || existing.generation !== input.generation
+        || existing.expectedRevision !== input.expectedRevision || existing.expectedTaskRevision !== input.expectedTaskRevision || existing.rationale !== input.rationale) {
+        throw new Error('Report acceptance replay has different immutable inputs')
+      }
+      return existing.phase === 'accepted' ? existing : await this.applyReport(lead, existing)
+    }
+    const attempt = this.reportAttempt(lead, project, input)
+    const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
+    const report = await this.reports.record({ ...input, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
+      report: attempt.result!, criteria: task.nonCodeCriteria!, reviewerId: lead.id })
+    return await this.applyReport(lead, report)
+  }
+
+  private reportAttempt(lead: Agent, project: ProjectRecord, input: AcceptReportRequest): AttemptRecord {
+    const records = this.assignments.list()
+    const attempt = records.find(record => record.attemptId === input.attemptId)
+    if (!attempt || attempt.projectId !== project.id || attempt.teamId !== lead.id || attempt.generation !== input.generation || attempt.revision !== input.expectedRevision) throw new Error('Stale or unauthorized report attempt')
+    if (records.findLast(record => sameWork(record, attempt))?.attemptId !== attempt.attemptId) throw new Error('Superseded attempt cannot be accepted')
+    if (attempt.phase !== 'terminal' || attempt.stopEvidence?.kind !== 'stopped' || attempt.stopReason || !attempt.result) throw new Error('Report acceptance requires a quiescent reported attempt')
+    if (this.queue.list().some(request => sameWork(request, attempt) && request.cancelReason !== undefined)) throw new Error('Cancelled attempt cannot be accepted')
+    const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
+    if (task.nonCodeCriteria === undefined) throw new Error('Code work requires verified Git submission')
+    const receipt = JSON.stringify({ reportId: this.reports.list().find(report => report.attemptId === attempt.attemptId)?.id })
+    if (task.status === 'completed' && task.result === receipt) return attempt
+    if (task.revision !== input.expectedTaskRevision || task.status !== 'pending') throw new Error('Stale task revision for report acceptance')
+    return attempt
+  }
+
+  private async applyReport(lead: Agent, report: ReportAcceptanceRecord): Promise<ReportAcceptanceRecord> {
+    if (report.phase === 'accepted') return report
+    const project = this.projects().find(project => project.id === report.projectId && project.teamIds.includes(lead.id))
+    if (!project) throw new Error('Report project is no longer registered for this Lead')
+    this.reportAttempt(lead, project, report)
+    // The Team service re-flushes an idempotent matching receipt. Never infer
+    // durability merely because the projection already contains the event.
+    await this.ctx.agentTeams.acceptReportedTask(lead, { taskId: TeamTaskId(report.taskId), expectedRevision: report.expectedTaskRevision, reportId: report.id })
+    return await this.reports.accepted(report.id)
   }
 
   private async queueSubmission(lead: Agent, submission: SubmissionRecord): Promise<SubmissionRecord> {
@@ -322,10 +432,89 @@ export class CoordinatorExecution {
     return this.submissions.queued(submission.id)
   }
 
+  /**
+   * The current merged integration candidate is the only cleanup target. Failed
+   * and superseded candidates deliberately have no retention intent. A legacy
+   * merged job has no merge timestamp, so first coordinator observation is its
+   * eligibility time and pins the configured deadline in this separate journal.
+   */
+  private async scanCandidateRetention(views: readonly CoordinatorProjectView[]): Promise<void> {
+    const retention = this.config?.candidateRetention
+    if (!retention) return
+    const now = Date.now()
+    for (const submission of this.submissions.list()) {
+      if (submission.phase !== 'accepted') continue
+      const project = views.find(view => view.project.id === submission.projectId)
+      if (!project) continue
+      try {
+        const lead = await this.leadFor(project.project, submission.teamId)
+        const job = this.ctx.agentTeams.listIntegrations(lead).find(job => job.id === submission.integrationId)
+        if (job?.phase !== 'merged' || !job.candidateCommit) continue
+        const deadline = now > Number.MAX_SAFE_INTEGER - retention.delayMs ? Number.MAX_SAFE_INTEGER : now + retention.delayMs
+        await this.retention.enqueue({ submissionId: submission.id, integrationId: submission.integrationId, repository: job.repository,
+          targetBranch: job.targetBranch, cwd: job.cwd, candidateCommit: job.candidateCommit, eligibleAt: now, deadline,
+          commandTimeoutMs: retention.commandTimeoutMs })
+      } catch (error) {
+        await this.block(submission, error)
+      }
+    }
+    for (const record of this.retention.due(now)) {
+      const submission = this.submissions.list().find(submission => submission.id === record.submissionId)
+      const project = submission === undefined ? undefined : views.find(view => view.project.id === submission.projectId)
+      // Pausing prevents mutation but preserves the already-pinned deadline and intent for an explicit resume.
+      if (!project || project.paused) continue
+      await this.cleanupCandidate(record)
+    }
+  }
+
+  /** A retained or uncertain terminal result is never retried by ordinary scans. */
+  private async cleanupCandidate(record: CandidateRetentionRecord): Promise<void> {
+    const running = await this.retention.start(record.submissionId)
+    if (running.phase !== 'running') return
+    try {
+      const active = await this.activeCandidateDiagnostic(record)
+      if (active) {
+        await this.retention.settle(record.submissionId, 'uncertain', active)
+        return
+      }
+      const result = await new GitCandidateCleanup({ repository: record.repository, targetBranch: record.targetBranch,
+        cwd: record.cwd, candidateCommit: record.candidateCommit, commandTimeoutMs: record.commandTimeoutMs }).cleanup(new AbortController().signal)
+      if (result.outcome === 'removed' || result.outcome === 'absent') await this.retention.settle(record.submissionId, 'released')
+      else await this.retention.settle(record.submissionId, 'retained', result.diagnostic ?? 'Candidate cleanup retained an uncertain worktree')
+    } catch (error) {
+      await this.retention.settle(record.submissionId, 'uncertain', `Candidate cleanup could not establish safe removal: ${error instanceof Error ? error.message : String(error)}`.slice(0, 16_384))
+    }
+  }
+
+  /**
+   * Never remove a path occupied by an Agent-runtime provider process, even if
+   * its job record claims completion. This observes only the in-process Agent
+   * registry; external provider process discovery belongs to the M9 runtime.
+   */
+  private async activeCandidateDiagnostic(record: CandidateRetentionRecord): Promise<string | undefined> {
+    try {
+      let candidate: string
+      try { candidate = await realpath(record.cwd) }
+      catch (error) { return `Could not canonicalize candidate path before provider inspection: ${error instanceof Error ? error.message : String(error)}`.slice(0, 16_384) }
+      for (const agent of this.ctx.agents.list()) {
+        const cwd = agent.session.header.cwd
+        if (cwd === undefined) continue
+        let actual: string
+        try { actual = await realpath(cwd) }
+        catch (error) { return `Could not canonicalize a live provider working directory: ${error instanceof Error ? error.message : String(error)}`.slice(0, 16_384) }
+        if (actual === candidate) return 'Candidate path is the current working directory of a live provider process'
+      }
+      return undefined
+    } catch (error) {
+      return `Could not inspect provider process working directories: ${error instanceof Error ? error.message : String(error)}`.slice(0, 16_384)
+    }
+  }
+
   async cancel(lead: Agent, work: DispatchWork, expectedRevision: number, reason: string): Promise<void> {
     if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
     const submissions = this.submissions.list().filter(submission => sameWork(submission, work))
     if (submissions.some(submission => this.ctx.agentTeams.listIntegrations(lead).some(job => job.id === submission.integrationId && job.phase !== 'failed'))) throw new Error('Work has entered integration; integration cancellation is required')
+    if (this.reports.list().some(report => sameWork(report, work))) throw new Error('Work has entered report acceptance; report cancellation is not permitted')
     await this.queue.cancel(work, expectedRevision, reason)
     const record = this.assignments.list().findLast(record => sameWork(record, work))
     if (record && record.phase !== 'terminal') {
@@ -353,6 +542,8 @@ export class CoordinatorExecution {
       await this.failures.close()
       await this.queue.close()
       await this.submissions.close()
+      await this.reports.close()
+      await this.retention.close()
       this.removePolicy()
     })().catch((error: unknown) => {
       // A failed observation retains ownership; a later close may rejoin the drain.

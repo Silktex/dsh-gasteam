@@ -108,6 +108,11 @@ describe('Agent Teams projection events', () => {
     expect(() => projectTeam(ROOT, [owner, reserved, edge({ verification: [] })])).toThrow(/payload is invalid/u)
     expect(() => projectTeam(ROOT, [owner, reserved, queued, edge({ phase: 'running', targetCommit: worktree.baseCommit, sourceCommit: 'b'.repeat(40) as TeamCommitId })])).toThrow(/immutable inputs/u)
     expect(() => projectTeam(ROOT, [owner, reserved, queued, running, verified, merged, verified])).toThrow(/phase transition/u)
+    const gatedQueued = edge({ reviewGate: 'implementation-review' })
+    const gatedRunning = edge({ reviewGate: 'implementation-review', phase: 'running', targetCommit: worktree.baseCommit })
+    const gatedVerified = edge({ reviewGate: 'implementation-review', phase: 'verified', targetCommit: worktree.baseCommit, candidateCommit: worktree.baseCommit })
+    const gatedMerged = edge({ reviewGate: 'implementation-review', phase: 'merged', targetCommit: worktree.baseCommit, candidateCommit: worktree.baseCommit })
+    expect(() => projectTeam(ROOT, [owner, reserved, gatedQueued, gatedRunning, gatedVerified, gatedMerged])).toThrow(/review receipt/u)
   })
 
   it('validates durable worktree ownership and terminal release', () => {

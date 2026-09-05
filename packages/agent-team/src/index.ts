@@ -1,6 +1,8 @@
-import type { TeamIntegrationAdmission, IntegratedTaskAcceptance } from './types.ts'
+import type { TeamIntegrationAdmission, IntegratedTaskAcceptance, ReportedTaskAcceptance, TeamIntegrationReviewReceipt } from './types.ts'
 import type {} from './coordinator.ts'
 import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
+import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
+import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -26,6 +28,7 @@ import { TeamId, TeamTaskId } from './types.ts'
 import type {
   Config,
   CreateTeamTaskRequest,
+  CreatePinnedTeamTaskRequest,
   SendTeamMessageRequest,
   SendTeamMessageResult,
   SpawnTeammateRequest,
@@ -63,6 +66,9 @@ const DEFAULT_MAX_MEMBERS = 4_096
 export interface TeamExecutionPolicy {
   taskMutation(caller: Agent, root: Agent, request: UpdateTeamTaskRequest): void
   acceptance?(root: Agent, request: IntegratedTaskAcceptance): boolean
+  reportAcceptance?(root: Agent, request: ReportedTaskAcceptance): boolean
+  /** Host approval for a workflow-gated, exact verified integration candidate. */
+  integrationApproval?(root: Agent, receipt: TeamIntegrationReviewReceipt): boolean
   wake(root: Agent, targetId: SessionId): void
 }
 const DEFAULT_MAX_CONCURRENT_MEMBERS = 8
@@ -159,7 +165,8 @@ export class TeamService extends TypertRemoteService {
     this.activity = new TeamActivity()
     this.lifecycle = new TeamRuntimeLifecycle(this.config.disposalTimeoutMs)
     this.journal = new TeamJournal(ctx, (root) => { this.activity.notify(TeamId(root.id)) })
-    this.integrations = new TeamIntegrations(ctx, this.journal, this.config.integrationProvider, this.config.maxIntegrations)
+    this.integrations = new TeamIntegrations(ctx, this.journal, this.config.integrationProvider, this.config.maxIntegrations,
+      (membership, receipt) => [...this.executionPolicies].some(policy => policy.integrationApproval?.(membership.root, receipt) === true))
     this.worktrees = new TeamWorktrees(ctx, this.journal, this.config.worktreeProvider)
     this.roster = new TeamRoster(
       ctx, this.journal, this.lifecycle, this.config.maxMembers, this.worktrees, this.config.disposalTimeoutMs,
@@ -176,7 +183,8 @@ export class TeamService extends TypertRemoteService {
     )
     this.tasks = new TeamTaskBoard(this.journal, this.config.maxTasks, this.config.maxTaskResultLength,
       (caller, root, request) => { for (const policy of this.executionPolicies) policy.taskMutation(caller, root, request) },
-      (root, request) => [...this.executionPolicies].some(policy => policy.acceptance?.(root, request) === true))
+      (root, request) => [...this.executionPolicies].some(policy => policy.acceptance?.(root, request) === true),
+      (root, request) => [...this.executionPolicies].some(policy => policy.reportAcceptance?.(root, request) === true))
     this.batches = new TeamBatches(this.journal, this.config.maxBatches, this.config.maxBatchTextLength)
     this.recovery = new TeamRecovery(ctx, this.journal, this.roster, this.mailbox, this.config.maxRecoveryAttempts)
 
@@ -287,6 +295,13 @@ export class TeamService extends TypertRemoteService {
     return await this.tasks.create(this.roster.membership(caller), request)
   }
 
+  /** Host-only idempotent workflow admission; this operation is intentionally not exposed as an Agent tool or RPC. */
+  async createPinnedTask(caller: Agent, request: CreatePinnedTeamTaskRequest): Promise<TeamTaskView> {
+    const task = await this.tasks.createPinned(this.roster.membership(caller), structuredClone(request))
+    await this.ctx.sessions.flush(caller.session)
+    return task
+  }
+
   /**
    * Return one task, including a deleted tombstone.
    * @param caller - exact live Team member reading the task.
@@ -346,10 +361,26 @@ export class TeamService extends TypertRemoteService {
     return result
   }
 
+  /** Coordinator-only durable receipt for an explicitly reviewed non-code report. */
+  async acceptReportedTask(caller: Agent, request: ReportedTaskAcceptance): Promise<TeamTaskView> {
+    const result = await this.tasks.acceptReported(this.roster.membership(caller), structuredClone(request))
+    await this.ctx.sessions.flush(caller.session)
+    return result
+  }
+
   /** Host-only replay-safe admission for coordinator-pinned submission inputs. */
   async enqueuePinnedIntegration(caller: Agent, target: string, admission: TeamIntegrationAdmission, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
     const snapshot = structuredClone(admission)
     return this.runOperation(signal, cancellation => this.integrations.enqueue(this.roster.membership(caller), target, cancellation, snapshot))
+  }
+
+  /** Host-only durable authorization of one workflow-gated verified candidate. */
+  async approvePinnedIntegration(caller: Agent, receipt: TeamIntegrationReviewReceipt, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+    const snapshot = structuredClone(receipt)
+    return await this.runOperation(signal, async cancellation => {
+      cancellation.throwIfAborted()
+      return await this.integrations.approve(this.roster.membership(caller), snapshot)
+    })
   }
 
   /**
@@ -509,6 +540,37 @@ export class TeamService extends TypertRemoteService {
   remoteControlScheduling(agent: Agent, request: SchedulingControl): Promise<SchedulingView> {
     if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
     return this.ctx.workspaceCoordinator.controlScheduling(agent, request)
+  }
+
+  @Remote('createWorkflow')
+  remoteCreateWorkflow(agent: Agent, request: CreateWorkflowRequest): Promise<WorkflowRuntimeView> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.createWorkflow(agent, request)
+  }
+
+  @Remote('inspectWorkflow')
+  remoteInspectWorkflow(agent: Agent, request: { executionId: string }): WorkflowRuntimeView {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.inspectWorkflow(agent, request.executionId)
+  }
+
+  @Remote('resumeWorkflow')
+  remoteResumeWorkflow(agent: Agent, request: { executionId: string }): Promise<WorkflowRuntimeView | undefined> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.resumeWorkflow(agent, request.executionId)
+  }
+
+  @Remote('reviewReports')
+  remoteReviewReports(agent: Agent, request: ReviewReportsRequest): ReviewableReport[] {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.reviewReports(agent, request.projectId)
+  }
+
+  @Remote('acceptReport')
+  async remoteAcceptReport(agent: Agent, request: RemoteAcceptReportRequest): Promise<ReviewableReport> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    const { projectId, ...review } = request
+    return await this.ctx.workspaceCoordinator.acceptReport(agent, projectId, review)
   }
 
   /** Preserve Team task rejections while allowing unexpected failures to reject the Remote call. */

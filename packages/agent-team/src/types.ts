@@ -174,6 +174,13 @@ export interface IntegratedTaskAcceptance {
   readonly integrationId: TeamIntegrationId
 }
 
+/** Host-only link from a reviewed non-code report to one managed task. */
+export interface ReportedTaskAcceptance {
+  readonly taskId: TeamTaskId
+  readonly expectedRevision: number
+  readonly reportId: string
+}
+
 /** Coordinator-pinned inputs; reusing an ID requires the exact same logical submission. */
 export interface TeamIntegrationAdmission {
   readonly id: TeamIntegrationId
@@ -181,6 +188,19 @@ export interface TeamIntegrationAdmission {
   readonly repository: string
   readonly targetBranch: TeamBranchName
   readonly verification: TeamVerificationCommand[]
+  /** Opaque workflow-owned gate that requires a durable external review receipt. */
+  readonly reviewGate?: string
+}
+
+/** Durable external review authorization bound to one exact verified candidate. */
+export interface TeamIntegrationReviewReceipt {
+  readonly integrationId: TeamIntegrationId
+  readonly sourceCommit: TeamCommitId
+  readonly targetCommit: TeamCommitId
+  readonly candidateCommit: TeamCommitId
+  readonly reviewGate: string
+  /** Workflow-owned accepted review identity; Team never interprets it. */
+  readonly reviewId: string
 }
 
 /** Retained verification invalidated by target movement. */
@@ -189,6 +209,8 @@ export interface TeamIntegrationCandidate {
   readonly targetCommit: TeamCommitId
   readonly candidateCommit: TeamCommitId
   readonly error: string
+  /** Review provenance superseded when a stale target requires another candidate. */
+  readonly reviewReceipt?: TeamIntegrationReviewReceipt
 }
 
 /** Durable integration progress; verified candidates survive ambiguous promotion failures. */
@@ -196,6 +218,10 @@ export interface TeamIntegrationSnapshot extends TeamIntegrationSpec {
   readonly id: TeamIntegrationId
   readonly memberId: SessionId
   readonly provider: string
+  /** Immutable opt-in workflow review gate set only by pinned admission. */
+  readonly reviewGate?: string
+  /** Durable authorization for the current exact verified candidate. */
+  readonly reviewReceipt?: TeamIntegrationReviewReceipt
   readonly failureKind?: 'verification'
   readonly previousCandidates?: TeamIntegrationCandidate[]
   readonly phase: 'queued' | 'running' | 'verified' | 'merged' | 'failed'
@@ -278,6 +304,8 @@ export interface TeamTaskSnapshot {
   readonly revision: number
   readonly subject: string
   readonly description: string
+  /** Explicit review criteria for report-only work. Omission means code submission. */
+  readonly nonCodeCriteria?: string
   readonly status: TeamTaskStatus
   readonly ownerId?: SessionId
   readonly blockedBy: TeamTaskId[]
@@ -292,6 +320,7 @@ export interface TeamTaskView {
   readonly revision: number
   readonly subject: string
   readonly description: string
+  readonly nonCodeCriteria?: string
   readonly status: TeamTaskStatus
   readonly blockedBy: TeamTaskId[]
   readonly writeScopes: string[]
@@ -397,8 +426,18 @@ export interface SendTeamMessageResult {
 export interface CreateTeamTaskRequest {
   readonly subject: string
   readonly description: string
+  /** Immutable criteria that select audited report acceptance instead of Git integration. */
+  readonly nonCodeCriteria?: string
   readonly blockedBy?: readonly TeamTaskId[]
   readonly writeScopes?: readonly string[]
+}
+
+/** Host-only admission for a workflow task; the key is durable task identity, never display text. */
+export interface CreatePinnedTeamTaskRequest {
+  readonly admissionKey: string
+  readonly subject: string
+  readonly description: string
+  readonly nonCodeCriteria: string
 }
 
 /** Supported task mutation actions. */

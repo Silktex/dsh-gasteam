@@ -36,8 +36,13 @@ describe('Agent Teams built LIB service', () => {
       methods: [
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/scheduling',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/controlScheduling',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/reviewReports',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/acceptReport',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/createTask',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/updateTask',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/createWorkflow',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/inspectWorkflow',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/resumeWorkflow',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/view',
       ],
     })

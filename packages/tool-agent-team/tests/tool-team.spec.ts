@@ -150,6 +150,11 @@ describe('dsh-tool-team', () => {
     expect(JSON.parse(text(await execute(ctx, lead, 'team_batch_list', { cursor: 1 })))).toMatchObject({ batches: [{ id: 'batch-2' }] })
   })
 
+  it('creates a Lead-selected non-code task through the model tool', async () => {
+    const { ctx, lead } = await setup([])
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_task_create', { subject: 'investigate', description: 'Report the finding', non_code_criteria: 'Cite observed evidence' })))).toMatchObject({ nonCodeCriteria: 'Cite observed evidence' })
+  })
+
   it('exposes opt-in worktree and integration operations with complete result schemas', async () => {
     const fixture = await gitFixture((root) => { roots.push(root) })
     const { ctx, lead } = await setup([textResponse('worker ready')], false, {
