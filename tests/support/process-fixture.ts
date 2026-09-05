@@ -2,7 +2,7 @@
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-export function processFixture(mode: 'seed' | 'seed-repair' | 'seed-report' | 'restore-repair-crash' | 'restore-repair' | 'seed-dag' | 'seed-paused' | 'restore' | 'restore-execution' | 'restore-worker-crash' | 'restore-worker-recovery' | 'restore-acceptance-crash' | 'restore-promotion-crash' | 'restore-stale-target' | 'restore-ambiguous-promotion' | 'restore-acceptance' | 'restore-dag' | 'restore-report-intent-crash' | 'restore-report-receipt-crash' | 'restore-report' | 'worker' | 'worker-restore' | 'contender' | 'integration-owner', directory: string) {
+export function processFixture(mode: 'seed' | 'seed-repair' | 'seed-report' | 'seed-code-workflow' | 'seed-code-workflow-repair' | 'restore-code-review' | 'restore-code-reject' | 'restore-code-repair-review' | 'restore-repair-crash' | 'restore-repair' | 'seed-dag' | 'seed-paused' | 'restore' | 'restore-execution' | 'restore-worker-crash' | 'restore-worker-recovery' | 'restore-acceptance-crash' | 'restore-promotion-crash' | 'restore-stale-target' | 'restore-ambiguous-promotion' | 'restore-acceptance' | 'restore-dag' | 'restore-report-intent-crash' | 'restore-report-receipt-crash' | 'restore-report' | 'worker' | 'worker-restore' | 'contender' | 'integration-owner', directory: string) {
   const child = fork(fileURLToPath(new URL('../fixtures/restart-team.mjs', import.meta.url)), [mode, directory], {
     execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     env: { PATH: process.env.PATH, HOME: directory, DSH_HOME: directory, DSH_TELEMETRY_DISABLED: '1' },

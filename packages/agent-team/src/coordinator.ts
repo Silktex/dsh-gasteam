@@ -26,7 +26,7 @@ import type { AttemptRecord } from './assignments.ts'
 import { WorkflowStore } from './workflows.ts'
 import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
-import { investigationReportTemplate } from './workflow-templates.ts'
+import { implementationTestReviewIntegrationTemplate, investigationReportTemplate } from './workflow-templates.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
 
 export type CoordinatorId = Branded<'CoordinatorId'>
@@ -156,7 +156,10 @@ export class WorkspaceCoordinator {
       workflowStore = await WorkflowStore.open(config.directory)
       workflows = await WorkflowRuntime.open(config.directory, workflowStore, execution.reportStore(), {
         createPinnedTask: async intent => await execution!.createPinnedWorkflowTask(intent),
-      }, [investigationReportTemplate])
+        createPinnedCodeTask: async intent => await execution!.createPinnedWorkflowCodeTask(intent),
+        codeStatus: async intent => await execution!.workflowCodeStatus(intent),
+        approvePinnedIntegration: async receipt => await execution!.approveWorkflowIntegration(receipt),
+      }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate])
       coordinator.workflowStore = workflowStore
       coordinator.workflows = workflows
       await coordinator.reconcile()
@@ -281,7 +284,8 @@ export class WorkspaceCoordinator {
       if (task.nonCodeCriteria === undefined || task.status !== 'pending') return []
       return [{ projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, attemptId: attempt.attemptId,
         generation: attempt.generation, expectedRevision: attempt.revision, expectedTaskRevision: task.revision,
-        report: attempt.result, criteria: task.nonCodeCriteria, phase: 'awaiting-review' }]
+        report: attempt.result, criteria: task.nonCodeCriteria, phase: 'awaiting-review',
+        ...(task.reviewBinding === undefined ? {} : { reviewBinding: task.reviewBinding }) }]
     })
     return structuredClone([...queued, ...accepted])
   }

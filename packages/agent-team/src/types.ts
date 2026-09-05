@@ -298,6 +298,19 @@ export interface TeamMemberView {
 /** Durable task lifecycle. */
 export type TeamTaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted'
 
+/** Host-only exact candidate binding for one workflow reviewer task. */
+export interface TeamTaskReviewBinding {
+  readonly projectId: string
+  readonly teamId: string
+  readonly executionId: string
+  readonly candidateRound: number
+  readonly integrationId: string
+  readonly sourceCommit: string
+  readonly targetCommit: string
+  readonly candidateCommit: string
+  readonly reviewGate: string
+}
+
 /** Whole durable task snapshot; every mutation increments {@link revision}. */
 export interface TeamTaskSnapshot {
   readonly id: TeamTaskId
@@ -306,6 +319,9 @@ export interface TeamTaskSnapshot {
   readonly description: string
   /** Explicit review criteria for report-only work. Omission means code submission. */
   readonly nonCodeCriteria?: string
+  /** Host-only immutable integration gate for a workflow-managed code task. */
+  readonly reviewGate?: string
+  readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly ownerId?: SessionId
   readonly blockedBy: TeamTaskId[]
@@ -321,6 +337,8 @@ export interface TeamTaskView {
   readonly subject: string
   readonly description: string
   readonly nonCodeCriteria?: string
+  readonly reviewGate?: string
+  readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly blockedBy: TeamTaskId[]
   readonly writeScopes: string[]
@@ -437,7 +455,10 @@ export interface CreatePinnedTeamTaskRequest {
   readonly admissionKey: string
   readonly subject: string
   readonly description: string
-  readonly nonCodeCriteria: string
+  readonly nonCodeCriteria?: string
+  /** Mutually exclusive with non-code criteria; copied into the durable task event before dispatch. */
+  readonly reviewGate?: string
+  readonly reviewBinding?: TeamTaskReviewBinding
 }
 
 /** Supported task mutation actions. */

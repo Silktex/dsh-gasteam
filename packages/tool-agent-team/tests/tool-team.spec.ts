@@ -24,6 +24,7 @@ import { gitFixture } from '../../agent-team/tests/git-fixture.ts'
 import * as GitWorktrees from '../../agent-team/src/git-worktrees.ts'
 import * as GitIntegration from '../../agent-team/src/git-integration.ts'
 import * as toolTeam from '../src/index.ts'
+import * as coordinatorTools from '../src/coordinator.ts'
 
 const SIGNAL = new AbortController().signal
 const TOOL_NAMES = [
@@ -135,6 +136,37 @@ async function waitNoAgent(ctx: Context, id: SessionId): Promise<void> {
 }
 
 describe('dsh-tool-team', () => {
+  it('selects only the built-in code workflow through the coordinator tool while preserving report workflow calls', async () => {
+    const { ctx, lead } = await setup([])
+    const requests: unknown[] = []
+    const coordinator = {
+      async createWorkflow(_caller: Agent, request: { projectId: string; teamId: string; templateId: string; templateVersion: number; parameters: Record<string, string>; executionId?: string }) {
+        requests.push(request)
+        return { executionId: request.executionId ?? 'generated', projectId: request.projectId, teamId: request.teamId,
+          templateId: request.templateId, templateVersion: request.templateVersion, steps: [{ stepId: request.templateId === 'implementation-test-review-integration' ? 'implement' : 'investigate', phase: 'pending' as const }] }
+      },
+    }
+    ctx.provide('workspaceCoordinator', coordinator as never)
+    const tools = await ctx.plugin(coordinatorTools)
+    try {
+      const code = await execute(ctx, lead, 'team_workflow_create', {
+        project_id: 'project', workflow_kind: 'implementation-test-review-integration', subject: 'Add the code path', execution_id: 'tool-code',
+      })
+      expect(code.isError, text(code)).not.toBe(true)
+      expect(JSON.parse(text(code))).toMatchObject({ executionId: 'tool-code', templateId: 'implementation-test-review-integration', steps: [{ stepId: 'implement' }] })
+      const report = await execute(ctx, lead, 'team_workflow_create', { project_id: 'project', question: 'Why did it fail?', execution_id: 'tool-report' })
+      expect(report.isError).not.toBe(true)
+      expect(JSON.parse(text(report))).toMatchObject({ executionId: 'tool-report', templateId: 'investigation-report' })
+      expect(requests).toEqual([
+        { projectId: 'project', teamId: lead.id, templateId: 'implementation-test-review-integration', templateVersion: 1, parameters: { subject: 'Add the code path' }, executionId: 'tool-code' },
+        { projectId: 'project', teamId: lead.id, templateId: 'investigation-report', templateVersion: 1, parameters: { question: 'Why did it fail?' }, executionId: 'tool-report' },
+      ])
+      const missingSubject = await execute(ctx, lead, 'team_workflow_create', { project_id: 'project', workflow_kind: 'implementation-test-review-integration' })
+      expect(missingSubject.isError).toBe(true)
+      expect(text(missingSubject)).toContain('requires subject')
+    } finally { await tools.dispose() }
+  })
+
   it('renders batch mutations and pagination through the declared tool schemas', async () => {
     const { ctx, lead } = await setup([])
     await execute(ctx, lead, 'team_task_create', { subject: 'work', description: 'verify' })

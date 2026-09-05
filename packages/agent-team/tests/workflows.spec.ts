@@ -105,6 +105,53 @@ it('requires submitted source, checked candidate, reviewed evidence, then an int
   await expect(store.completeStep(execution.id, 'integrate', integrate.revision, { artifacts: {}, receipt: integrated(reference('commit', 'source-a'), reference('commit', 'candidate-a')) })).resolves.toMatchObject({ phase: 'completed', receipt: { kind: 'integrated' } })
 })
 
+it('retains a stale candidate round, requires a new review, and refuses to reopen an integrated workflow', async () => {
+  const { store } = await fixture()
+  const execution = await store.create(codeTemplate, { subject: 'moved target' }, 'moved-target')
+  await start(store, execution.id, 'implement')
+  await complete(store, execution.id, 'implement', { source: reference('commit', 'source-moved') }, submitted(reference('commit', 'source-moved')))
+  await start(store, execution.id, 'test')
+  await complete(store, execution.id, 'test', { candidate: reference('commit', 'candidate-old') }, checksPassed(reference('commit', 'source-moved'), reference('commit', 'candidate-old')))
+  await start(store, execution.id, 'review')
+  await complete(store, execution.id, 'review', { 'review-result': reference('report', 'old-review') }, { kind: 'report-review', reviewer: 'lead', decision: 'approved', reference: reference('report', 'old-review') })
+  const test = store.inspect(execution.id)!.steps.find(step => step.id === 'test')!
+  const replacement = { integration: reference('integration', 'job-1'), source: reference('commit', 'source-moved'), target: reference('commit', 'target-new'),
+    candidate: reference('commit', 'candidate-new'), retryRound: 1, previousCandidates: [reference('commit', 'candidate-old')] }
+  await store.invalidateCandidate(execution.id, 'test', test.revision, replacement, 'target advanced after the old review')
+  const reset = store.inspect(execution.id)!
+  expect(reset.steps).toMatchObject([
+    { id: 'implement', phase: 'completed', artifacts: { source: reference('commit', 'source-moved') } },
+    { id: 'test', phase: 'pending', attempts: 0 }, { id: 'review', phase: 'pending', attempts: 0 }, { id: 'integrate', phase: 'pending', attempts: 0 },
+  ])
+  expect(reset.candidateHistory[0]).toMatchObject({ source: reference('commit', 'source-moved'), candidate: reference('commit', 'candidate-old'), replacement })
+  expect(reset.candidateHistory[0]!.priorSteps.find(step => step.id === 'review')).toMatchObject({ phase: 'completed', receipt: { kind: 'report-review', reference: reference('report', 'old-review') } })
+  const stale = reset.steps.find(step => step.id === 'test')!
+  await expect(store.invalidateCandidate(execution.id, 'test', stale.revision, replacement, 'forged same candidate')).rejects.toThrow(/completed|candidate/i)
+  await start(store, execution.id, 'test')
+  await complete(store, execution.id, 'test', { candidate: reference('commit', 'candidate-new') }, checksPassed(reference('commit', 'source-moved'), reference('commit', 'candidate-new')))
+  await start(store, execution.id, 'review')
+  await complete(store, execution.id, 'review', { 'review-result': reference('report', 'new-review') }, { kind: 'report-review', reviewer: 'lead', decision: 'approved', reference: reference('report', 'new-review') })
+  await start(store, execution.id, 'integrate')
+  await complete(store, execution.id, 'integrate', {}, integrated(reference('commit', 'source-moved'), reference('commit', 'candidate-new')))
+  const integratedStep = store.inspect(execution.id)!.steps.find(step => step.id === 'test')!
+  await expect(store.invalidateCandidate(execution.id, 'test', integratedStep.revision, { ...replacement, candidate: reference('commit', 'candidate-later'), retryRound: 2,
+    previousCandidates: [reference('commit', 'candidate-new')] }, 'late target movement')).rejects.toThrow(/integrated/i)
+})
+
+it('retains the old submitted source and resets its dependent candidate round for a bounded repair source', async () => {
+  const { store } = await fixture()
+  const execution = await store.create(codeTemplate, { subject: 'repair source' })
+  await start(store, execution.id, 'implement')
+  const oldSource = 'd'.repeat(40), repairedSource = 'e'.repeat(40)
+  await complete(store, execution.id, 'implement', { source: reference('commit', oldSource) }, submitted(reference('commit', oldSource)))
+  const implement = store.inspect(execution.id)!.steps.find(step => step.id === 'implement')!
+  await store.reworkSource(execution.id, 'implement', implement.revision, reference('commit', repairedSource), { previousAttemptId: 'attempt-old', submissionId: 'submission-old', sourceCommit: oldSource, round: 1, budget: 3 }, 'authorized repair attempt produced a replacement source')
+  const reworked = store.inspect(execution.id)!
+  expect(reworked.steps).toMatchObject([{ id: 'implement', phase: 'pending', attempts: 0 }, { id: 'test', phase: 'pending' }, { id: 'review', phase: 'pending' }, { id: 'integrate', phase: 'pending' }])
+  expect(reworked.sourceHistory[0]).toMatchObject({ source: reference('commit', oldSource), replacement: reference('commit', repairedSource) })
+  expect(reworked.sourceHistory[0]!.priorSteps.find(step => step.id === 'implement')).toMatchObject({ phase: 'completed', receipt: { kind: 'artifact-submitted' } })
+})
+
 it('requires one durable authorization bound to the publication step revision', async () => {
   const { store } = await fixture()
   const release = {

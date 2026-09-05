@@ -15,7 +15,7 @@ import type { SubmitRequest, SubmissionRecord } from './submissions.ts'
 import { ReportStore, acceptReportRequestSchema } from './reports.ts'
 import type { AcceptReportRequest, ReportAcceptanceRecord } from './reports.ts'
 import { TeamTaskId } from './types.ts'
-import type { TeamIntegrationAdmission, TeamIntegrationId } from './types.ts'
+import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationReviewReceipt } from './types.ts'
 import { DispatchQueue } from './dispatch-queue.ts'
 import type { DispatchRequest, DispatchWork } from './dispatch-queue.ts'
 import { DshAssignmentRuntime } from './dsh-assignment-runtime.ts'
@@ -29,7 +29,7 @@ import { TeamError } from './error.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
 import type {} from './index.ts'
-import type { WorkflowTaskCreateIntent } from './workflow-runtime.ts'
+import type { WorkflowCodeStatus, WorkflowCodeTaskCreateIntent, WorkflowIntegrationApproval, WorkflowTaskCreateIntent } from './workflow-runtime.ts'
 
 export const executionConfigSchema = z.object({
   modelProvider: z.string().trim().min(1), model: z.string().trim().min(1),
@@ -111,6 +111,7 @@ export class CoordinatorExecution {
           && task.nonCodeCriteria === report.criteria && (task.revision === report.expectedTaskRevision || (task.status === 'completed' && task.result === JSON.stringify({ reportId: report.id })))
           && !this.queue.list().some(request => sameWork(request, report) && request.cancelReason !== undefined)
       },
+      integrationApproval: (root, receipt) => this.acceptedWorkflowReview(root, receipt),
       wake: (_root, targetId) => {
         const record = this.assignments.list().find(record => record.runtimeId === targetId)
         if (record !== undefined && this.queue.list().some(request => sameWork(request, record) && request.cancelReason !== undefined)) throw new TeamError('Cancelled work cannot be woken', 'TEAM_ATTEMPT_FENCED')
@@ -181,8 +182,101 @@ export class CoordinatorExecution {
     const lead = await this.leadFor(project, intent.teamId)
     const task = await this.ctx.agentTeams.createPinnedTask(lead, {
       admissionKey: intent.intentId, subject: intent.subject, description: intent.description, nonCodeCriteria: intent.nonCodeCriteria,
+      ...(intent.review === undefined ? {} : { reviewBinding: { projectId: intent.projectId, teamId: intent.teamId, executionId: intent.executionId,
+        candidateRound: intent.candidateRound ?? 0, ...intent.review } }),
     })
     return { taskId: task.id }
+  }
+
+  async createPinnedWorkflowCodeTask(intent: WorkflowCodeTaskCreateIntent): Promise<{ taskId: string }> {
+    if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    const project = this.projects().find(project => project.id === intent.projectId && project.teamIds.includes(intent.teamId))
+    if (!project) throw new Error('Workflow code task escapes its registered project Lead')
+    const lead = await this.leadFor(project, intent.teamId)
+    const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: intent.intentId, subject: intent.subject, description: intent.description, reviewGate: intent.reviewGate })
+    return { taskId: task.id }
+  }
+
+  async workflowCodeStatus(intent: WorkflowCodeTaskCreateIntent): Promise<WorkflowCodeStatus | undefined> {
+    const taskId = `workflow-${intent.intentId}`
+    const attempts = this.assignments.list().filter(item => item.projectId === intent.projectId && item.teamId === intent.teamId && item.taskId === taskId)
+    const latest = attempts.at(-1)
+    if (!latest) return undefined
+    const submissions = this.submissions.list()
+    const exactSubmission = (attempt: AttemptRecord, submission: SubmissionRecord | undefined): SubmissionRecord | undefined => {
+      if (!submission || submission.projectId !== intent.projectId || submission.teamId !== intent.teamId || submission.taskId !== taskId
+        || submission.attemptId !== attempt.attemptId || submission.generation !== attempt.generation || submission.reviewGate !== intent.reviewGate) return undefined
+      return submission
+    }
+    let sourceAttempt = latest
+    let submission = exactSubmission(latest, submissions.find(item => item.attemptId === latest.attemptId))
+    const reverse: { attempt: AttemptRecord; submission: SubmissionRecord; repair?: AttemptRecord['repair'] }[] = []
+    if (submission) reverse.push({ attempt: latest, submission, repair: latest.repair })
+
+    // Walk only the reducer-validated immediate repair chain.  This retains
+    // every source round when a restart missed one or more submission scans;
+    // it never chooses an unrelated older submission by task ID.
+    while (sourceAttempt.repair) {
+      const repair = sourceAttempt.repair
+      const predecessor = attempts.find(item => item.attemptId === repair.previousAttemptId)
+      if (!predecessor) return undefined
+      const predecessorSubmission = exactSubmission(predecessor, submissions.find(item => item.id === repair.submissionId))
+      if (!predecessorSubmission || predecessorSubmission.integrationId !== repair.integrationId || predecessorSubmission.sourceCommit !== repair.sourceCommit) return undefined
+      sourceAttempt = predecessor
+      reverse.push({ attempt: predecessor, submission: predecessorSubmission })
+    }
+    if (!reverse.length) return undefined
+    const lineage = reverse.reverse().map((entry, index) => ({ sourceCommit: entry.submission.sourceCommit, submissionId: entry.submission.id, integrationId: entry.submission.integrationId,
+      ...(index === 0 ? {} : { repair: { previousAttemptId: entry.attempt.repair!.previousAttemptId, submissionId: entry.attempt.repair!.submissionId,
+        sourceCommit: entry.attempt.repair!.sourceCommit, round: entry.attempt.repair!.round, budget: entry.attempt.repairLimit ?? 0 } }) }))
+    const current = reverse.at(-1)!
+    submission = current.submission
+    const project = this.projects().find(item => item.id === intent.projectId && item.teamIds.includes(intent.teamId))
+    if (!project) return undefined
+    const lead = await this.leadFor(project, intent.teamId)
+    const job = this.ctx.agentTeams.listIntegrations(lead).find(item => item.id === submission.integrationId)
+    // A rework is actionable only after the replacement submission exists.
+    // The full lineage still includes original submissions during a gap between
+    // reservation and replacement submission, so the runtime pins source first.
+    const repair = current.attempt === latest ? latest.repair : undefined
+    return { sourceCommit: submission.sourceCommit, submissionId: submission.id, integrationId: submission.integrationId, sourceLineage: lineage,
+      ...(job === undefined ? { phase: submission.phase === 'pending' ? 'pending' as const : 'queued' as const } : { phase: job.phase,
+        ...(job.targetCommit === undefined ? {} : { targetCommit: job.targetCommit }), ...(job.candidateCommit === undefined ? {} : { candidateCommit: job.candidateCommit }),
+        ...(job.reviewGate === undefined ? {} : { reviewGate: job.reviewGate }), ...(job.reviewReceipt?.reviewId === undefined ? {} : { reviewId: job.reviewReceipt.reviewId }),
+        ...(job.previousCandidates === undefined ? {} : { previousCandidates: job.previousCandidates.map(candidate => candidate.candidateCommit) }), ...(job.error === undefined ? {} : { diagnostic: job.error }),
+        ...(repair === undefined ? {} : { repair: { previousAttemptId: repair.previousAttemptId, submissionId: repair.submissionId, sourceCommit: repair.sourceCommit, round: repair.round, budget: latest.repairLimit ?? 0 } }) }) }
+  }
+
+  async approveWorkflowIntegration(receipt: WorkflowIntegrationApproval): Promise<void> {
+    const report = this.reports.list().find(item => item.id === receipt.reviewId && item.phase === 'accepted')
+    if (!report || report.decision !== 'approved' || report.reviewBinding === undefined) {
+      throw new Error('Workflow integration approval requires an explicitly approved pinned reviewer report')
+    }
+    const project = this.projects().find(item => item.id === report.projectId && item.teamIds.includes(report.teamId))
+    if (!project) throw new Error('Workflow integration approval project is absent')
+    const lead = await this.leadFor(project, report.teamId)
+    const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(report.taskId))
+    const binding = task.reviewBinding
+    if (!binding || !isDeepStrictEqual(binding, report.reviewBinding) || binding.projectId !== report.projectId || binding.teamId !== report.teamId || binding.executionId !== receipt.executionId
+      || binding.candidateRound < 0 || binding.integrationId !== receipt.integrationId || binding.sourceCommit !== receipt.sourceCommit
+      || binding.targetCommit !== receipt.targetCommit || binding.candidateCommit !== receipt.candidateCommit || binding.reviewGate !== receipt.reviewGate) {
+      throw new Error('Workflow integration approval does not match the accepted pinned reviewer task')
+    }
+    const pinned: TeamIntegrationReviewReceipt = { integrationId: receipt.integrationId as TeamIntegrationReviewReceipt['integrationId'],
+      sourceCommit: receipt.sourceCommit as TeamIntegrationReviewReceipt['sourceCommit'], targetCommit: receipt.targetCommit as TeamIntegrationReviewReceipt['targetCommit'],
+      candidateCommit: receipt.candidateCommit as TeamIntegrationReviewReceipt['candidateCommit'], reviewGate: receipt.reviewGate, reviewId: receipt.reviewId }
+    await this.ctx.agentTeams.approvePinnedIntegration(lead, pinned, new AbortController().signal)
+  }
+
+  private acceptedWorkflowReview(root: Agent, receipt: TeamIntegrationReviewReceipt): boolean {
+    const report = this.reports.list().find(item => item.id === receipt.reviewId && item.phase === 'accepted' && item.teamId === root.id)
+    if (!report || report.decision !== 'approved' || report.reviewBinding === undefined) return false
+    let task
+    try { task = this.ctx.agentTeams.getTask(root, TeamTaskId(report.taskId)) } catch { return false }
+    const binding = task.reviewBinding
+    return binding !== undefined && isDeepStrictEqual(binding, report.reviewBinding) && binding.projectId === report.projectId && binding.teamId === report.teamId && binding.executionId.length > 0
+      && binding.integrationId === receipt.integrationId && binding.sourceCommit === receipt.sourceCommit && binding.targetCommit === receipt.targetCommit
+      && binding.candidateCommit === receipt.candidateCommit && binding.reviewGate === receipt.reviewGate
   }
 
   private status(request: DispatchRequest, views: readonly CoordinatorProjectView[], now: number): DispatchStatus {
@@ -440,8 +534,10 @@ export class CoordinatorExecution {
     if (!attempt.result || this.queue.list().some(request => sameWork(request, attempt) && request.cancelReason !== undefined)) throw new Error('Cancelled or unreported attempt cannot submit')
     const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
     if (task.nonCodeCriteria !== undefined) throw new Error('non-code work requires explicit report acceptance, not Git submission')
+    if (input.reviewGate !== undefined && input.reviewGate !== task.reviewGate) throw new Error('Submission review gate disagrees with the immutable task gate')
     const submission = await this.submissions.submit({ ...input, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
-      runtimeId: attempt.runtimeId, repository: project.repository, targetBranch: project.targetBranch, verification: project.verification })
+      runtimeId: attempt.runtimeId, repository: project.repository, targetBranch: project.targetBranch, verification: project.verification,
+      ...(task.reviewGate === undefined ? {} : { reviewGate: task.reviewGate }) })
     try { return await this.queueSubmission(lead, submission) }
     catch (error) { await this.block(submission, error); throw error }
   }
@@ -452,15 +548,22 @@ export class CoordinatorExecution {
     const existing = this.reports.list().find(record => record.attemptId === input.attemptId)
     if (existing) {
       if (existing.projectId !== project.id || existing.teamId !== lead.id || existing.generation !== input.generation
-        || existing.expectedRevision !== input.expectedRevision || existing.expectedTaskRevision !== input.expectedTaskRevision || existing.rationale !== input.rationale) {
+        || existing.expectedRevision !== input.expectedRevision || existing.expectedTaskRevision !== input.expectedTaskRevision || existing.rationale !== input.rationale
+        || existing.decision !== input.decision) {
         throw new Error('Report acceptance replay has different immutable inputs')
       }
       return existing.phase === 'accepted' ? existing : await this.applyReport(lead, existing)
     }
     const attempt = this.reportAttempt(lead, project, input)
     const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
+    if ((task.reviewBinding === undefined) !== (input.decision === undefined)) {
+      throw new Error(task.reviewBinding === undefined
+        ? 'Only a pinned candidate-review task accepts a review decision'
+        : 'Pinned candidate-review acceptance requires an explicit approved or rejected decision')
+    }
     const report = await this.reports.record({ ...input, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
-      report: attempt.result!, criteria: task.nonCodeCriteria!, reviewerId: lead.id })
+      report: attempt.result!, criteria: task.nonCodeCriteria!, reviewerId: lead.id,
+      ...(task.reviewBinding === undefined ? {} : { reviewBinding: task.reviewBinding }) })
     return await this.applyReport(lead, report)
   }
 
@@ -496,7 +599,8 @@ export class CoordinatorExecution {
       || attempt.revision !== submission.expectedRevision || attempt.phase !== 'terminal' || attempt.stopReason) throw new Error('Submission attempt is stale or no longer eligible')
     if (this.queue.list().some(request => sameWork(request, submission) && request.cancelReason !== undefined)) throw new Error('Cancelled submission cannot enter integration')
     const admission = { id: submission.integrationId, sourceCommit: submission.sourceCommit, repository: submission.repository,
-      targetBranch: submission.targetBranch, verification: submission.verification.commands } as TeamIntegrationAdmission
+      targetBranch: submission.targetBranch, verification: submission.verification.commands,
+      ...(submission.reviewGate === undefined ? {} : { reviewGate: submission.reviewGate }) } as TeamIntegrationAdmission
     await this.ctx.agentTeams.enqueuePinnedIntegration(lead, submission.attemptId, admission, new AbortController().signal)
     return this.submissions.queued(submission.id)
   }

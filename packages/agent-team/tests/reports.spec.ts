@@ -31,6 +31,37 @@ it('replays immutable report-review intent and acknowledges it once', async () =
   }
 })
 
+it('persists an immutable explicit decision with the exact pinned candidate review', async () => {
+  const { directory, store, input } = await fixture()
+  const review = {
+    projectId: 'project', teamId: 'team', executionId: 'workflow-1', candidateRound: 2,
+    integrationId: 'integration-1', sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40),
+    candidateCommit: 'c'.repeat(40), reviewGate: 'workflow-gate',
+  }
+  const rejected = await store.record({ ...input, decision: 'rejected', reviewBinding: review })
+  expect(rejected).toMatchObject({ decision: 'rejected', reviewBinding: review, phase: 'pending' })
+  await store.close()
+  const restored = await ReportStore.open(directory)
+  cleanup.push(() => restored.close())
+  expect(await restored.record({ ...input, decision: 'rejected', reviewBinding: review })).toEqual(rejected)
+  await expect(restored.record({ ...input, decision: 'approved', reviewBinding: review })).rejects.toThrow(/immutable inputs/)
+  await expect(restored.record({ ...input, decision: 'rejected', reviewBinding: { ...review, candidateCommit: 'd'.repeat(40) } })).rejects.toThrow(/immutable inputs/)
+  expect(await restored.accepted(rejected.id)).toMatchObject({ phase: 'accepted', decision: 'rejected', reviewBinding: review })
+  await expect(restored.record({ ...input, decision: 'approved', reviewBinding: review })).rejects.toThrow(/immutable inputs/)
+})
+
+it('rejects an incomplete candidate-review record before it can create a pending intent', async () => {
+  const { store, input } = await fixture()
+  const review = {
+    projectId: 'project', teamId: 'team', executionId: 'workflow-1', candidateRound: 0,
+    integrationId: 'integration-1', sourceCommit: 'a'.repeat(40), targetCommit: 'b'.repeat(40),
+    candidateCommit: 'c'.repeat(40), reviewGate: 'workflow-gate',
+  }
+  await expect(store.record({ ...input, reviewBinding: review })).rejects.toThrow(/decision|binding/i)
+  await expect(store.record({ ...input, decision: 'approved' })).rejects.toThrow(/decision|binding/i)
+  expect(store.list()).toEqual([])
+})
+
 it('rejects a second writer and malformed report replay', async () => {
   const { directory, store, input } = await fixture()
   await expect(ReportStore.open(directory)).rejects.toThrow(/already owned/)

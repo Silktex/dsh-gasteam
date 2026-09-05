@@ -38,6 +38,72 @@ it.each([false, true])('discovers persisted work without opening its Lead and pr
   }
 }, 30_000)
 
+it('restarts a real-Git gated code workflow after verified candidate and promotes only after a fresh reviewer receipt', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-workflow-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const crashed = processFixture('seed-code-workflow', directory); processes.push(crashed)
+    const verified = await crashed.barrier<{ barrier: string; job: { id: string; phase: string }; tasks: { reviewGate?: string }[] }>()
+    expect(verified).toMatchObject({ barrier: 'code-verified', job: { phase: 'verified' } })
+    expect(verified.tasks[0]!.reviewGate).toBeTruthy()
+    await crashed.stop(true); processes.pop()
+    const restored = processFixture('restore-code-review', directory); processes.push(restored)
+    const complete = await restored.barrier<{ barrier: string; workflows: { executionId: string; steps: { phase: string }[] }[]; submissions: { phase: string }[]; integrations: { phase: string }[] }>()
+    expect(complete.barrier).toBe('code-completed')
+    expect(complete.workflows.find(value => value.executionId === 'code-workflow-process')!.steps.every(step => step.phase === 'completed')).toBe(true)
+    expect(complete.submissions).toEqual([expect.objectContaining({ phase: 'accepted' })])
+    expect(complete.integrations).toEqual([expect.objectContaining({ phase: 'merged' })])
+  } finally { try { for (const process of processes.reverse()) await process.stop() } finally { await rm(directory, { recursive: true, force: true }) } }
+}, 30_000)
+
+it('keeps a real-Git candidate verified when its durable reviewer decision is rejected, including after restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-workflow-rejected-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const crashed = processFixture('seed-code-workflow', directory); processes.push(crashed)
+    const verified = await crashed.barrier<{ barrier: string; head: string }>()
+    expect(verified.barrier).toBe('code-verified')
+    await crashed.stop(true); processes.pop()
+    const rejected = processFixture('restore-code-reject', directory); processes.push(rejected)
+    const first = await rejected.barrier<{ barrier: string; workflows: { executionId: string; steps: { stepId: string; phase: string }[] }[]; tasks: { status: string }[]; reports: { decision?: string; phase: string }[]; submissions: { phase: string }[]; integrations: { phase: string }[]; head: string }>()
+    expect(first.barrier).toBe('code-rejected')
+    expect(first.workflows.find(value => value.executionId === 'code-workflow-process')!.steps).toContainEqual(expect.objectContaining({ stepId: 'review', phase: 'failed' }))
+    expect(first.reports).toEqual([expect.objectContaining({ phase: 'accepted', decision: 'rejected' })])
+    expect(first.submissions).toEqual([expect.objectContaining({ phase: 'queued' })])
+    expect(first.integrations).toEqual([expect.objectContaining({ phase: 'verified' })])
+    expect(first.tasks.some(task => task.status === 'pending')).toBe(true)
+    expect(first.head).toBe(verified.head)
+    await rejected.stop(true); processes.pop()
+    const restarted = processFixture('restore-code-reject', directory); processes.push(restarted)
+    const replay = await restarted.barrier<typeof first>()
+    expect(replay.barrier).toBe('code-rejected')
+    expect(replay.reports).toEqual([expect.objectContaining({ phase: 'accepted', decision: 'rejected' })])
+    expect(replay.integrations).toEqual([expect.objectContaining({ phase: 'verified' })])
+    expect(replay.tasks.some(task => task.status === 'pending')).toBe(true)
+    expect(replay.head).toBe(verified.head)
+  } finally { try { for (const process of processes.reverse()) await process.stop() } finally { await rm(directory, { recursive: true, force: true }) } }
+}, 30_000)
+
+it('repairs a failed real-Git code workflow and promotes only the fresh approved candidate', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-workflow-repair-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed-code-workflow-repair', directory); processes.push(seed)
+    const failed = await seed.barrier<{ barrier: string; submissions: { sourceCommit: string }[]; head: string }>()
+    expect(failed.barrier).toBe('code-verification-failed')
+    await seed.stop(true); processes.pop()
+    const repaired = processFixture('restore-code-repair-review', directory); processes.push(repaired)
+    const complete = await repaired.barrier<{ barrier: string; workflows: { steps: { phase: string }[] }[]; workflowJournal: string; tasks: { subject: string }[]; submissions: { sourceCommit: string; phase: string }[]; integrations: { phase: string }[]; head: string }>()
+    expect(complete.barrier).toBe('code-completed')
+    expect(complete.workflows[0]!.steps.every(step => step.phase === 'completed')).toBe(true)
+    expect(complete.workflowJournal).toContain('workflow/source-reworked')
+    expect(complete.submissions).toEqual([expect.objectContaining({ sourceCommit: failed.submissions[0]!.sourceCommit, phase: 'queued' }), expect.objectContaining({ phase: 'accepted' })])
+    expect(complete.integrations).toEqual([expect.objectContaining({ phase: 'failed' }), expect.objectContaining({ phase: 'merged' })])
+    expect(complete.tasks.filter(task => task.subject.startsWith('Implement '))).toHaveLength(1)
+    expect(complete.head).not.toBe(failed.head)
+  } finally { try { await Promise.allSettled(processes.reverse().map(process => process.stop(true))) } finally { await rm(directory, { recursive: true, force: true }) } }
+}, 30_000)
+
 it('automatically starts unopened accepted work in an isolated worktree after a process restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-auto-restart-'))
   const processes: ReturnType<typeof processFixture>[] = []

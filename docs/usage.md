@@ -80,9 +80,25 @@ Set `execution.candidateRetention` only when automatic cleanup is desired. The d
 
 ## Workflow vertical slice
 
-The current coordinator runtime includes the built-in `investigation-report@1` workflow. A registered Lead can create, inspect, and resume it through the coordinator host controls or Remote operations (`createWorkflow`, `inspectWorkflow`, `resumeWorkflow`). Its accepted report is handed to the next managed task with the report criteria, rationale, and durable receipt ID.
+The coordinator runtime includes the built-in `investigation-report@1` and `implementation-test-review-integration@1` workflows. A registered Lead can create, inspect, and resume them through the coordinator host controls or Remote operations (`createWorkflow`, `inspectWorkflow`, `resumeWorkflow`). The report workflow hands an accepted report to the next managed task with the report criteria, rationale, and durable receipt ID.
 
-The runtime does not yet provide the full implementation, publication, session-handoff, or external-provider workflow set. Do not treat a workflow definition or report acceptance as publication authorization.
+Use `team_workflow_create` with one of these requests:
+
+```json
+{"project_id":"<project-id>","workflow_kind":"investigation-report","question":"Which API behavior needs changing?"}
+```
+
+```json
+{"project_id":"<project-id>","workflow_kind":"implementation-test-review-integration","subject":"Implement the agreed API change"}
+```
+
+Omitting `workflow_kind` selects the report workflow and still requires `question`. The code workflow requires `subject`. Inspect the returned execution with `team_workflow_inspect` using `execution_id`; `team_workflow_resume` reconciles persisted receipts and task admissions after interruption.
+
+The code workflow creates a managed implementation task, submits its pinned commit, and verifies it using the project's configured Git checks. A verified candidate waits for a fresh reviewer task. The registered Lead reviews that report with `team_report_status` and records `team_report_accept` with the current attempt/task revisions, a rationale, and an explicit `decision` of `approved` or `rejected`. Approval applies only to that report's exact source, target, candidate, integration, and gate. Rejection preserves the report audit and prevents promotion. Only actual verified integration completes the implementation task and workflow.
+
+Target changes require verification and a fresh review of the replacement candidate. Authorized verification repairs retain the original failed source and attempt history, reuse the implementation task, and require review of the repaired candidate. Repair limits remain pinned to the admitted policy and workflow budget.
+
+Publication and the full session-handoff/external-provider workflow set remain unfinished. A workflow definition or report acceptance does not authorize publication.
 
 The browser panel shows roster, task, batch, integration, and recovery state when the Web profile is installed. A complete autonomous release profile, dashboard controls for every coordinator operation, globally ordered integration backlog, and external runtime/provider conformance remain unfinished.
 

@@ -1,5 +1,13 @@
 # GasTeam handoff
 
+## Resumed session status
+
+The user resumed the goal and authorized committing completed work to GitHub. The stop request below is historical. The current published checkpoint is `92715a0fd16af303bb76d8d71b1056b3b463d9f8`, following `016a976` and `27ead4a`. [Exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/33986522205) passed documentation checks, build, types, 274 regular tests, 14 process acceptance scenarios, and installed CLI smoke. The published changes include reviewed report workflows, guarded candidate retention, observational health, and operator documentation.
+
+Code workflow repair/review replay and external runtime containment are now in progress in the working tree. Their current drafts require separate validation; the published test counts do not validate them. Every unfinished requirement in `finishme.md` remains in scope, and no external blocker has been established. The user requests delegation with models suited to task complexity; the parent reviews results. Preserve unrelated `.agents/`, `pending.md`, and `skills-lock.json`. No localhost service restart or durable user-data modification has occurred.
+
+The remainder records the earlier stop point. Use the latest continuation ledger, evidence, Git history, and working-tree diff for current implementation status.
+
 ## Stop point and authority
 
 The user explicitly requested: `$handoff stop work and create handoff.md in project root`. Implementation is stopped. Resume implementation only when requested in the next session. This document is the only change made after that request; no tests were rerun for this documentation-only handoff.

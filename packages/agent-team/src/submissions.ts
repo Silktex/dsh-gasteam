@@ -9,6 +9,8 @@ const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 export const submitRequestSchema = z.object({
   attemptId: id, generation: positive, expectedRevision: positive,
   sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), evidence: z.string().trim().min(1).max(16_384),
+  /** Immutable host-only workflow gate copied from the durable task before admission. */
+  reviewGate: id.optional(),
 }).strict()
 export type SubmitRequest = z.infer<typeof submitRequestSchema>
 const inputSchema = submitRequestSchema.extend({

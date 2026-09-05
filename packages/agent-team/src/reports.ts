@@ -4,13 +4,28 @@ import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import z from 'zod'
 import { DurableJournal } from './durable-journal.ts'
+import type { TeamTaskReviewBinding } from './types.ts'
 
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const text = z.string().trim().min(1).max(16_384)
+const reviewBindingSchema = z.object({
+  projectId: id, teamId: id, executionId: id, candidateRound: z.number().int().nonnegative(),
+  integrationId: id,
+  sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  targetCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  candidateCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  reviewGate: id,
+}).strict()
+
+/** The Lead's immutable decision about a pinned verified candidate. */
+export const reportReviewDecisionSchema = z.enum(['approved', 'rejected'])
+export type ReportReviewDecision = z.infer<typeof reportReviewDecisionSchema>
 
 export const acceptReportRequestSchema = z.object({
   attemptId: id, generation: positive, expectedRevision: positive, expectedTaskRevision: positive, rationale: text,
+  /** Required only when the server identifies the task as a pinned candidate review. */
+  decision: reportReviewDecisionSchema.optional(),
 }).strict()
 export type AcceptReportRequest = z.infer<typeof acceptReportRequestSchema>
 
@@ -21,9 +36,19 @@ export type RemoteAcceptReportRequest = z.infer<typeof remoteAcceptReportRequest
 
 const inputSchema = acceptReportRequestSchema.extend({
   projectId: id, teamId: id, taskId: id, report: text, criteria: text, reviewerId: id,
-}).strict()
+  /** Server-derived immutable candidate binding; callers never supply this on the public request. */
+  reviewBinding: reviewBindingSchema.optional(),
+}).strict().superRefine((value, ctx) => {
+  if ((value.decision === undefined) !== (value.reviewBinding === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'Candidate review reports require both a decision and pinned review binding' })
+  }
+})
 export type ReportAcceptanceInput = z.infer<typeof inputSchema>
-export interface ReportAcceptanceRecord extends ReportAcceptanceInput { readonly id: string; readonly phase: 'pending' | 'accepted' }
+export interface ReportAcceptanceRecord extends Omit<ReportAcceptanceInput, 'reviewBinding'> {
+  readonly reviewBinding?: TeamTaskReviewBinding | undefined
+  readonly id: string
+  readonly phase: 'pending' | 'accepted'
+}
 
 /** A scoped Lead review queue item or its durable acceptance audit record. */
 export interface ReviewableReport {
@@ -40,6 +65,8 @@ export interface ReviewableReport {
   readonly id?: string
   readonly reviewerId?: string
   readonly rationale?: string
+  readonly decision?: ReportReviewDecision | undefined
+  readonly reviewBinding?: TeamTaskReviewBinding | undefined
 }
 
 const envelope = { version: z.literal(1), sequence: positive }

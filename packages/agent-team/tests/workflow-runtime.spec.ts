@@ -1,9 +1,9 @@
 import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReportStore } from '../src/reports.ts'
-import { WorkflowRuntime, type WorkflowTaskHost } from '../src/workflow-runtime.ts'
+import { WorkflowRuntime, type WorkflowCodeStatus, type WorkflowCodeTaskCreateIntent, type WorkflowIntegrationApproval, type WorkflowTaskCreateIntent, type WorkflowTaskHost } from '../src/workflow-runtime.ts'
 import { WorkflowStore } from '../src/workflows.ts'
 
 const roots: string[] = []
@@ -24,16 +24,43 @@ const template = {
 } as const
 
 class Host implements WorkflowTaskHost {
-  readonly calls: { intentId: string; subject: string; description: string; criteria: string }[] = []
+  readonly calls: WorkflowTaskCreateIntent[] = []
   private readonly tasks = new Map<string, string>()
+  failTaskCreation = false
 
-  async createPinnedTask(input: { intentId: string; projectId: string; teamId: string; subject: string; description: string; nonCodeCriteria: string }): Promise<{ taskId: string }> {
+  async createPinnedTask(input: WorkflowTaskCreateIntent): Promise<{ taskId: string }> {
     this.calls.push(input)
+    if (this.failTaskCreation) throw new Error('injected task creation crash')
     let taskId = this.tasks.get(input.intentId)
     if (!taskId) { taskId = `task-${this.tasks.size + 1}`; this.tasks.set(input.intentId, taskId) }
     return { taskId }
   }
 }
+
+class CodeHost extends Host {
+  readonly codeCalls: WorkflowCodeTaskCreateIntent[] = []
+  readonly approvals: WorkflowIntegrationApproval[] = []
+  status: WorkflowCodeStatus | undefined
+  async createPinnedCodeTask(input: WorkflowCodeTaskCreateIntent): Promise<{ taskId: string }> {
+    this.codeCalls.push(input)
+    return { taskId: 'code-task' }
+  }
+  async codeStatus(_input: WorkflowCodeTaskCreateIntent): Promise<WorkflowCodeStatus | undefined> { return this.status }
+  async approvePinnedIntegration(receipt: WorkflowIntegrationApproval): Promise<void> {
+    if (!this.approvals.some(candidate => JSON.stringify(candidate) === JSON.stringify(receipt))) this.approvals.push(receipt)
+  }
+}
+
+const codeTemplate = {
+  format: 'agent-team-workflow/v1', id: 'implementation-test-review-integration', version: 1,
+  parameters: { subject: { type: 'string', required: true } },
+  steps: [
+    { id: 'implement', title: 'Implement {{subject}}', retry: { maxAttempts: 2, backoffMs: 0 }, artifacts: { produces: ['source'] }, acceptance: { kind: 'artifact-submitted', artifact: 'source' } },
+    { id: 'test', title: 'Verify {{subject}}', dependsOn: ['implement'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source'], produces: ['candidate'] }, acceptance: { kind: 'checks-passed', source: 'source', candidate: 'candidate' } },
+    { id: 'review', title: 'Review {{subject}}', dependsOn: ['test'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source', 'candidate'], produces: ['review'] }, acceptance: { kind: 'report-review' } },
+    { id: 'integrate', title: 'Integrate {{subject}}', dependsOn: ['review'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source', 'candidate', 'review'] }, acceptance: { kind: 'integrated', source: 'source', candidate: 'candidate' } },
+  ],
+} as const
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-workflow-runtime-'))
@@ -42,6 +69,17 @@ async function fixture() {
   const reports = await ReportStore.open(directory)
   const host = new Host()
   const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [template])
+  closeables.push(runtime, reports, workflows)
+  return { directory, workflows, reports, host, runtime }
+}
+
+async function codeFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-runtime-replay-'))
+  roots.push(directory)
+  const workflows = await WorkflowStore.open(directory)
+  const reports = await ReportStore.open(directory)
+  const host = new CodeHost()
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [codeTemplate])
   closeables.push(runtime, reports, workflows)
   return { directory, workflows, reports, host, runtime }
 }
@@ -111,11 +149,202 @@ it('reconstructs the durable binding after a crash boundary without duplicating 
 
 it('rejects templates outside the initial report-review slice and ignores pending report intents', async () => {
   const { reports, runtime } = await fixture()
-  await expect(runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'implementation-test-review-integration', templateVersion: 1, parameters: {}, executionId: 'no-code' }, { id: 'project', teamIds: ['lead'] })).rejects.toThrow(/only.*investigation-report|unsupported/i)
+  await expect(runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'implementation-test-review-integration', templateVersion: 1, parameters: {}, executionId: 'no-code' }, { id: 'project', teamIds: ['lead'] })).rejects.toThrow(/unsupported|template/i)
   await runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1, parameters: { question: 'Receipt fence' }, executionId: 'receipt-fence' }, { id: 'project', teamIds: ['lead'] })
   await runtime.scan({ id: 'project', teamIds: ['lead'] })
   await reports.record({ projectId: 'project', teamId: 'lead', taskId: 'task-1', attemptId: 'attempt-1', generation: 1, expectedRevision: 2, expectedTaskRevision: 1,
     report: 'Unaccepted report.', criteria: 'Report review: Investigate Receipt fence', reviewerId: 'lead', rationale: 'Not accepted yet.' })
   await runtime.scan({ id: 'project', teamIds: ['lead'] })
   expect(runtime.inspect('receipt-fence')!.steps[0]).toMatchObject({ phase: 'running' })
+})
+
+it('runs the pinned code path through submission, verified candidate, fresh candidate review, approval, and one integration receipt', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-workflow-code-runtime-'))
+  roots.push(directory)
+  const workflows = await WorkflowStore.open(directory)
+  const reports = await ReportStore.open(directory)
+  const host = new CodeHost()
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [codeTemplate])
+  closeables.push(runtime, reports, workflows)
+  const source = 'a'.repeat(40), firstCandidate = 'b'.repeat(40), secondCandidate = 'c'.repeat(40), firstTarget = 'd'.repeat(40), secondTarget = 'e'.repeat(40)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: codeTemplate.id, templateVersion: 1, parameters: { subject: 'the workflow path' }, executionId: 'code-vertical' }, { id: 'project', teamIds: ['lead'] })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.codeCalls).toHaveLength(1)
+  host.status = { sourceCommit: source, submissionId: 'submission-1', integrationId: 'integration-1', phase: 'verified', targetCommit: firstTarget, candidateCommit: firstCandidate, reviewGate: host.codeCalls[0]!.reviewGate }
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(runtime.inspect('code-vertical')!.steps).toEqual(expect.arrayContaining([
+    expect.objectContaining({ stepId: 'implement', phase: 'completed' }), expect.objectContaining({ stepId: 'test', phase: 'completed' }), expect.objectContaining({ stepId: 'review', phase: 'running', taskId: 'task-1' }),
+  ]))
+  expect(host.calls[0]!.description).toContain(firstCandidate)
+  await reports.record({ projectId: 'project', teamId: 'lead', taskId: 'task-1', attemptId: 'review-attempt-1', generation: 1, expectedRevision: 2, expectedTaskRevision: 1,
+    report: 'Candidate is correct.', criteria: host.calls[0]!.nonCodeCriteria, reviewerId: 'lead', rationale: 'Reviewed the pinned diff.', decision: 'approved', reviewBinding: { projectId: 'project', teamId: 'lead', executionId: 'code-vertical', candidateRound: 0, ...host.calls[0]!.review! } })
+  await reports.accepted(reports.list()[0]!.id)
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toEqual([expect.objectContaining({ sourceCommit: source, targetCommit: firstTarget, candidateCommit: firstCandidate, reviewId: reports.list()[0]!.id })])
+
+  host.status = { ...host.status, phase: 'verified', targetCommit: secondTarget, candidateCommit: secondCandidate, previousCandidates: [firstCandidate], diagnostic: 'target advanced' }
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(workflows.inspect('code-vertical')!.candidateHistory[0]).toMatchObject({ candidate: { kind: 'commit', ref: firstCandidate }, replacement: { candidate: { kind: 'commit', ref: secondCandidate } } })
+  expect(workflows.inspect('code-vertical')!.candidateHistory[0]!.priorSteps.find(step => step.id === 'review')).toMatchObject({ phase: 'completed', receipt: { kind: 'report-review', reference: { kind: 'report', ref: reports.list()[0]!.id } } })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(runtime.inspect('code-vertical')!.steps.find(step => step.stepId === 'review')).toMatchObject({ phase: 'running', taskId: 'task-2' })
+  expect(host.calls[1]!.description).toContain(secondCandidate)
+  await reports.record({ projectId: 'project', teamId: 'lead', taskId: 'task-2', attemptId: 'review-attempt-2', generation: 1, expectedRevision: 2, expectedTaskRevision: 1,
+    report: 'New candidate is correct.', criteria: host.calls[1]!.nonCodeCriteria, reviewerId: 'lead', rationale: 'Reviewed the new pinned diff.', decision: 'approved', reviewBinding: { projectId: 'project', teamId: 'lead', executionId: 'code-vertical', candidateRound: 1, ...host.calls[1]!.review! } })
+  await reports.accepted(reports.list()[1]!.id)
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(2)
+  host.status = { ...host.status, phase: 'merged', reviewId: reports.list()[1]!.id }
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(workflows.inspect('code-vertical')!.steps.find(step => step.id === 'integrate')).toMatchObject({ phase: 'completed', receipt: { kind: 'integrated', candidate: { kind: 'commit', ref: secondCandidate } } })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(2)
+})
+
+it('reconciles already-submitted repair ancestry in source order after a missed scan', async () => {
+  const { workflows, host, runtime } = await codeFixture()
+  const original = 'a'.repeat(40), repaired = 'b'.repeat(40)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: codeTemplate.id, templateVersion: 1,
+    parameters: { subject: 'missed repair scan' }, executionId: 'missed-repair-lineage' }, { id: 'project', teamIds: ['lead'] })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  host.status = {
+    sourceCommit: repaired, submissionId: 'submission-repaired', integrationId: 'integration-repaired', phase: 'failed', reviewGate: host.codeCalls[0]!.reviewGate,
+    repair: { previousAttemptId: 'attempt-original', submissionId: 'submission-original', sourceCommit: original, round: 1, budget: 1 },
+    sourceLineage: [
+      { sourceCommit: original, submissionId: 'submission-original', integrationId: 'integration-original' },
+      { sourceCommit: repaired, submissionId: 'submission-repaired', integrationId: 'integration-repaired',
+        repair: { previousAttemptId: 'attempt-original', submissionId: 'submission-original', sourceCommit: original, round: 1, budget: 1 } },
+    ],
+  }
+
+  // Both source submissions were durable before the first code reconciliation.
+  // The runtime must retain the original checkpoint before reworking it.
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(workflows.inspect('missed-repair-lineage')!.steps.find(step => step.id === 'implement')).toMatchObject({ phase: 'completed', artifacts: { source: { ref: original } } })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(workflows.inspect('missed-repair-lineage')!.sourceHistory).toMatchObject([{ source: { ref: original }, replacement: { ref: repaired }, repair: { submissionId: 'submission-original', round: 1 } }])
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(workflows.inspect('missed-repair-lineage')!.steps.find(step => step.id === 'implement')).toMatchObject({ phase: 'completed', artifacts: { source: { ref: repaired } } })
+  expect(host.codeCalls).toHaveLength(1)
+})
+
+it('replays a durable candidate invalidation after the binding-reset crash boundary without reusing its report or approval', async () => {
+  const { directory, workflows, reports, host, runtime } = await codeFixture()
+  const source = '1'.repeat(40), oldCandidate = '2'.repeat(40), newCandidate = '3'.repeat(40), oldTarget = '4'.repeat(40), newTarget = '5'.repeat(40)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: codeTemplate.id, templateVersion: 1, parameters: { subject: 'candidate replay' }, executionId: 'candidate-replay' }, { id: 'project', teamIds: ['lead'] })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  host.status = { sourceCommit: source, submissionId: 'submission-old', integrationId: 'integration-old', phase: 'verified', targetCommit: oldTarget, candidateCommit: oldCandidate, reviewGate: host.codeCalls[0]!.reviewGate }
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  await reports.record({ projectId: 'project', teamId: 'lead', taskId: 'task-1', attemptId: 'review-old', generation: 1, expectedRevision: 2, expectedTaskRevision: 1,
+    report: 'The original candidate was accepted.', criteria: host.calls[0]!.nonCodeCriteria, reviewerId: 'lead', rationale: 'Exact old candidate reviewed.', decision: 'approved',
+    reviewBinding: { projectId: 'project', teamId: 'lead', executionId: 'candidate-replay', candidateRound: 0, ...host.calls[0]!.review! } })
+  await reports.accepted(reports.list()[0]!.id)
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(1)
+
+  const oldReview = reports.list()[0]!.id
+  const test = workflows.inspect('candidate-replay')!.steps.find(step => step.id === 'test')!
+  await workflows.invalidateCandidate('candidate-replay', 'test', test.revision, {
+    integration: { kind: 'integration', ref: 'integration-new' }, source: { kind: 'commit', ref: source }, target: { kind: 'commit', ref: newTarget }, candidate: { kind: 'commit', ref: newCandidate },
+    retryRound: 1, previousCandidates: [{ kind: 'commit', ref: oldCandidate }],
+  }, 'target moved after the original candidate review')
+  // Simulate SIGKILL after WorkflowStore flushes the transition, before the runtime can append task-reset.
+  await runtime.close(); await reports.close(); await workflows.close(); closeables.length = 0
+
+  host.status = { sourceCommit: source, submissionId: 'submission-new', integrationId: 'integration-new', phase: 'verified', targetCommit: newTarget, candidateCommit: newCandidate, reviewGate: host.codeCalls[0]!.reviewGate, previousCandidates: [oldCandidate] }
+  const restoredWorkflows = await WorkflowStore.open(directory)
+  const restoredReports = await ReportStore.open(directory)
+  const restored = await WorkflowRuntime.open(directory, restoredWorkflows, restoredReports, host, [codeTemplate])
+  closeables.push(restored, restoredReports, restoredWorkflows)
+  await restored.resume('candidate-replay', { id: 'project', teamIds: ['lead'] })
+
+  expect(host.codeCalls).toHaveLength(1)
+  expect(host.calls).toHaveLength(2)
+  expect(restored.inspect('candidate-replay')!.steps.find(step => step.stepId === 'review')).toMatchObject({ taskId: 'task-2', phase: 'running' })
+  expect(restored.inspect('candidate-replay')!.steps.find(step => step.stepId === 'review')).not.toMatchObject({ reportId: oldReview })
+  expect(restoredWorkflows.inspect('candidate-replay')!.candidateHistory[0]).toMatchObject({ candidate: { kind: 'commit', ref: oldCandidate } })
+  expect(restoredWorkflows.inspect('candidate-replay')!.candidateHistory[0]!.priorSteps.find(step => step.id === 'review')).toMatchObject({ receipt: { kind: 'report-review', reference: { ref: oldReview } } })
+
+  host.status = { ...host.status, phase: 'merged', reviewId: oldReview }
+  await restored.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(1)
+  expect(restoredWorkflows.inspect('candidate-replay')!.steps.find(step => step.id === 'integrate')).toMatchObject({ phase: 'pending' })
+  expect((await readFile(join(directory, 'workflow-runtime.jsonl'), 'utf8')).split('\n').filter(line => line.includes('workflow-runtime/task-reset'))).toHaveLength(1)
+})
+
+it('archives a stale candidate-review intent before task creation and never resets the pinned implementation task', async () => {
+  const { directory, workflows, reports, host, runtime } = await codeFixture()
+  const source = 'c'.repeat(40), firstCandidate = 'd'.repeat(40), secondCandidate = 'e'.repeat(40), firstTarget = 'f'.repeat(40), secondTarget = '0'.repeat(40)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: codeTemplate.id, templateVersion: 1, parameters: { subject: 'intent replay' }, executionId: 'intent-replay' }, { id: 'project', teamIds: ['lead'] })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  host.status = { sourceCommit: source, submissionId: 'submission-old', integrationId: 'integration-old', phase: 'verified', targetCommit: firstTarget, candidateCommit: firstCandidate, reviewGate: host.codeCalls[0]!.reviewGate }
+  host.failTaskCreation = true
+  await expect(runtime.scan({ id: 'project', teamIds: ['lead'] })).rejects.toThrow(/injected task creation crash/)
+  expect(host.calls).toHaveLength(1)
+  const test = workflows.inspect('intent-replay')!.steps.find(step => step.id === 'test')!
+  await workflows.invalidateCandidate('intent-replay', 'test', test.revision, {
+    integration: { kind: 'integration', ref: 'integration-new' }, source: { kind: 'commit', ref: source }, target: { kind: 'commit', ref: secondTarget }, candidate: { kind: 'commit', ref: secondCandidate },
+    retryRound: 1, previousCandidates: [{ kind: 'commit', ref: firstCandidate }],
+  }, 'target advanced after reviewer intent was persisted')
+  await runtime.close(); await reports.close(); await workflows.close(); closeables.length = 0
+
+  host.failTaskCreation = false
+  host.status = { sourceCommit: source, submissionId: 'submission-new', integrationId: 'integration-new', phase: 'verified', targetCommit: secondTarget, candidateCommit: secondCandidate, reviewGate: host.codeCalls[0]!.reviewGate, previousCandidates: [firstCandidate] }
+  const restoredWorkflows = await WorkflowStore.open(directory)
+  const restoredReports = await ReportStore.open(directory)
+  const restored = await WorkflowRuntime.open(directory, restoredWorkflows, restoredReports, host, [codeTemplate])
+  closeables.push(restored, restoredReports, restoredWorkflows)
+  await restored.resume('intent-replay', { id: 'project', teamIds: ['lead'] })
+
+  expect(host.codeCalls).toHaveLength(1)
+  expect(host.calls).toHaveLength(2)
+  expect(restored.inspect('intent-replay')!.steps.find(step => step.stepId === 'review')).toMatchObject({ taskId: 'task-1', phase: 'running' })
+  expect(restoredWorkflows.inspect('intent-replay')!.candidateHistory[0]!.priorSteps.find(step => step.id === 'review')).toMatchObject({ phase: 'pending' })
+  expect((await readFile(join(directory, 'workflow-runtime.jsonl'), 'utf8')).split('\n').filter(line => line.includes('workflow-runtime/task-reset'))).toHaveLength(1)
+})
+
+it('replays a durable source rework after the binding-reset crash boundary without recreating implementation work', async () => {
+  const { directory, workflows, reports, host, runtime } = await codeFixture()
+  const oldSource = '6'.repeat(40), newSource = '7'.repeat(40), oldCandidate = '8'.repeat(40), newCandidate = '9'.repeat(40), oldTarget = 'a'.repeat(40), newTarget = 'b'.repeat(40)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: codeTemplate.id, templateVersion: 1, parameters: { subject: 'source replay' }, executionId: 'source-replay' }, { id: 'project', teamIds: ['lead'] })
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  host.status = { sourceCommit: oldSource, submissionId: 'submission-old', integrationId: 'integration-old', phase: 'verified', targetCommit: oldTarget, candidateCommit: oldCandidate, reviewGate: host.codeCalls[0]!.reviewGate }
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  await reports.record({ projectId: 'project', teamId: 'lead', taskId: 'task-1', attemptId: 'review-old', generation: 1, expectedRevision: 2, expectedTaskRevision: 1,
+    report: 'The old source was accepted.', criteria: host.calls[0]!.nonCodeCriteria, reviewerId: 'lead', rationale: 'Exact old source candidate reviewed.', decision: 'approved',
+    reviewBinding: { projectId: 'project', teamId: 'lead', executionId: 'source-replay', candidateRound: 0, ...host.calls[0]!.review! } })
+  await reports.accepted(reports.list()[0]!.id)
+  await runtime.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(1)
+
+  const oldReview = reports.list()[0]!.id
+  const implement = workflows.inspect('source-replay')!.steps.find(step => step.id === 'implement')!
+  await workflows.reworkSource('source-replay', 'implement', implement.revision, { kind: 'commit', ref: newSource }, {
+    previousAttemptId: 'attempt-old', submissionId: 'submission-old', sourceCommit: oldSource, round: 1, budget: 1,
+  }, 'authorized repair replaced the submitted source')
+  // Simulate SIGKILL after WorkflowStore flushes the source transition, before task bindings are reset.
+  await runtime.close(); await reports.close(); await workflows.close(); closeables.length = 0
+
+  host.status = { sourceCommit: newSource, submissionId: 'submission-new', integrationId: 'integration-new', phase: 'verified', targetCommit: newTarget, candidateCommit: newCandidate, reviewGate: host.codeCalls[0]!.reviewGate,
+    repair: { previousAttemptId: 'attempt-old', submissionId: 'submission-old', sourceCommit: oldSource, round: 1, budget: 1 } }
+  const restoredWorkflows = await WorkflowStore.open(directory)
+  const restoredReports = await ReportStore.open(directory)
+  const restored = await WorkflowRuntime.open(directory, restoredWorkflows, restoredReports, host, [codeTemplate])
+  closeables.push(restored, restoredReports, restoredWorkflows)
+  await restored.resume('source-replay', { id: 'project', teamIds: ['lead'] })
+  await restored.resume('source-replay', { id: 'project', teamIds: ['lead'] })
+
+  expect(host.codeCalls).toHaveLength(1)
+  expect(host.calls).toHaveLength(2)
+  expect(restored.inspect('source-replay')!.steps.find(step => step.stepId === 'review')).toMatchObject({ taskId: 'task-2', phase: 'running' })
+  expect(restoredWorkflows.inspect('source-replay')!.sourceHistory[0]).toMatchObject({ source: { kind: 'commit', ref: oldSource }, replacement: { kind: 'commit', ref: newSource } })
+  expect(restoredWorkflows.inspect('source-replay')!.sourceHistory[0]!.priorSteps.find(step => step.id === 'review')).toMatchObject({ receipt: { kind: 'report-review', reference: { ref: oldReview } } })
+  const runtimeLog = await readFile(join(directory, 'workflow-runtime.jsonl'), 'utf8')
+  expect(runtimeLog).toContain('"sourceRound":1')
+  expect(runtimeLog.split('\n').filter(line => line.includes('workflow-runtime/task-reset'))).toHaveLength(1)
+
+  host.status = { ...host.status, phase: 'merged', reviewId: oldReview }
+  await restored.scan({ id: 'project', teamIds: ['lead'] })
+  expect(host.approvals).toHaveLength(1)
+  expect(restoredWorkflows.inspect('source-replay')!.steps.find(step => step.id === 'integrate')).toMatchObject({ phase: 'pending' })
 })

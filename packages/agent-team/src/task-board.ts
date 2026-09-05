@@ -1,6 +1,7 @@
 /** Shared Team task DAG commands and runtime-enriched views. */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { isDeepStrictEqual } from 'node:util'
 import type { TeamMembership } from './roster.ts'
 import { TeamError } from './error.ts'
 import type { TeamJournal } from './journal.ts'
@@ -15,6 +16,7 @@ import type {
   IntegratedTaskAcceptance,
   ReportedTaskAcceptance,
   TeamTaskSnapshot,
+  TeamTaskReviewBinding,
   TeamTaskView,
   UpdateTeamTaskRequest,
 } from './types.ts'
@@ -29,6 +31,18 @@ const TASK_GRAPH_ERROR_CODES: Record<TeamTaskGraphViolation, string> = {
   missing: 'TEAM_TASK_NOT_FOUND',
   duplicate: 'TEAM_INVALID_ARGUMENT',
   cycle: 'TEAM_TASK_DEPENDENCY_CYCLE',
+}
+function reviewBinding(input: TeamTaskReviewBinding | undefined): TeamTaskReviewBinding | undefined {
+  if (input === undefined) return undefined
+  const commit = (value: string, name: string) => {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(value)) throw new TeamError(`Pinned review ${name} is invalid`, 'TEAM_INVALID_ARGUMENT')
+    return value
+  }
+  if (!Number.isSafeInteger(input.candidateRound) || input.candidateRound < 0) throw new TeamError('Pinned review candidate round is invalid', 'TEAM_INVALID_ARGUMENT')
+  return { projectId: requiredText(input.projectId, 'pinned review project', 128), teamId: requiredText(input.teamId, 'pinned review team', 128),
+    executionId: requiredText(input.executionId, 'pinned review execution', 128), candidateRound: input.candidateRound,
+    integrationId: requiredText(input.integrationId, 'pinned review integration', 128), sourceCommit: commit(input.sourceCommit, 'source'), targetCommit: commit(input.targetCommit, 'target'),
+    candidateCommit: commit(input.candidateCommit, 'candidate'), reviewGate: requiredText(input.reviewGate, 'pinned review gate', 128) }
 }
 
 /** Owns Team task limits, authorization, transitions, and derived views. */
@@ -94,18 +108,25 @@ export class TeamTaskBoard {
     const taskId = TeamTaskId(`workflow-${request.admissionKey}`)
     const subject = requiredText(request.subject, 'subject', 200)
     const description = requiredText(request.description, 'description', 16_384)
-    const nonCodeCriteria = requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384)
+    if ((request.nonCodeCriteria === undefined) === (request.reviewGate === undefined)) {
+      throw new TeamError('Pinned task requires exactly one report criteria or integration review gate', 'TEAM_INVALID_ARGUMENT')
+    }
+    const nonCodeCriteria = request.nonCodeCriteria === undefined ? undefined : requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384)
+    const reviewGate = request.reviewGate === undefined ? undefined : requiredText(request.reviewGate, 'integration review gate', 128)
+    const pinnedReview = reviewBinding(request.reviewBinding)
+    if (pinnedReview !== undefined && nonCodeCriteria === undefined) throw new TeamError('Pinned candidate review requires non-code criteria', 'TEAM_INVALID_ARGUMENT')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
       const existing = state.tasks.find(task => task.id === taskId)
       if (existing) {
-        if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria
+        if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria || existing.reviewGate !== reviewGate || !isDeepStrictEqual(existing.reviewBinding, pinnedReview)
           || existing.blockedBy.length !== 0 || existing.writeScopes.length !== 0) throw new TeamError('Pinned task replay has different immutable inputs', 'TEAM_INVALID_ARGUMENT')
         return this.taskView(root, state, existing)
       }
       const active = state.tasks.filter(task => task.status !== 'deleted').length
       if (active >= this.maxTasks) throw new TeamError(`Team task limit ${this.maxTasks} reached`, 'TEAM_TASK_LIMIT')
-      const task: TeamTaskSnapshot = { id: taskId, revision: 1, subject, description, nonCodeCriteria, status: 'pending', blockedBy: [], writeScopes: [] }
+      const task: TeamTaskSnapshot = { id: taskId, revision: 1, subject, description,
+        ...(nonCodeCriteria === undefined ? {} : { nonCodeCriteria }), ...(reviewGate === undefined ? {} : { reviewGate }), ...(pinnedReview === undefined ? {} : { reviewBinding: pinnedReview }), status: 'pending', blockedBy: [], writeScopes: [] }
       this.assertTaskGraph(state, task)
       await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
       return this.taskView(root, state, task)
@@ -385,6 +406,8 @@ export class TeamTaskBoard {
       subject: task.subject,
       description: task.description,
       ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }),
+      ...(task.reviewGate === undefined ? {} : { reviewGate: task.reviewGate }),
+      ...(task.reviewBinding === undefined ? {} : { reviewBinding: structuredClone(task.reviewBinding) }),
       status: task.status,
       blockedBy: structuredClone(task.blockedBy),
       writeScopes: structuredClone(task.writeScopes),

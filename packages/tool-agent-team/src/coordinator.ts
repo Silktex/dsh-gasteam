@@ -23,7 +23,8 @@ const output = { schema: resultSchema, render: (_args: unknown, value: unknown) 
 const reportsSchema = { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
   id: { type: 'string' }, projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true },
   attemptId: { type: 'string', required: true }, generation: { type: 'integer', required: true }, expectedRevision: { type: 'integer', required: true }, expectedTaskRevision: { type: 'integer', required: true },
-  report: { type: 'string', required: true }, criteria: { type: 'string', required: true }, reviewerId: { type: 'string' }, rationale: { type: 'string' }, phase: { type: 'string', required: true, enum: ['awaiting-review', 'pending', 'accepted'] },
+  report: { type: 'string', required: true }, criteria: { type: 'string', required: true }, reviewerId: { type: 'string' }, rationale: { type: 'string' }, decision: { type: 'string', enum: ['approved', 'rejected'] }, phase: { type: 'string', required: true, enum: ['awaiting-review', 'pending', 'accepted'] },
+  reviewBinding: { type: 'object', additionalProperties: false, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, executionId: { type: 'string', required: true }, candidateRound: { type: 'integer', required: true }, integrationId: { type: 'string', required: true }, sourceCommit: { type: 'string', required: true }, targetCommit: { type: 'string', required: true }, candidateCommit: { type: 'string', required: true }, reviewGate: { type: 'string', required: true } } },
 } } } as const
 const reportsOutput = { schema: reportsSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const workflowSchema = { type: 'object', additionalProperties: false, properties: {
@@ -47,7 +48,11 @@ function value(view: SchedulingView) {
     ...(attemptId === undefined ? {} : { attemptId }), ...(nextDispatchAt === undefined ? {} : { nextDispatchAt }),
   })) }
 }
-function reports(value: readonly ReviewableReport[]) { return value.map(report => ({ ...report })) }
+function reports(value: readonly ReviewableReport[]) {
+  return value.map(({ decision, reviewBinding, ...report }) => ({ ...report,
+    ...(decision === undefined ? {} : { decision }), ...(reviewBinding === undefined ? {} : { reviewBinding }),
+  }))
+}
 function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.steps.map(step => ({ ...step })) } }
 function escalation(item: OperatorEscalation) { const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
   ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution }) } }
@@ -83,14 +88,25 @@ export function apply(ctx: Context): void {
       async execute(args, exec) { return escalation(await ctx.workspaceCoordinator.acknowledgeHealth(caller(exec.agent), args.project_id, args.escalation_id, args.expected_revision)) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
-      name: 'team_report_accept', description: 'Accept a terminal non-code worker report after reviewing its evidence against the task criteria. This records an immutable rationale.',
-      parameters: { project_id: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, generation: { type: 'integer', required: true }, expected_revision: { type: 'integer', required: true }, expected_task_revision: { type: 'integer', required: true }, rationale: { type: 'string', required: true } }, output: reportsOutput,
-      async execute(args, exec) { return reports([await ctx.workspaceCoordinator.acceptReport(caller(exec.agent), args.project_id, { attemptId: args.attempt_id, generation: args.generation, expectedRevision: args.expected_revision, expectedTaskRevision: args.expected_task_revision, rationale: args.rationale })]) },
+      name: 'team_report_accept', description: 'Accept a terminal non-code worker report after reviewing its evidence against the task criteria. This records an immutable rationale. Pinned candidate-review tasks additionally require approved or rejected; rejected preserves the audited report while preventing that candidate from merging.',
+      parameters: { project_id: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, generation: { type: 'integer', required: true }, expected_revision: { type: 'integer', required: true }, expected_task_revision: { type: 'integer', required: true }, rationale: { type: 'string', required: true }, decision: { type: 'string', enum: ['approved', 'rejected'] } }, output: reportsOutput,
+      async execute(args, exec) { return reports([await ctx.workspaceCoordinator.acceptReport(caller(exec.agent), args.project_id, { attemptId: args.attempt_id, generation: args.generation, expectedRevision: args.expected_revision, expectedTaskRevision: args.expected_task_revision, rationale: args.rationale, ...(args.decision === undefined ? {} : { decision: args.decision }) })]) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
-      name: 'team_workflow_create', description: 'Create the pinned investigation/report workflow for a registered project. The question and template version are durably pinned before task dispatch.',
-      parameters: { project_id: { type: 'string', required: true }, question: { type: 'string', required: true }, execution_id: { type: 'string' } }, output: workflowOutput,
-      async execute(args, exec) { return workflow(await ctx.workspaceCoordinator.createWorkflow(caller(exec.agent), { projectId: args.project_id, teamId: agent.id, templateId: 'investigation-report', templateVersion: 1, parameters: { question: args.question }, ...(args.execution_id === undefined ? {} : { executionId: args.execution_id }) })) },
+      name: 'team_workflow_create', description: 'Create one built-in pinned workflow for a registered project. investigation-report requires question; implementation-test-review-integration requires subject and routes implementation through verified Git review and host approval.',
+      parameters: { project_id: { type: 'string', required: true }, workflow_kind: { type: 'string', enum: ['investigation-report', 'implementation-test-review-integration'] }, question: { type: 'string' }, subject: { type: 'string' }, execution_id: { type: 'string' } }, output: workflowOutput,
+      async execute(args, exec) {
+        const workflowKind = args.workflow_kind ?? 'investigation-report'
+        const selected = workflowKind === 'investigation-report'
+          ? args.question === undefined ? undefined : { templateId: 'investigation-report' as const, parameters: { question: args.question } }
+          : args.subject === undefined ? undefined : { templateId: 'implementation-test-review-integration' as const, parameters: { subject: args.subject } }
+        if (!selected) throw new Error(workflowKind === 'investigation-report'
+          ? 'investigation-report workflow requires question'
+          : 'implementation-test-review-integration workflow requires subject')
+        return workflow(await ctx.workspaceCoordinator.createWorkflow(caller(exec.agent), { projectId: args.project_id, teamId: agent.id,
+          templateId: selected.templateId, templateVersion: 1, parameters: selected.parameters,
+          ...(args.execution_id === undefined ? {} : { executionId: args.execution_id }) }))
+      },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_workflow_inspect', description: 'Inspect pinned workflow steps, their concrete managed tasks, and accepted report receipts.',

@@ -21,6 +21,7 @@ import { MockAdapter, textResponse } from '../../../tests/support/mock-adapter.t
 import TeamService from '../src/index.ts'
 import { ProjectCatalog } from '../src/projects.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
+import { CoordinatorExecution } from '../src/coordinator-execution.ts'
 import { HealthStore } from '../src/health.ts'
 import * as CoordinatorPlugin from '../src/coordinator.ts'
 import { gitFixture } from './git-fixture.ts'
@@ -60,6 +61,33 @@ async function fixture(integration = false) {
   }
   return { ...repo, ctx, lead, config, coordinator, request }
 }
+
+it('returns ordered exact repair source lineage when replacement was already submitted before workflow reconciliation', async () => {
+  const original = 'a'.repeat(40), repaired = 'b'.repeat(40)
+  const taskId = 'workflow-intent'
+  const originalSubmission = { id: 'submission-original', integrationId: 'integration-original', attemptId: 'attempt-original', generation: 1,
+    projectId: 'project', teamId: 'lead', taskId, sourceCommit: original, reviewGate: 'workflow-gate' }
+  const repair = { previousAttemptId: 'attempt-original', submissionId: 'submission-original', integrationId: 'integration-original', sourceCommit: original, round: 1 }
+  const repairedSubmission = { id: 'submission-repaired', integrationId: 'integration-repaired', attemptId: 'attempt-repaired', generation: 2,
+    projectId: 'project', teamId: 'lead', taskId, sourceCommit: repaired, reviewGate: 'workflow-gate' }
+  const status = await (CoordinatorExecution.prototype as unknown as { workflowCodeStatus(this: unknown, input: unknown): Promise<unknown> }).workflowCodeStatus.call({
+    assignments: { list: () => [
+      { attemptId: 'attempt-original', generation: 1, projectId: 'project', teamId: 'lead', taskId },
+      { attemptId: 'attempt-repaired', generation: 2, projectId: 'project', teamId: 'lead', taskId, repair, repairLimit: 1 },
+    ] },
+    submissions: { list: () => [originalSubmission, repairedSubmission] },
+    projects: () => [{ id: 'project', teamIds: ['lead'] }],
+    leadFor: async () => ({ id: 'lead' }),
+    ctx: { agentTeams: { listIntegrations: () => [{ id: 'integration-repaired', phase: 'failed', reviewGate: 'workflow-gate' }] } },
+  }, { intentId: 'intent', projectId: 'project', teamId: 'lead', executionId: 'execution', stepId: 'implement', subject: 'subject', description: 'description', reviewGate: 'workflow-gate' }) as { sourceCommit: string; sourceLineage: { sourceCommit: string; submissionId: string; repair?: { sourceCommit: string; submissionId: string; round: number } }[] }
+
+  expect(status.sourceCommit).toBe(repaired)
+  expect(status.sourceLineage).toEqual([
+    { sourceCommit: original, submissionId: 'submission-original', integrationId: 'integration-original' },
+    { sourceCommit: repaired, submissionId: 'submission-repaired', integrationId: 'integration-repaired',
+      repair: { previousAttemptId: 'attempt-original', submissionId: 'submission-original', sourceCommit: original, round: 1, budget: 1 } },
+  ])
+})
 
 it('discovers admitted tasks and stable coordinator identity after fresh service construction with no live Lead', async () => {
   const { root, ctx, lead, config, coordinator, request } = await fixture()
@@ -237,6 +265,30 @@ it('replays a workflow task creation crash through its Team-log admission key wi
   expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(value => value.id === task.id)).toHaveLength(1)
   expect(restored.view().workflows[0]!.steps).toContainEqual(expect.objectContaining({ stepId: 'investigate', taskId: task.id, phase: 'running' }))
   expect(restored.view().attempts.filter(attempt => attempt.taskId === task.id)).toHaveLength(1)
+})
+
+it('pins the code review gate in the Team task before the workflow can acknowledge task creation', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  const original = ctx.agentTeams.createPinnedTask.bind(ctx.agentTeams)
+  const sideEffect = vi.spyOn(ctx.agentTeams, 'createPinnedTask').mockImplementationOnce(async (caller, input) => {
+    await original(caller, input)
+    throw new Error('crash after gated Team task side effect')
+  })
+  await expect(running.createWorkflow(lead, { projectId: 'project', teamId: lead.id, templateId: 'implementation-test-review-integration', templateVersion: 1,
+    parameters: { subject: 'gate crash fence' }, executionId: 'gated-crash-window' })).rejects.toThrow(/gated Team task side effect/)
+  const task = ctx.agentTeams.listTasks(lead).find(value => value.subject === 'Implement gate crash fence')!
+  expect(task).toMatchObject({ reviewGate: 'workflow-gated-crash-window-implement', status: 'pending' })
+  expect(task.nonCodeCriteria).toBeUndefined()
+  expect(running.inspectWorkflow(lead, 'gated-crash-window').steps[0]).toMatchObject({ stepId: 'implement', phase: 'pending' })
+  sideEffect.mockRestore()
+  await running.resumeWorkflow(lead, 'gated-crash-window')
+  expect(ctx.agentTeams.listTasks(lead).filter(value => value.id === task.id)).toHaveLength(1)
+  expect(running.inspectWorkflow(lead, 'gated-crash-window').steps[0]).toMatchObject({ taskId: task.id, phase: 'running' })
 })
 
 it('accepts the first workflow report, hands its evidence to a fresh second-step worker, and keeps both concrete task bindings', async () => {

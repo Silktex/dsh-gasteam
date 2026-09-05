@@ -91,6 +91,8 @@ describe('Team RPC codecs', () => {
       rationale: 'The report satisfies the stated criteria.',
     }
     expect(remoteAcceptReportRequestSchema.parse(request)).toEqual(request)
+    expect(remoteAcceptReportRequestSchema.parse({ ...request, decision: 'rejected' })).toEqual({ ...request, decision: 'rejected' })
+    expect(() => remoteAcceptReportRequestSchema.parse({ ...request, decision: 'defer' })).toThrow()
     expect(() => remoteAcceptReportRequestSchema.parse({ ...request, rationale: '   ' })).toThrow()
     expect(() => remoteAcceptReportRequestSchema.parse({ ...request, expectedRevision: 0 })).toThrow()
     expect(() => remoteAcceptReportRequestSchema.parse({ ...request, expectedTaskRevision: -1 })).toThrow()

@@ -21,6 +21,7 @@ export const createTaskSchema = wireSchema<CreateTeamTaskRequest>(z.object({
   'subject': z.string().readonly(),
   'description': z.string().readonly(),
   'nonCodeCriteria': z.string().readonly().optional(),
+  'reviewGate': z.string().readonly().optional(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly().optional(),
   'writeScopes': z.array(z.string()).readonly().optional(),
 }))
@@ -30,12 +31,16 @@ export const remoteAcceptReportRequestSchema = wireSchema<RemoteAcceptReportRequ
   'projectId': z.string().readonly(), 'attemptId': z.string().readonly(), 'generation': z.number().int().positive().readonly(),
   'expectedRevision': z.number().int().positive().readonly(), 'expectedTaskRevision': z.number().int().positive().readonly(),
   'rationale': z.string().trim().min(1).max(16_384).readonly(),
+  'decision': z.union([z.literal('approved'), z.literal('rejected')]).readonly().optional(),
 }).strict())
 export const reviewableReportSchema = wireSchema<ReviewableReport>(z.object({
   'projectId': z.string().readonly(), 'teamId': z.string().readonly(), 'taskId': z.string().readonly(), 'attemptId': z.string().readonly(),
   'generation': z.number().readonly(), 'expectedRevision': z.number().readonly(), 'expectedTaskRevision': z.number().readonly(),
   'report': z.string().readonly(), 'criteria': z.string().readonly(), 'phase': z.union([z.literal('awaiting-review'), z.literal('pending'), z.literal('accepted')]).readonly(),
   'id': z.string().readonly().optional(), 'reviewerId': z.string().readonly().optional(), 'rationale': z.string().readonly().optional(),
+  'decision': z.union([z.literal('approved'), z.literal('rejected')]).readonly().optional(),
+  'reviewBinding': z.object({ projectId: z.string().readonly(), teamId: z.string().readonly(), executionId: z.string().readonly(), candidateRound: z.number().int().nonnegative().readonly(),
+    integrationId: z.string().readonly(), sourceCommit: z.string().readonly(), targetCommit: z.string().readonly(), candidateCommit: z.string().readonly(), reviewGate: z.string().readonly() }).strict().readonly().optional(),
 }).strict().readonly())
 export const reviewableReportsSchema = wireSchema<ReviewableReport[]>(z.array(reviewableReportSchema))
 export const createWorkflowSchema = wireSchema<CreateWorkflowRequest>(z.object({
@@ -69,6 +74,7 @@ export const taskResultSchema = wireSchema<TeamTaskMutationResult>(z.union([z.ob
   'subject': z.string().readonly(),
   'description': z.string().readonly(),
   'nonCodeCriteria': z.string().readonly().optional(),
+  'reviewGate': z.string().readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),
@@ -125,6 +131,7 @@ export const teamViewSchema = wireSchema<TeamView>(z.object({
   'subject': z.string().readonly(),
   'description': z.string().readonly(),
   'nonCodeCriteria': z.string().readonly().optional(),
+  'reviewGate': z.string().readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),

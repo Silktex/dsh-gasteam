@@ -90,6 +90,10 @@ const teamTaskSnapshotSchema = z.object({
   subject: z.string(),
   description: z.string(),
   nonCodeCriteria: z.string().min(1).refine(value => value.trim().length > 0).optional(),
+  reviewGate: z.string().min(1).max(128).refine(value => value.trim().length > 0).optional(),
+  reviewBinding: z.object({ projectId: z.string().min(1), teamId: z.string().min(1), executionId: z.string().min(1), candidateRound: z.number().int().nonnegative(),
+    integrationId: z.string().min(1), sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), targetCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+    candidateCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), reviewGate: z.string().min(1).max(128) }).strict().optional(),
   status: z.enum(['pending', 'in_progress', 'completed', 'deleted']),
   ownerId: sessionIdSchema.optional(),
   blockedBy: z.array(teamTaskIdSchema),
@@ -431,6 +435,15 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       }
       if (prior !== undefined && prior.nonCodeCriteria !== task.nonCodeCriteria) {
         throw new Error(`team task "${task.id}" changed immutable non-code criteria`)
+      }
+      if (prior !== undefined && prior.reviewGate !== task.reviewGate) {
+        throw new Error(`team task "${task.id}" changed immutable integration review gate`)
+      }
+      if (prior !== undefined && JSON.stringify(prior.reviewBinding) !== JSON.stringify(task.reviewBinding)) {
+        throw new Error(`team task "${task.id}" changed immutable workflow review binding`)
+      }
+      if (task.nonCodeCriteria !== undefined && task.reviewGate !== undefined) {
+        throw new Error(`team task "${task.id}" combines report criteria and integration review gate`)
       }
       if (task.status === 'completed' && task.result === undefined) {
         throw new Error(`completed team task "${task.id}" has no result evidence`)

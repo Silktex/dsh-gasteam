@@ -62,8 +62,24 @@ const stepRecordSchema = z.object({
   failure: failureSchema.optional(), failedAt: nonnegative.optional(), notBefore: nonnegative.optional(), authorization: authorizationSchema.optional(),
 }).strict()
 export type WorkflowStepRecord = z.output<typeof stepRecordSchema>
+/** Immutable evidence retained whenever a verified candidate is superseded by a new target round. */
+const candidateHistorySchema = z.object({
+  stepId: id, source: referenceSchema, candidate: referenceSchema, verification: referenceSchema,
+  /** Full completed/failed round checkpoints, including the prior review report. */
+  priorSteps: z.array(stepRecordSchema).min(1).max(256),
+  replacement: z.object({
+    integration: referenceSchema, source: referenceSchema, target: referenceSchema, candidate: referenceSchema,
+    retryRound: positive, previousCandidates: z.array(referenceSchema).min(1).max(16),
+  }).strict(),
+  reason: text, at: nonnegative,
+}).strict()
+const sourceReworkSchema = z.object({ previousAttemptId: id, submissionId: id, sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), round: positive, budget: positive }).strict()
+const sourceHistorySchema = z.object({ stepId: id, source: referenceSchema, priorSteps: z.array(stepRecordSchema).min(1).max(256), replacement: referenceSchema, repair: sourceReworkSchema, reason: text, at: nonnegative }).strict()
 const executionSchema = z.object({
   id, definition: workflowTemplateSchema, steps: z.array(stepRecordSchema).min(1).max(256), authorizationHistory: z.array(authorizationSchema).max(256),
+  /** Superseded candidate evidence is retained; only current step artifacts drive eligibility. */
+  candidateHistory: z.array(candidateHistorySchema).max(1_024).default([]),
+  sourceHistory: z.array(sourceHistorySchema).max(1_024).default([]),
 }).strict()
 export type WorkflowExecution = z.output<typeof executionSchema>
 
@@ -76,6 +92,10 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('workflow/step-failed'), token: tokenSchema, failure: failureSchema, at: nonnegative }).strict(),
   z.object({ ...envelope, type: z.literal('workflow/step-retried'), token: tokenSchema }).strict(),
   z.object({ ...envelope, type: z.literal('workflow/publication-authorized'), token: tokenSchema, authorization: authorizationInputSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('workflow/candidate-invalidated'), token: tokenSchema, reason: text,
+    replacement: z.object({ integration: referenceSchema, source: referenceSchema, target: referenceSchema, candidate: referenceSchema,
+      retryRound: positive, previousCandidates: z.array(referenceSchema).min(1).max(16) }).strict(), at: nonnegative }).strict(),
+  z.object({ ...envelope, type: z.literal('workflow/source-reworked'), token: tokenSchema, replacement: referenceSchema, repair: sourceReworkSchema, reason: text, at: nonnegative }).strict(),
 ])
 type Payload =
   | { type: 'workflow/created'; execution: WorkflowExecution }
@@ -84,7 +104,18 @@ type Payload =
   | { type: 'workflow/step-failed'; token: StepToken; failure: StepFailure; at: number }
   | { type: 'workflow/step-retried'; token: StepToken }
   | { type: 'workflow/publication-authorized'; token: StepToken; authorization: PublicationAuthorization }
+  | { type: 'workflow/candidate-invalidated'; token: StepToken; reason: string; replacement: CandidateReplacement; at: number }
+  | { type: 'workflow/source-reworked'; token: StepToken; replacement: ArtifactReference; repair: SourceRework; reason: string; at: number }
 export type StepToken = z.input<typeof tokenSchema>
+export interface CandidateReplacement {
+  readonly integration: ArtifactReference
+  readonly source: ArtifactReference
+  readonly target: ArtifactReference
+  readonly candidate: ArtifactReference
+  readonly retryRound: number
+  readonly previousCandidates: readonly ArtifactReference[]
+}
+export interface SourceRework { readonly previousAttemptId: string; readonly submissionId: string; readonly sourceCommit: string; readonly round: number; readonly budget: number }
 
 function definitionStep(execution: WorkflowExecution, stepId: string) {
   const step = execution.definition.steps.find(candidate => candidate.id === stepId)
@@ -115,6 +146,18 @@ function eligible(execution: WorkflowExecution, step: WorkflowStepRecord, now: n
 }
 function replaceStep(execution: WorkflowExecution, next: WorkflowStepRecord): WorkflowExecution {
   return { ...execution, steps: execution.steps.map(step => step.id === next.id ? next : step) }
+}
+function descendantSteps(execution: WorkflowExecution, root: string): Set<string> {
+  const affected = new Set([root])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const step of execution.definition.steps) {
+      if (affected.has(step.id) || !step.dependsOn.some(dependency => affected.has(dependency))) continue
+      affected.add(step.id); changed = true
+    }
+  }
+  return affected
 }
 function ensureCompletion(execution: WorkflowExecution, step: WorkflowStepRecord, completion: z.output<typeof completionSchema>, at: number): WorkflowStepRecord {
   const definition = definitionStep(execution, step.id)
@@ -220,7 +263,7 @@ function reduce(state: WorkflowExecution[], raw: unknown): WorkflowExecution[] {
   if (event.type === 'workflow/created') {
     if (state.some(execution => execution.id === event.execution.id)) throw new Error('Workflow execution already exists')
     validateWorkflowTemplate(event.execution.definition)
-    if (event.execution.authorizationHistory.length !== 0 || event.execution.steps.length !== event.execution.definition.steps.length || event.execution.steps.some((step, index) => step.id !== event.execution.definition.steps[index]?.id || step.phase !== 'pending' || step.attempts !== 0 || step.revision !== 1 || step.artifacts !== undefined || step.receipt !== undefined || step.failure !== undefined || step.failedAt !== undefined || step.notBefore !== undefined || step.authorization !== undefined)) throw new Error('Workflow creation must start with empty pending steps')
+    if (event.execution.authorizationHistory.length !== 0 || event.execution.candidateHistory.length !== 0 || event.execution.sourceHistory.length !== 0 || event.execution.steps.length !== event.execution.definition.steps.length || event.execution.steps.some((step, index) => step.id !== event.execution.definition.steps[index]?.id || step.phase !== 'pending' || step.attempts !== 0 || step.revision !== 1 || step.artifacts !== undefined || step.receipt !== undefined || step.failure !== undefined || step.failedAt !== undefined || step.notBefore !== undefined || step.authorization !== undefined)) throw new Error('Workflow creation must start with empty pending steps')
     return [...state, event.execution]
   }
   const executionIndex = state.findIndex(execution => execution.id === event.token.executionId)
@@ -254,6 +297,51 @@ function reduce(state: WorkflowExecution[], raw: unknown): WorkflowExecution[] {
         && authorization.evidence.kind === event.authorization.evidence.kind && authorization.evidence.ref === event.authorization.evidence.ref)) throw new Error('Publication authorization evidence is already bound to another step')
       next = { ...current, revision: current.revision + 1, authorization: { ...event.authorization, executionId: execution.id, stepId: current.id, revision: current.revision } }
       break
+    case 'workflow/candidate-invalidated': {
+      if (definition.acceptance.kind !== 'checks-passed' || current.phase !== 'completed' || current.receipt?.kind !== 'checks-passed') {
+        throw new Error('Only a completed checks-passed candidate can be invalidated')
+      }
+      const source = completedArtifact(execution, definition.acceptance.source)
+      const candidate = current.artifacts?.[definition.acceptance.candidate]
+      if (!source || !candidate || !sameReference(current.receipt.source, source) || !sameReference(current.receipt.candidate, candidate)) {
+        throw new Error('Candidate invalidation requires current source and candidate evidence')
+      }
+      const affected = descendantSteps(execution, current.id)
+      if (execution.steps.some(step => affected.has(step.id) && step.phase === 'completed' && step.receipt?.kind === 'integrated')) {
+        throw new Error('An integrated workflow candidate cannot be invalidated')
+      }
+      if (!sameReference(event.replacement.source, source)) throw new Error('Candidate replacement changes the immutable submitted source')
+      if (sameReference(event.replacement.candidate, candidate)) throw new Error('Candidate replacement must differ from the current candidate')
+      if (!event.replacement.previousCandidates.some(previous => sameReference(previous, candidate))) {
+        throw new Error('Candidate replacement must retain the current candidate in its integration history')
+      }
+      if (event.replacement.retryRound !== execution.candidateHistory.length + 1) throw new Error('Candidate replacement retry round is not the next pinned round')
+      const priorSteps = execution.steps.filter(step => affected.has(step.id))
+      const reset = execution.steps.map(step => !affected.has(step.id) ? step : {
+        id: step.id, phase: 'pending' as const, attempts: 0, revision: step.revision + 1,
+      })
+      const updated: WorkflowExecution = {
+        ...execution,
+        steps: reset,
+        candidateHistory: [...execution.candidateHistory, { stepId: current.id, source, candidate,
+          verification: current.receipt.verification, priorSteps, replacement: event.replacement, reason: event.reason, at: event.at }],
+      }
+      return state.map((candidate, index) => index === executionIndex ? updated : candidate)
+    }
+    case 'workflow/source-reworked': {
+      if (definition.acceptance.kind !== 'artifact-submitted' || current.phase !== 'completed' || current.receipt?.kind !== 'artifact-submitted') throw new Error('Only a completed submitted source can be reworked')
+      const source = current.artifacts?.[definition.acceptance.artifact]
+      if (!source || sameReference(source, event.replacement)) throw new Error('Source rework requires a different pinned replacement source')
+      if (execution.steps.some(step => step.phase === 'completed' && step.receipt?.kind === 'integrated')) throw new Error('An integrated workflow source cannot be reworked')
+      const pinnedBudget = execution.sourceHistory[0]?.repair.budget ?? event.repair.budget
+      if (source.kind !== 'commit' || source.ref !== event.repair.sourceCommit || event.repair.round !== execution.sourceHistory.length + 1
+        || event.repair.budget !== pinnedBudget || event.repair.round > pinnedBudget || event.repair.round > definition.retry.maxAttempts - 1 || pinnedBudget > 10) throw new Error('Source rework repair lineage or budget is invalid')
+      const affected = descendantSteps(execution, current.id)
+      const priorSteps = execution.steps.filter(step => affected.has(step.id))
+      const updated: WorkflowExecution = { ...execution, steps: execution.steps.map(step => !affected.has(step.id) ? step : { id: step.id, phase: 'pending' as const, attempts: 0, revision: step.revision + 1 }),
+        sourceHistory: [...execution.sourceHistory, { stepId: current.id, source, priorSteps, replacement: event.replacement, repair: event.repair, reason: event.reason, at: event.at }] }
+      return state.map((candidate, index) => index === executionIndex ? updated : candidate)
+    }
   }
   const updated = event.type === 'workflow/publication-authorized'
     ? { ...replaceStep(execution, next), authorizationHistory: [...execution.authorizationHistory, next.authorization!] }
@@ -275,7 +363,7 @@ export class WorkflowStore {
     const existing = this.inspect(executionId)
     if (existing) throw new Error('Workflow execution already exists')
     const execution: WorkflowExecution = { id: executionId, definition,
-      steps: definition.steps.map(step => ({ id: step.id, phase: 'pending', attempts: 0, revision: 1 })), authorizationHistory: [] }
+      steps: definition.steps.map(step => ({ id: step.id, phase: 'pending', attempts: 0, revision: 1 })), authorizationHistory: [], candidateHistory: [], sourceHistory: [] }
     return (await this.journal.append(() => ({ type: 'workflow/created', execution }))).find(candidate => candidate.id === executionId)!
   }
 
@@ -304,6 +392,21 @@ export class WorkflowStore {
   async authorizePublication(executionId: string, stepId: string, expectedRevision: number, authorization: PublicationAuthorization): Promise<WorkflowStepRecord> {
     authorizationInputSchema.parse(authorization)
     return this.mutate({ type: 'workflow/publication-authorized', token: { executionId, stepId, expectedRevision }, authorization }, executionId, stepId)
+  }
+  /**
+   * Begin a fresh verification/review/integration round after the pinned target
+   * moved. This is deliberately limited to a completed checks receipt: callers
+   * cannot reopen implementation or erase an arbitrary review.
+   */
+  async invalidateCandidate(executionId: string, stepId: string, expectedRevision: number, replacement: CandidateReplacement, reason: string): Promise<WorkflowExecution> {
+    const message = text.parse(reason)
+    const inputs = z.object({ integration: referenceSchema, source: referenceSchema, target: referenceSchema, candidate: referenceSchema,
+      retryRound: positive, previousCandidates: z.array(referenceSchema).min(1).max(16) }).strict().parse(replacement)
+    return (await this.journal.append(() => ({ type: 'workflow/candidate-invalidated', token: { executionId, stepId, expectedRevision }, reason: message, replacement: inputs, at: this.timestamp() })))
+      .find(execution => execution.id === executionId)!
+  }
+  async reworkSource(executionId: string, stepId: string, expectedRevision: number, replacement: ArtifactReference, repair: SourceRework, reason: string): Promise<WorkflowExecution> {
+    return (await this.journal.append(() => ({ type: 'workflow/source-reworked', token: { executionId, stepId, expectedRevision }, replacement: referenceSchema.parse(replacement), repair: sourceReworkSchema.parse(repair), reason: text.parse(reason), at: this.timestamp() }))).find(execution => execution.id === executionId)!
   }
   close(): Promise<void> { return this.journal.close() }
 
