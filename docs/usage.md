@@ -76,7 +76,7 @@ The coordinator plugin is an opt-in host service. It discovers registered Teams 
 
 Execution dispatches independent pending tasks under global and project capacity. Pause blocks new dispatch while existing workers continue. Code tasks remain pending until their exact submission is verified and accepted. Non-code tasks with immutable `nonCodeCriteria` use the separate report review and acceptance path.
 
-### Selected-project external non-code provider
+### Selected-project external provider
 
 An operator may opt one already registered project into the external Codex provider. Register the project first, then configure one canonical provider policy on the coordinator host:
 
@@ -87,6 +87,7 @@ execution: {
     projectId: 'research',
     directory: '/var/lib/dsh/external',
     cwd: '/repos/research',
+    codeWorktreeDirectory: '/var/lib/dsh/external-worktrees', // optional code-task opt-in
     executable: '/usr/local/bin/codex',
     version: '0.153.4',
     model: 'gpt-5.6-codex',
@@ -97,7 +98,9 @@ execution: {
 }
 ```
 
-`cwd` must canonically equal the selected registered project's repository. At startup the host verifies the configured executable's version and local authentication status before reserving new work; that preflight does not start a model turn. Only explicit non-code tasks in that selected project use this provider. The admitted executable, version, model, sandbox, repository, spool limit, and cancellation grace are pinned in each assignment. Other projects and code tasks retain normal DSH routing.
+`cwd` must canonically equal the selected registered project's repository. At startup the host verifies the configured executable's version and local authentication status before reserving new work; that preflight does not start a model turn. Explicit non-code tasks in the selected project use this provider. The admitted executable, version, model, sandbox, repository, spool limit, and cancellation grace are pinned in each assignment. Other projects retain normal DSH routing; selected-project code tasks do too unless the code worktree option below is set.
+
+Set `codeWorktreeDirectory` only to opt that same project’s code tasks into the external provider. It must be a canonical directory outside the repository. Each code attempt writes an immutable worktree intent before Git creates its checkout, then records a separate completion receipt only after the `git worktree add` process has closed and the exact branch identity is verified. If recovery finds intent without that completion receipt, it retains ownership and blocks launch or checkout adoption; resolve the provision boundary before retrying. A completed external code task enters the ordinary verified integration path with its exact provider-owned checkout, branch, base commit, and runtime receipt.
 
 If a restart finds retained external work but current admission is unavailable or differs from its pinned policy, the coordinator enters recovery-only mode for that project. It can observe or safely stop the retained helper, but it blocks every new selected-project non-code task with `provider-admission`; it never falls back to DSH. Restore the exact admitted policy to resume dispatch. Legacy external journal records without a pinned policy remain readable and intentionally require manual recovery.
 
