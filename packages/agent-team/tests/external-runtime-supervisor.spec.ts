@@ -8,6 +8,7 @@ import { durableLink, ExternalRuntimeSupervisor, ExternalRuntimeSupervisorClient
 import { acquireFileOwnership } from '../src/file-ownership.ts'
 
 const fsyncEvents = vi.hoisted((): string[] => [])
+const procDirentEnumerations = vi.hoisted((): number[] => [])
 vi.mock('node:fs/promises', async importOriginal => {
   const filesystem = await importOriginal<typeof import('node:fs/promises')>()
   return {
@@ -15,6 +16,14 @@ vi.mock('node:fs/promises', async importOriginal => {
     link: async (...args: Parameters<typeof filesystem.link>) => {
       fsyncEvents.push(`link:${String(args[1])}`)
       return await filesystem.link(...args)
+    },
+    readdir: async (...args: Parameters<typeof filesystem.readdir>) => {
+      if (args[0] === '/proc' && typeof args[1] === 'object' && args[1] !== null && 'withFileTypes' in args[1] && args[1].withFileTypes) {
+        procDirentEnumerations.push(1)
+        const error = Object.assign(new Error('vanished /proc entry'), { code: 'ENOENT' })
+        throw error
+      }
+      return await filesystem.readdir(...args)
     },
     open: async (...args: Parameters<typeof filesystem.open>) => {
       const handle = await filesystem.open(...args)
@@ -158,10 +167,20 @@ it('kills a setsid-escaped descendant when the namespace wrapper is cancelled', 
   const wrapper = (await readSupervisorIdentity(root))!.process!
   let escaped: Array<{ pid: number; birthId: string }> = []
   await waitFor(async () => {
-    escaped = await Promise.all((await descendants(wrapper.pid)).map(async pid => await processBirthIdentity(pid).catch(() => undefined))).then(items => items.filter((item): item is { pid: number; birthId: string } => item !== undefined))
+    escaped = await Promise.all((await descendants(wrapper.pid)).map(async pid => {
+      try { return await processBirthIdentity(pid) } catch (error) {
+        // /proc entries may vanish after enumeration; every other inspection
+        // failure invalidates the containment proof instead of being hidden.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+        throw error
+      }
+    })).then(items => items.filter((item): item is { pid: number; birthId: string } => item !== undefined))
     return escaped.length >= 2
   })
   await exited
+  // Node resolves unknown Dirents by lstat during `withFileTypes` enumeration;
+  // forcing that path to fail proves containment discovery uses plain names.
+  expect(procDirentEnumerations).toEqual([])
   await waitFor(async () => (await Promise.all(escaped.map(identity => inspectProcessIdentity(identity)))).every(state => state === 'missing'))
   expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
 })
@@ -214,19 +233,23 @@ async function waitFor(condition: () => Promise<boolean>, timeout = 3_000): Prom
 }
 
 async function descendants(root: number): Promise<number[]> {
-  const entries = await (await import('node:fs/promises')).readdir('/proc', { withFileTypes: true })
+  const entries = await (await import('node:fs/promises')).readdir('/proc')
   const parents = new Map<number, number[]>()
   for (const entry of entries) {
-    if (!/^\d+$/.test(entry.name)) continue
+    if (!/^\d+$/.test(entry)) continue
     try {
-      const line = await readFile(`/proc/${entry.name}/stat`, 'utf8')
+      const line = await readFile(`/proc/${entry}/stat`, 'utf8')
       const fields = line.slice(line.lastIndexOf(')') + 1).trim().split(/\s+/)
       const parent = Number(fields[1])
-      const pid = Number(entry.name)
+      const pid = Number(entry)
       const children = parents.get(parent) ?? []
       children.push(pid)
       parents.set(parent, children)
-    } catch { /* process exited during inspection */ }
+    } catch (error) {
+      // readdir races process exit. Permission and parse failures are evidence
+      // that the descendant tree was not authoritatively inspected.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
   }
   const result: number[] = []
   const queue = [...(parents.get(root) ?? [])]
