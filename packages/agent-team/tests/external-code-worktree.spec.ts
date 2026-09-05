@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { chmod, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -14,7 +14,7 @@ it('persists an exact external worktree intent before provisioning and restores 
   const provider = new ExternalCodeWorktreeProvider()
   const intent = { attemptId: 'attempt-1', generation: 1, runtimeId: 'runtime-1', repository: fixture.repository, directory: join(fixture.root, 'external') }
   const first = await provider.ensure(intent)
-  expect(first).toMatchObject({ repository: fixture.repository, cwd: join(fixture.root, 'external', 'attempt-1'), branch: 'dsh-external/runtime-1' })
+  expect(first).toMatchObject({ repository: fixture.repository, commonDirectory: await realpath(join(fixture.repository, '.git')), cwd: join(fixture.root, 'external', 'attempt-1'), branch: 'dsh-external/runtime-1' })
   expect((await execa('git', ['-C', fixture.repository, 'worktree', 'list', '--porcelain'])).stdout).toContain(`worktree ${first.cwd}`)
   const receipt = join(intent.directory, `${intent.attemptId}.code-worktree.json`)
   expect(JSON.parse(await readFile(receipt, 'utf8'))).toMatchObject(first)
@@ -22,6 +22,21 @@ it('persists an exact external worktree intent before provisioning and restores 
   await expect(provider.restore(intent)).resolves.toEqual(first)
   await writeFile(receipt, JSON.stringify({ ...first, directory: intent.directory, runtimeId: 'other-runtime' }))
   await expect(provider.restore(intent)).rejects.toThrow(/does not bind/i)
+})
+
+it('rejects a completion-paired receipt whose repository common directory was swapped, without another Git effect', async () => {
+  const fixture = await gitFixture(root => roots.push(root))
+  const provider = new ExternalCodeWorktreeProvider()
+  const intent = { attemptId: 'attempt-common-swap', generation: 1, runtimeId: 'runtime-common-swap', repository: fixture.repository, directory: join(fixture.root, 'external') }
+  const receipt = await provider.ensure(intent)
+  const receiptFile = join(intent.directory, `${intent.attemptId}.code-worktree.json`)
+  const completionFile = join(intent.directory, `${intent.attemptId}.code-worktree.complete.json`)
+  const before = (await execa('git', ['-C', fixture.repository, 'worktree', 'list', '--porcelain'])).stdout
+  const swapped = { ...receipt, commonDirectory: join(fixture.root, 'foreign-common-directory') }
+  await writeFile(receiptFile, JSON.stringify(swapped))
+  await writeFile(completionFile, JSON.stringify({ proof: 'git-worktree-add-closed-v1', receipt: swapped }))
+  await expect(provider.restore(intent)).rejects.toThrow(/does not bind/i)
+  expect((await execa('git', ['-C', fixture.repository, 'worktree', 'list', '--porcelain'])).stdout).toBe(before)
 })
 
 it('keeps an intent-only pre-provision receipt fenced across a fresh provider', async () => {

@@ -47,8 +47,9 @@ export class ExternalAssignmentRuntime {
       executable: policy.executable, version: policy.version, cwd: workingDirectory, model: policy.model, sandbox: policy.sandbox }
     await this.store.prepareLaunch({ attemptId: launch.attemptId, generation: launch.generation, provider: 'codex-cli', runtimeIdentity,
       admission: policy, inputSha256, spool: { directory: launch.directory, stdout: `${launch.directory}/stdout.log`, stderr: `${launch.directory}/stderr.log`, maxBytes: launch.maxSpoolBytes }, supervision: { containment: 'pid-namespace', terminateGraceMs: launch.terminateGraceMs }, ...(launch.worktree === undefined ? {} : { worktree: launch.worktree }) })
+    const writableDirectories = launch.worktree === undefined ? [] : [launch.worktree.commonDirectory]
     const request: ExternalSupervisorRequest = { attemptId: launch.attemptId, generation: launch.generation, directory: launch.directory,
-      command: policy.executable, args: ['exec', '--json', '--config', 'approval_policy="never"', '--cd', workingDirectory, '--model', policy.model, '--sandbox', policy.sandbox, '-'], cwd: workingDirectory, stdin: input, maxSpoolBytes: launch.maxSpoolBytes,
+      command: policy.executable, args: ['exec', '--json', '--config', 'approval_policy="never"', '--cd', workingDirectory, ...writableDirectories.flatMap(directory => ['--add-dir', directory]), '--model', policy.model, '--sandbox', policy.sandbox, '-'], cwd: workingDirectory, writableDirectories, stdin: input, maxSpoolBytes: launch.maxSpoolBytes,
       terminateGraceMs: launch.terminateGraceMs, containment: 'pid-namespace' }
     await this.client.launch(request)
     const identity = await waitForIdentity(launch.directory)
@@ -156,8 +157,9 @@ export class ExternalAssignmentRuntime {
   private async assertManifest(directory: string, attemptId: string, generation: number, record: ExternalRuntimeRecord): Promise<void> {
     const parsed = JSON.parse(await readFile(`${directory}/supervisor-request.json`, 'utf8')) as { request?: ExternalSupervisorRequest }
     const request = parsed.request
-    if (!request || request.attemptId !== attemptId || request.generation !== generation || request.directory !== directory || request.command !== record.admission?.executable || request.cwd !== record.runtimeIdentity.cwd || request.maxSpoolBytes !== record.spool?.maxBytes || request.containment !== record.supervision?.containment || request.terminateGraceMs !== record.supervision?.terminateGraceMs || record.inputSha256 !== createHash('sha256').update(request.stdin).digest('hex')) throw new Error('supervisor manifest does not bind durable external intent')
-    const expected = ['exec', '--json', '--config', 'approval_policy="never"', '--cd', record.runtimeIdentity.cwd, '--model', record.admission.model, '--sandbox', record.admission.sandbox, '-']
+    const writableDirectories = record.worktree === undefined ? [] : [record.worktree.commonDirectory]
+    if (!request || request.attemptId !== attemptId || request.generation !== generation || request.directory !== directory || request.command !== record.admission?.executable || request.cwd !== record.runtimeIdentity.cwd || request.maxSpoolBytes !== record.spool?.maxBytes || request.containment !== record.supervision?.containment || request.terminateGraceMs !== record.supervision?.terminateGraceMs || JSON.stringify(request.writableDirectories ?? []) !== JSON.stringify(writableDirectories) || record.inputSha256 !== createHash('sha256').update(request.stdin).digest('hex')) throw new Error('supervisor manifest does not bind durable external intent')
+    const expected = ['exec', '--json', '--config', 'approval_policy="never"', '--cd', record.runtimeIdentity.cwd, ...writableDirectories.flatMap(directory => ['--add-dir', directory]), '--model', record.admission.model, '--sandbox', record.admission.sandbox, '-']
     if (JSON.stringify(request.args) !== JSON.stringify(expected)) throw new Error('supervisor manifest command does not match verified Codex policy')
   }
 }

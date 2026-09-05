@@ -104,6 +104,15 @@ execution: {
 
 Set `codeWorktreeDirectory` only to opt that same project’s code tasks into the external provider. It must be a canonical directory outside the repository. Each code attempt writes an immutable worktree intent before Git creates its checkout, then records a separate completion receipt only after the `git worktree add` process has closed and the exact branch identity is verified. If recovery finds intent without that completion receipt, it retains ownership and blocks launch or checkout adoption; resolve the provision boundary before retrying. A completed external code task enters the ordinary verified integration path with its exact provider-owned checkout, branch, base commit, and runtime receipt.
 
+For an explicit live conformance check, run the disposable harness only after selecting an account-available CLI model. It creates a temporary repository and provider state, submits one bounded one-file/one-commit task, and prints a sanitized evidence record with durable identities, spool byte counts, and any provider-reported usage fields. It does not estimate cost or print authentication output.
+
+```sh
+GASTEAM_REAL_CODEX_EXECUTABLE="$(realpath "$(command -v codex)")" \
+GASTEAM_REAL_CODEX_VERSION=0.153.4 \
+GASTEAM_REAL_CODEX_MODEL=gpt-5.4-mini \
+node --import tsx packages/agent-team/tests/fixtures/real-codex-conformance.mts
+```
+
 If a restart finds retained external work but current admission is unavailable or differs from its pinned policy, the coordinator enters recovery-only mode for that project. It can observe or safely stop the retained helper, but it blocks every new selected-project non-code task with `provider-admission`; it never falls back to DSH. Restore the exact admitted policy to resume dispatch. Legacy external journal records without a pinned policy remain readable and intentionally require manual recovery.
 
 Set `execution.candidateRetention` only when automatic cleanup is desired. The delay starts when the coordinator first observes the current final accepted merged candidate, not from a merge timestamp. Pause suppresses deletion. Cleanup records uncertain interrupted work and does not automatically retry it; ownership checks cover live in-process Agents only.

@@ -158,6 +158,10 @@ it('routes an explicit external code worktree through quiescent commit and verif
   }, 12_000)
   const attempt = routed.view().attempts.find(item => item.taskId === task.id)!
   expect(attempt).toMatchObject({ provider: 'external', phase: 'terminal', externalPolicy: { codeWorktreeDirectory: join(repo.root, 'external-code-worktrees') } })
+  const manifest = JSON.parse(await readFile(join(repo.root, 'external-runtime', attempt.attemptId, 'supervisor-request.json'), 'utf8')) as { request: { writableDirectories?: string[], args?: string[] } }
+  const commonDirectory = await realpath(join(repo.repository, '.git'))
+  expect(manifest.request.writableDirectories).toEqual([commonDirectory])
+  expect(manifest.request.args).toEqual(expect.arrayContaining(['--add-dir', commonDirectory]))
   expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined()
   await expect(routed.submit(lead, 'project', { attemptId: attempt.attemptId, generation: attempt.generation + 1, expectedRevision: attempt.revision, sourceCommit: 'a'.repeat(40), evidence: 'stale external receipt' })).rejects.toThrow(/stale|unauthorized/i)
   await waitFor(async () => {

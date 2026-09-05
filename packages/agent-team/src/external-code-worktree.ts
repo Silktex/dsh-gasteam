@@ -62,7 +62,7 @@ export class ExternalCodeWorktreeProvider {
     }
     const repository = await git(intent.repository, ['rev-parse', '--show-toplevel'])
     const commonDirectory = await git(repository, ['rev-parse', '--git-common-dir'])
-    const canonicalCommon = resolve(repository, commonDirectory)
+    const canonicalCommon = await realpath(resolve(repository, commonDirectory))
     const baseCommit = await git(repository, ['rev-parse', '--verify', 'HEAD^{commit}'])
     const branch = `dsh-external/${intent.runtimeId}`
     const cwd = join(intent.directory, intent.attemptId)
@@ -102,7 +102,7 @@ export class ExternalCodeWorktreeProvider {
 
   private async assertReceipt(intent: ExternalCodeWorktreeIntent, receipt: ExternalCodeWorktreeReceipt): Promise<ExternalCodeWorktreeReceipt> {
     const repository = await git(intent.repository, ['rev-parse', '--show-toplevel'])
-    const commonDirectory = resolve(repository, await git(repository, ['rev-parse', '--git-common-dir']))
+    const commonDirectory = await realpath(resolve(repository, await git(repository, ['rev-parse', '--git-common-dir'])))
     if (receipt.attemptId !== intent.attemptId || receipt.generation !== intent.generation || receipt.runtimeId !== intent.runtimeId || receipt.directory !== intent.directory
       || receipt.repository !== repository || receipt.commonDirectory !== commonDirectory || receipt.cwd !== join(intent.directory, intent.attemptId) || receipt.branch !== `dsh-external/${intent.runtimeId}`) throw new Error('External code worktree receipt does not bind this attempt')
     await git(repository, ['cat-file', '-e', `${receipt.baseCommit}^{commit}`])

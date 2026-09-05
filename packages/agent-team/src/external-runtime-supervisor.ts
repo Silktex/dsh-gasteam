@@ -17,6 +17,8 @@ export interface ExternalSupervisorRequest {
   command: string
   args: readonly string[]
   cwd: string
+  /** Canonical, durable grants required by the pinned child command. */
+  writableDirectories?: readonly string[]
   stdin: string
   maxSpoolBytes: number
   terminateGraceMs: number
@@ -473,7 +475,9 @@ async function writeUncertain(directory: string, reason: string): Promise<void> 
 
 function validateRequest(request: ExternalSupervisorRequest): void {
   if (request.attemptId.trim() === '' || !Number.isSafeInteger(request.generation) || request.generation < 0) throw new Error('Invalid external supervisor attempt')
-  if (!isAbsolute(request.directory) || !isAbsolute(request.cwd) || request.directory !== resolve(request.directory) || request.cwd !== resolve(request.cwd)) throw new Error('External supervisor requires canonical absolute directory and cwd')
+  const writable = request.writableDirectories ?? []
+  if (!isAbsolute(request.directory) || !isAbsolute(request.cwd) || request.directory !== resolve(request.directory) || request.cwd !== resolve(request.cwd)
+    || writable.some(directory => !isAbsolute(directory) || directory !== resolve(directory)) || new Set(writable).size !== writable.length) throw new Error('External supervisor requires canonical absolute directory and cwd')
   if (request.containment !== 'pid-namespace' || request.command.trim() === '' || request.args.some(arg => typeof arg !== 'string') || Buffer.byteLength(request.args.join('\0')) > 65_536 || Buffer.byteLength(request.stdin) > 1_048_576 || !Number.isSafeInteger(request.maxSpoolBytes) || request.maxSpoolBytes < 1 || !Number.isSafeInteger(request.terminateGraceMs) || request.terminateGraceMs < 0) throw new Error('Invalid external supervisor request')
 }
 

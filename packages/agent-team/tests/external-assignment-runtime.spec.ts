@@ -31,6 +31,19 @@ it('durably launches, observes exact thread/report, and releases capacity only a
   await store.close()
 })
 
+it('pins its supplied code-worktree common directory as the only writable grant', async () => {
+  const { root, store, runtime } = await setup()
+  const worktree = { attemptId: 'attempt-code-grant', generation: 1, runtimeId: 'runtime-code-grant', directory: root, repository: resolve(process.cwd()), commonDirectory: resolve(process.cwd()), cwd: root, branch: 'dsh-external/runtime-code-grant', baseCommit: 'a'.repeat(40) }
+  const launch = { attemptId: 'attempt-code-grant', generation: 1, directory: root, verifiedAdmission: admission, prompt: { mode: 'codex-report' }, maxSpoolBytes: 65_536, terminateGraceMs: 50, worktree }
+  await runtime.start(launch)
+  const manifest = JSON.parse(await readFile(join(root, 'supervisor-request.json'), 'utf8')) as { request: { writableDirectories?: string[], args?: string[] } }
+  expect(manifest.request.writableDirectories).toEqual([worktree.commonDirectory])
+  expect(manifest.request.args).toEqual(expect.arrayContaining(['--cd', worktree.cwd, '--add-dir', worktree.commonDirectory]))
+  await writeFile(join(root, 'supervisor-request.json'), JSON.stringify({ request: { ...manifest.request, writableDirectories: [root] } }))
+  await expect(runtime.start(launch)).resolves.toMatchObject({ phase: 'uncertain', retainsCapacity: true })
+  await store.close()
+})
+
 it('restart observation never relaunches an existing helper and cancellation fences late output', async () => {
   const { root, store, runtime } = await setup()
   const counter = join(root, 'starts.log')
