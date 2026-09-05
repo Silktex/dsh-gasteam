@@ -29,6 +29,7 @@ import type { CandidateRetentionRecord } from './candidate-retention.ts'
 import { GitCandidateCleanup } from './git-candidate-cleanup.ts'
 import { HealthStore, healthConfigSchema } from './health.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
+import { DshHealthRuntimeObserver } from './health-runtime-observation.ts'
 import { TeamError } from './error.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
@@ -74,6 +75,7 @@ export class CoordinatorExecution {
   private readonly runtime: DshAssignmentRuntime
   private readonly external: ExternalNonCodeAssignmentAdapter | undefined
   private readonly externalStore: ExternalRuntimeStore | undefined
+  private readonly dshHealth: DshHealthRuntimeObserver | undefined
   private readonly handles = new Map<string, AgentHandle>()
   private readonly roots = new Map<string, Agent>()
   private readonly removePolicy: () => void
@@ -97,6 +99,7 @@ export class CoordinatorExecution {
     externalStore: ExternalRuntimeStore | undefined,
   ) {
     this.runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true)
+    this.dshHealth = health === undefined ? undefined : new DshHealthRuntimeObserver(ctx)
     this.external = external
     this.externalStore = externalStore
     this.removePolicy = ctx.agentTeams.registerExecutionPolicy({
@@ -586,7 +589,7 @@ export class CoordinatorExecution {
       // An external attempt's runtimeId is an assignment identity, never a
       // SessionId. Do not let a coincident DSH session manufacture external
       // liveness or progress; only its supervised store/observer may do that.
-      const runtime = provider === 'dsh' ? this.ctx.agents.get(SessionId(attempt.runtimeId)) : undefined
+      const dshOperation = provider === 'dsh' ? this.dshHealth?.observe({ attemptId: attempt.attemptId, teamId: attempt.teamId, runtimeId: attempt.runtimeId }) : undefined
       // Fresh read-only supervisor observation is required; historical process
       // identities in the journal cannot prove that an external effect remains live.
       const externalOperation = provider === 'external' ? await this.external?.health(attempt) : undefined
@@ -595,8 +598,11 @@ export class CoordinatorExecution {
         // A resident session and its sequence are evidence of life, not evidence that a tool is active.
         runtime: execution !== 'unknown' ? { availability: 'available', execution }
           : externalOperation?.execution === 'known-active-operation' ? { availability: 'available', execution: 'known-active-operation' }
-            : runtime ? { availability: 'available', execution: 'unknown' } : { availability: 'unknown', execution: 'unknown' },
-        ...(execution === 'unknown' && runtime ? { progress: { source: 'session-sequence' as const, cursor: String(runtime.session.seq) } } : {}),
+            : dshOperation?.availability === 'available'
+              ? { availability: 'available', execution: dshOperation.execution }
+              : { availability: 'unknown', execution: 'unknown' },
+        ...(execution === 'unknown' && dshOperation?.availability === 'available' && dshOperation.execution === 'unknown'
+          ? { progress: { source: 'session-sequence' as const, cursor: dshOperation.cursor } } : {}),
         ...(diagnostic === undefined ? {} : { diagnostic }), ...(evidenceRef === undefined ? {} : { evidenceRef }),
       }, now)
     }
@@ -841,6 +847,7 @@ export class CoordinatorExecution {
       await this.retention.close()
       await this.health?.close()
       await this.externalStore?.close()
+      this.dshHealth?.close()
       this.removePolicy()
     })().catch((error: unknown) => {
       // A failed observation retains ownership; a later close may rejoin the drain.
