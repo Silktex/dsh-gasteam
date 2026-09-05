@@ -98,7 +98,11 @@ The code workflow creates a managed implementation task, submits its pinned comm
 
 Target changes require verification and a fresh review of the replacement candidate. Authorized verification repairs retain the original failed source and attempt history, reuse the implementation task, and require review of the repaired candidate. Repair limits remain pinned to the admitted policy and workflow budget.
 
-Publication and the full session-handoff/external-provider workflow set remain unfinished. A workflow definition or report acceptance does not authorize publication.
+`release-publication@1` is available only when a trusted server configures publication grants and an idempotent publisher before project registration. Its prepare task produces an explicitly accepted non-code release manifest. The publisher consumes that durable manifest artifact; it does not infer authorization from report acceptance.
+
+The configured grant binds the project, Lead, and `release-manager` authority. The server calls `authorizeWorkflowPublication` with the execution/step IDs, current revision, and authorization evidence. This operation is absent from model tools and Remote descriptors. Paused projects cannot authorize or resume publication. Publisher identity/revision and grants remain pinned: incompatible configuration fails closed on restart or invocation.
+
+A publisher must deduplicate the supplied idempotency key and return a receipt bound to that exact key, manifest, authorization evidence, and publisher identity/revision. Known failures and uncertain caught errors leave a durable failed step; periodic scans do not repeat the effect. A process interrupted after the effect but before its receipt may replay the same key. These host-boundary semantics are tested with an idempotent fixture publisher; no built-in real external release transport or real publication conformance is claimed. Full session handoff and external-provider coordinator controls remain unfinished.
 
 The browser panel shows roster, task, batch, integration, and recovery state when the Web profile is installed. A complete autonomous release profile, dashboard controls for every coordinator operation, globally ordered integration backlog, and external runtime/provider conformance remain unfinished.
 

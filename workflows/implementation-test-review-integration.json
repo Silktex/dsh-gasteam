@@ -3,39 +3,98 @@
   "id": "implementation-test-review-integration",
   "version": 1,
   "parameters": {
-    "subject": { "type": "string", "required": true }
+    "subject": {
+      "type": "string",
+      "required": true
+    }
   },
   "steps": [
     {
       "id": "implement",
       "title": "Implement {{subject}}",
-      "retry": { "maxAttempts": 2, "backoffMs": 1000 },
-      "artifacts": { "produces": ["source"] },
-      "acceptance": { "kind": "artifact-submitted", "artifact": "source" }
+      "retry": {
+        "maxAttempts": 4,
+        "backoffMs": 0
+      },
+      "artifacts": {
+        "produces": [
+          "source"
+        ]
+      },
+      "acceptance": {
+        "kind": "artifact-submitted",
+        "artifact": "source"
+      }
     },
     {
       "id": "test",
-      "title": "Test {{subject}}",
-      "dependsOn": ["implement"],
-      "retry": { "maxAttempts": 1, "backoffMs": 0 },
-      "artifacts": { "requires": ["source"], "produces": ["candidate"] },
-      "acceptance": { "kind": "checks-passed", "source": "source", "candidate": "candidate" }
+      "title": "Verify {{subject}}",
+      "dependsOn": [
+        "implement"
+      ],
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 0
+      },
+      "artifacts": {
+        "requires": [
+          "source"
+        ],
+        "produces": [
+          "candidate"
+        ]
+      },
+      "acceptance": {
+        "kind": "checks-passed",
+        "source": "source",
+        "candidate": "candidate"
+      }
     },
     {
       "id": "review",
-      "title": "Review {{subject}}",
-      "dependsOn": ["test"],
-      "retry": { "maxAttempts": 1, "backoffMs": 0 },
-      "artifacts": { "requires": ["source", "candidate"], "produces": ["review-result"] },
-      "acceptance": { "kind": "report-review" }
+      "title": "Review verified {{subject}}",
+      "dependsOn": [
+        "test"
+      ],
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 0
+      },
+      "artifacts": {
+        "requires": [
+          "source",
+          "candidate"
+        ],
+        "produces": [
+          "review"
+        ]
+      },
+      "acceptance": {
+        "kind": "report-review"
+      }
     },
     {
       "id": "integrate",
-      "title": "Integrate {{subject}}",
-      "dependsOn": ["review"],
-      "retry": { "maxAttempts": 1, "backoffMs": 0 },
-      "artifacts": { "requires": ["source", "candidate", "review-result"] },
-      "acceptance": { "kind": "integrated", "source": "source", "candidate": "candidate" }
+      "title": "Integrate reviewed {{subject}}",
+      "dependsOn": [
+        "review"
+      ],
+      "retry": {
+        "maxAttempts": 1,
+        "backoffMs": 0
+      },
+      "artifacts": {
+        "requires": [
+          "source",
+          "candidate",
+          "review"
+        ]
+      },
+      "acceptance": {
+        "kind": "integrated",
+        "source": "source",
+        "candidate": "candidate"
+      }
     }
   ]
 }

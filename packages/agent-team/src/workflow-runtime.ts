@@ -1,5 +1,5 @@
 /** Host-only vertical runtime for the pinned investigation/report workflow. */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import z from 'zod'
@@ -7,7 +7,7 @@ import { DurableJournal } from './durable-journal.ts'
 import type { ReportAcceptanceRecord } from './reports.ts'
 import { ReportStore } from './reports.ts'
 import { pinWorkflowDefinition, validateWorkflowTemplate, WorkflowStore } from './workflows.ts'
-import type { CandidateReplacement, PinnedWorkflowDefinition, WorkflowExecution } from './workflows.ts'
+import type { ArtifactReference, CandidateReplacement, PinnedWorkflowDefinition, WorkflowExecution } from './workflows.ts'
 
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
@@ -18,7 +18,11 @@ const scalar = z.union([z.string().max(16_384), z.number().finite(), z.boolean()
 export interface WorkflowRuntimeProject {
   readonly id: string
   readonly teamIds: readonly string[]
+  readonly publicationGrants?: readonly { readonly teamId: string; readonly authorization: string }[]
+  readonly publicationPublisher?: { readonly identity: string; readonly revision: number }
 }
+export interface WorkflowPublicationIntent { readonly idempotencyKey: string; readonly executionId: string; readonly stepId: string; readonly authorization: string; readonly publisherIdentity: string; readonly publisherRevision: number; readonly evidence: ArtifactReference; readonly release: ArtifactReference }
+export interface WorkflowPublicationReceipt { readonly publisher: string; readonly publisherIdentity: string; readonly publisherRevision: number; readonly reference: ArtifactReference; readonly idempotencyKey: string; readonly authorization: string; readonly evidence: ArtifactReference; readonly release: ArtifactReference }
 
 /** Persisted before the host is allowed to create the corresponding Team task. */
 export interface WorkflowTaskCreateIntent {
@@ -46,6 +50,8 @@ export interface WorkflowTaskHost {
   codeStatus?(intent: WorkflowCodeTaskCreateIntent): Promise<WorkflowCodeStatus | undefined>
   /** Host policy authorization for the exact candidate and accepted reviewer report. */
   approvePinnedIntegration?(receipt: WorkflowIntegrationApproval): Promise<void>
+  publishAuthorizedRelease?(intent: WorkflowPublicationIntent): Promise<WorkflowPublicationReceipt>
+  publicationPublisher?: { readonly identity: string; readonly revision: number }
 }
 
 export interface WorkflowCodeTaskCreateIntent {
@@ -106,12 +112,14 @@ const codeIntentSchema = z.object({
   intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, reviewGate: id, candidateRound: z.number().int().nonnegative().optional(),
 }).strict()
 const creationSchema = z.object({
-  executionId: id, projectId: id, teamId: id, template: z.unknown(), parameters: z.record(id, scalar), definition: z.unknown(),
+  executionId: id, projectId: id, teamId: id, template: z.unknown(), parameters: z.record(id, scalar), definition: z.unknown(), publicationGrant: z.object({ teamId: id, authorization: id }).strict().optional(), publicationPublisher: z.object({ identity: id, revision: positive }).strict().optional(),
 }).strict()
+const publicationIntentSchema = z.object({ idempotencyKey: id, executionId: id, stepId: id, authorization: id, publisherIdentity: id, publisherRevision: positive, evidence: z.object({ kind: id, ref: text }).strict(), release: z.object({ kind: id, ref: text }).strict() }).strict()
+const publicationReceiptSchema = z.object({ publisher: id, publisherIdentity: id, publisherRevision: positive, reference: z.object({ kind: id, ref: text }).strict(), idempotencyKey: id, authorization: id, evidence: z.object({ kind: id, ref: text }).strict(), release: z.object({ kind: id, ref: text }).strict() }).strict()
 const round = z.number().int().nonnegative()
-const archivedBindingSchema = z.object({ intent: z.union([intentSchema, codeIntentSchema]).optional(), taskId: id.optional(), reportId: id.optional(), review: reviewBindingSchema.optional(), approval: approvalSchema.optional(), approvalRecorded: z.boolean().optional(), sourceRound: round.optional() }).strict()
+const archivedBindingSchema = z.object({ intent: z.union([intentSchema, codeIntentSchema]).optional(), taskId: id.optional(), reportId: id.optional(), review: reviewBindingSchema.optional(), approval: approvalSchema.optional(), approvalRecorded: z.boolean().optional(), publicationIntent: publicationIntentSchema.optional(), publicationReceipt: publicationReceiptSchema.optional(), sourceRound: round.optional() }).strict()
 const bindingSchema = z.object({
-  executionId: id, projectId: id, teamId: id, stepId: id, intent: z.union([intentSchema, codeIntentSchema]).optional(), taskId: id.optional(), reportId: id.optional(), review: reviewBindingSchema.optional(), approval: approvalSchema.optional(), approvalRecorded: z.boolean().optional(), sourceRound: round.default(0), history: z.array(archivedBindingSchema).max(32).default([]),
+  executionId: id, projectId: id, teamId: id, stepId: id, intent: z.union([intentSchema, codeIntentSchema]).optional(), taskId: id.optional(), reportId: id.optional(), review: reviewBindingSchema.optional(), approval: approvalSchema.optional(), approvalRecorded: z.boolean().optional(), publicationIntent: publicationIntentSchema.optional(), publicationReceipt: publicationReceiptSchema.optional(), sourceRound: round.default(0), history: z.array(archivedBindingSchema).max(32).default([]),
 }).strict()
 const envelope = { version: z.literal(1), sequence: positive }
 const eventSchema = z.discriminatedUnion('type', [
@@ -122,6 +130,8 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('workflow-runtime/task-reset'), executionId: id, stepId: id }).strict(),
   z.object({ ...envelope, type: z.literal('workflow-runtime/approval-intended'), executionId: id, stepId: id, approval: approvalSchema }).strict(),
   z.object({ ...envelope, type: z.literal('workflow-runtime/approval-recorded'), executionId: id, stepId: id }).strict(),
+  z.object({ ...envelope, type: z.literal('workflow-runtime/publication-intended'), executionId: id, stepId: id, intent: publicationIntentSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('workflow-runtime/publication-recorded'), executionId: id, stepId: id, receipt: publicationReceiptSchema }).strict(),
 ])
 type Event = z.output<typeof eventSchema>
 type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'sequence'> : never : never
@@ -133,6 +143,8 @@ interface Creation {
   readonly template: PinnedWorkflowDefinition
   readonly parameters: Record<string, string | number | boolean>
   readonly definition: PinnedWorkflowDefinition
+  readonly publicationGrant?: { readonly teamId: string; readonly authorization: string } | undefined
+  readonly publicationPublisher?: { readonly identity: string; readonly revision: number } | undefined
 }
 interface State { readonly creations: Creation[]; readonly bindings: z.output<typeof bindingSchema>[] }
 
@@ -173,6 +185,14 @@ function reduce(state: State, raw: unknown): State {
     const { executionId, projectId, teamId, stepId, sourceRound, history, ...archive } = prior
     return replaceBinding(state, { executionId, projectId, teamId, stepId, sourceRound, history: [...history, { ...archive, sourceRound }] })
   }
+  if (event.type === 'workflow-runtime/publication-intended') {
+    if (prior.publicationIntent || event.intent.executionId !== event.executionId || event.intent.stepId !== event.stepId || event.intent.authorization !== creation.publicationGrant?.authorization) throw new Error('Publication intent escapes its execution grant')
+    return replaceBinding(state, { ...prior, publicationIntent: event.intent })
+  }
+  if (event.type === 'workflow-runtime/publication-recorded') {
+    if (!prior.publicationIntent || prior.publicationReceipt) throw new Error('Publication receipt lacks an unconsumed durable intent')
+    return replaceBinding(state, { ...prior, publicationReceipt: event.receipt })
+  }
   if (event.type === 'workflow-runtime/approval-intended') {
     if (!prior.reportId || prior.approval) throw new Error('Workflow integration approval lacks one accepted review report')
     if (event.approval.executionId !== event.executionId || event.approval.stepId !== event.stepId || event.approval.reviewId !== prior.reportId || !prior.review
@@ -189,6 +209,8 @@ function validateSupportedTemplate(value: unknown): PinnedWorkflowDefinition {
   if (template.id === 'investigation-report' && template.steps.every(step => step.acceptance.kind === 'report-review')) return template
   if (template.id === 'implementation-test-review-integration'
     && template.steps.map(step => step.acceptance.kind).join(',') === 'artifact-submitted,checks-passed,report-review,integrated') return template
+  if (template.id === 'release-publication'
+    && template.steps.map(step => step.acceptance.kind).join(',') === 'report-review,externally-authorized-publication') return template
   throw new Error('Workflow template is unsupported by this workflow runtime')
 }
 function assertProject(project: WorkflowRuntimeProject, projectId: string, teamId: string): void {
@@ -248,13 +270,21 @@ export class WorkflowRuntime {
     // This pure validation/substitution precedes the runtime creation intent.
     const definition = pinWorkflowDefinition(template, input.parameters)
     validateTaskCompatibleDefinition(definition)
+    const publication = definition.steps.find(step => step.acceptance.kind === 'externally-authorized-publication')
+    let publicationGrant: { readonly teamId: string; readonly authorization: string } | undefined
+    if (publication?.acceptance.kind === 'externally-authorized-publication') {
+      const authorization = publication.acceptance.authorization
+      publicationGrant = project.publicationGrants?.find(grant => grant.teamId === input.teamId && grant.authorization === authorization)
+    }
+    if (publication && (!publicationGrant || !project.publicationPublisher || !this.tasks.publishAuthorizedRelease)) throw new Error('Release workflow requires a configured publication grant and publisher')
     const executionId = input.executionId ?? randomUUID()
     const existing = this.creation(executionId)
     if (existing) {
-      if (existing.projectId !== input.projectId || existing.teamId !== input.teamId || !isDeepStrictEqual(existing.definition, definition)
+      if (existing.projectId !== input.projectId || existing.teamId !== input.teamId || !isDeepStrictEqual(existing.definition, definition) || !isDeepStrictEqual(existing.publicationGrant, publicationGrant) || !isDeepStrictEqual(existing.publicationPublisher, project.publicationPublisher)
         || !isDeepStrictEqual(existing.parameters, input.parameters)) throw new Error('Workflow creation replay has different immutable inputs')
     } else {
-      await this.journal.append(() => ({ type: 'workflow-runtime/created', creation: { executionId, projectId: input.projectId, teamId: input.teamId, template, parameters: input.parameters, definition } }))
+      await this.journal.append(() => ({ type: 'workflow-runtime/created', creation: { executionId, projectId: input.projectId, teamId: input.teamId, template, parameters: input.parameters, definition,
+        ...(publicationGrant === undefined ? {} : { publicationGrant }), ...(project.publicationPublisher === undefined ? {} : { publicationPublisher: project.publicationPublisher }) } }))
     }
     await this.ensureWorkflow(this.creation(executionId)!)
     return this.inspect(executionId)!
@@ -268,6 +298,7 @@ export class WorkflowRuntime {
       await this.ensureWorkflow(creation)
       await this.reconcileReceipts(creation)
       await this.reconcileCode(creation)
+      await this.reconcilePublication(creation)
       const execution = this.workflows.inspect(creation.executionId)!
       const next = this.workflows.resume(execution.id)
       if (!next) continue
@@ -285,10 +316,23 @@ export class WorkflowRuntime {
     await this.ensureWorkflow(creation)
     await this.reconcileReceipts(creation)
     await this.reconcileCode(creation)
+    await this.reconcilePublication(creation)
     const next = this.workflows.resume(executionId)
     if (!next) return undefined
     await this.ensureStep(creation, this.workflows.inspect(executionId)!, next.id)
     return this.inspect(executionId)
+  }
+
+  /** Server-only authority path: actor is derived from the pinned execution grant. */
+  async authorizePublication(executionId: string, stepId: string, expectedRevision: number, evidence: ArtifactReference, callerTeamId: string): Promise<WorkflowRuntimeView> {
+    const creation = this.creation(executionId)
+    if (!creation?.publicationGrant || creation.publicationGrant.teamId !== callerTeamId) throw new Error('Publication authorization caller lacks the pinned execution grant')
+    const execution = this.workflows.inspect(executionId)
+    const step = execution?.steps.find(value => value.id === stepId)
+    const definition = execution?.definition.steps.find(value => value.id === stepId)
+    if (!execution || !step || definition?.acceptance.kind !== 'externally-authorized-publication' || definition.acceptance.authorization !== creation.publicationGrant.authorization) throw new Error('Publication authorization does not target the pinned publication step')
+    await this.workflows.authorizePublication(executionId, stepId, expectedRevision, { actor: creation.publicationGrant.authorization, evidence })
+    return this.inspect(executionId)!
   }
 
   inspect(executionId: string): WorkflowRuntimeView | undefined {
@@ -477,7 +521,54 @@ export class WorkflowRuntime {
     const definition = execution.definition.steps.find(step => step.id === stepId)!
     if (definition.acceptance.kind === 'artifact-submitted') return await this.ensureCodeTask(creation, execution, stepId)
     if (definition.acceptance.kind === 'report-review') return await this.ensureTask(creation, execution, stepId)
+    if (definition.acceptance.kind === 'externally-authorized-publication') return await this.ensurePublication(creation, execution, stepId)
     // checks-passed and integrated steps are driven solely by immutable host receipts.
+  }
+
+  private async ensurePublication(creation: Creation, execution: WorkflowExecution, stepId: string): Promise<void> {
+    const step = this.workflows.inspect(execution.id)!.steps.find(value => value.id === stepId)!
+    const definition = execution.definition.steps.find(value => value.id === stepId)!
+    if (step.phase === 'pending') { await this.workflows.startStep(execution.id, stepId, step.revision); return }
+    const current = this.workflows.inspect(execution.id)!.steps.find(value => value.id === stepId)!
+    if (current.phase !== 'running' || !current.authorization || definition.acceptance.kind !== 'externally-authorized-publication') return
+    if (!creation.publicationGrant || !creation.publicationPublisher || !this.tasks.publicationPublisher || current.authorization.actor !== creation.publicationGrant.authorization
+      || !isDeepStrictEqual(this.tasks.publicationPublisher, creation.publicationPublisher)) throw new Error('Publication publisher configuration disagrees with its pinned execution grant')
+    const releaseName = definition.artifacts.requires[0]
+    const release = releaseName === undefined ? undefined : execution.steps.find(value => value.artifacts?.[releaseName])?.artifacts?.[releaseName]
+    if (!release) throw new Error('Publication step lacks its pinned release artifact')
+    let value = binding(this.journal.snapshot(), execution.id, stepId)
+    if (!value?.publicationIntent) {
+      const key = `publication-${createHash('sha256').update(JSON.stringify({ executionId: execution.id, stepId, revision: current.authorization.revision, evidence: current.authorization.evidence, release })).digest('hex')}`
+      const intent: WorkflowPublicationIntent = { idempotencyKey: key, executionId: execution.id, stepId, authorization: current.authorization.actor, publisherIdentity: creation.publicationPublisher.identity, publisherRevision: creation.publicationPublisher.revision, evidence: current.authorization.evidence, release }
+      await this.journal.append(() => ({ type: 'workflow-runtime/publication-intended', executionId: execution.id, stepId, intent }))
+      value = binding(this.journal.snapshot(), execution.id, stepId)
+    }
+    if (!value?.publicationReceipt) {
+      if (!this.tasks.publishAuthorizedRelease) throw new Error('Release workflow requires a configured publisher')
+      let receipt: WorkflowPublicationReceipt
+      try { receipt = await this.tasks.publishAuthorizedRelease(value!.publicationIntent!) }
+      catch (error) {
+        const classified = typeof error === 'object' && error !== null && 'publicationOutcome' in error ? (error as { publicationOutcome?: unknown }).publicationOutcome : undefined
+        const outcome = classified === 'definite' ? 'Publisher definitely rejected the release' : 'Publisher outcome is uncertain; operator evidence is required before retry'
+        await this.workflows.failStep(execution.id, stepId, current.revision, { reason: outcome, reference: { kind: 'publication', ref: value!.publicationIntent!.idempotencyKey } })
+        return
+      }
+      if (receipt.reference.kind !== 'publication' || receipt.idempotencyKey !== value!.publicationIntent!.idempotencyKey || receipt.publisherIdentity !== value!.publicationIntent!.publisherIdentity || receipt.publisherRevision !== value!.publicationIntent!.publisherRevision
+        || receipt.authorization !== value!.publicationIntent!.authorization || !isDeepStrictEqual(receipt.evidence, value!.publicationIntent!.evidence)
+        || !isDeepStrictEqual(receipt.release, value!.publicationIntent!.release)) throw new Error('Configured publisher receipt does not bind the exact durable publication intent')
+      await this.journal.append(() => ({ type: 'workflow-runtime/publication-recorded', executionId: execution.id, stepId, receipt }))
+      value = binding(this.journal.snapshot(), execution.id, stepId)
+    }
+    const after = this.workflows.inspect(execution.id)!.steps.find(value => value.id === stepId)!
+    if (after.phase === 'running') await this.workflows.completeStep(execution.id, stepId, after.revision, { artifacts: {}, receipt: { kind: 'externally-authorized-publication', publisher: value!.publicationReceipt!.publisher, reference: value!.publicationReceipt!.reference } })
+  }
+
+  private async reconcilePublication(creation: Creation): Promise<void> {
+    const execution = this.workflows.inspect(creation.executionId)!
+    for (const step of execution.steps.filter(step => step.phase === 'running')) {
+      const definition = execution.definition.steps.find(candidate => candidate.id === step.id)!
+      if (definition.acceptance.kind === 'externally-authorized-publication') await this.ensurePublication(creation, execution, step.id)
+    }
   }
 
   private async ensureTask(creation: Creation, execution: WorkflowExecution, stepId: string): Promise<void> {

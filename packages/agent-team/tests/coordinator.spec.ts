@@ -89,6 +89,38 @@ it('returns ordered exact repair source lineage when replacement was already sub
   ])
 })
 
+it('fences paused release resume and authorization before the configured publisher can run', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.close()
+  let calls = 0
+  const publisher = { identity: 'release-publisher', revision: 1, async publish(intent: import('../src/workflow-runtime.ts').WorkflowPublicationIntent) {
+    calls++; return { publisher: 'release-publisher', publisherIdentity: 'release-publisher', publisherRevision: 1, idempotencyKey: intent.idempotencyKey, authorization: intent.authorization, evidence: intent.evidence, release: intent.release, reference: { kind: 'publication', ref: 'unused' } }
+  } }
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 }, publication: { grants: [{ projectId: 'project', teamId: lead.id, authorization: 'release-manager' }], publisher } })
+  cleanup.push(() => running.close())
+  await running.register(lead, request)
+  await running.createWorkflow(lead, { projectId: 'project', teamId: lead.id, templateId: 'release-publication', templateVersion: 1, parameters: { release: 'v1' }, executionId: 'paused-release' })
+  const store = (running as unknown as { workflowStore: import('../src/workflows.ts').WorkflowStore }).workflowStore
+  const prepare = store.inspect('paused-release')!.steps[0]!
+  await store.completeStep('paused-release', prepare.id, prepare.revision, { artifacts: { 'release-candidate': { kind: 'report', ref: 'manifest' } }, receipt: { kind: 'report-review', reviewer: lead.id, decision: 'approved', reference: { kind: 'report', ref: 'manifest' } } })
+  await running.reconcile()
+  const publish = store.inspect('paused-release')!.steps[1]!
+  await running.pause(lead, 'project', 0, true)
+  await expect(running.resumeWorkflow(lead, 'paused-release')).rejects.toThrow(/paused/i)
+  await expect(running.authorizeWorkflowPublication(lead, { executionId: 'paused-release', stepId: publish.id, expectedRevision: publish.revision, evidence: { kind: 'ticket', ref: 'CAB-3' } })).rejects.toThrow(/paused/i)
+  expect(calls).toBe(0)
+})
+
+it('fails closed when configured publication grants are removed on reopen', async () => {
+  const repo = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const grants = [{ projectId: 'project', teamId: 'lead', authorization: 'release-manager' }]
+  const catalog = await ProjectCatalog.open(join(repo.root, 'catalog'), grants)
+  await catalog.register({ id: 'project', repository: repo.repository, targetBranch: 'main', teamIds: ['lead'], capacity: 1, verification: { revision: 1, commands: [{ command: 'node', args: ['--version'] }] } })
+  await catalog.close()
+  await expect(ProjectCatalog.open(join(repo.root, 'catalog'))).rejects.toThrow(/publication grants/i)
+})
+
 it('discovers admitted tasks and stable coordinator identity after fresh service construction with no live Lead', async () => {
   const { root, ctx, lead, config, coordinator, request } = await fixture()
   await coordinator.register(lead, request)

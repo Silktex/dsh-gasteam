@@ -25,3 +25,17 @@ export const implementationTestReviewIntegrationTemplate = {
     { id: 'integrate', title: 'Integrate reviewed {{subject}}', dependsOn: ['review'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source', 'candidate', 'review'] }, acceptance: { kind: 'integrated', source: 'source', candidate: 'candidate' } },
   ],
 } satisfies WorkflowTemplate
+
+/**
+ * This template is registered only when the coordinator has a configured,
+ * server-owned publication grant and idempotent publisher. It is deliberately
+ * absent from model workflow-creation tools.
+ */
+export const releasePublicationTemplate = {
+  format: 'agent-team-workflow/v1', id: 'release-publication', version: 1,
+  parameters: { release: { type: 'string', required: true } },
+  steps: [
+    { id: 'prepare', title: 'Prepare {{release}} manifest', retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { produces: ['release-candidate'] }, acceptance: { kind: 'report-review' } },
+    { id: 'publish', title: 'Publish {{release}}', dependsOn: ['prepare'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['release-candidate'] }, acceptance: { kind: 'externally-authorized-publication', authorization: 'release-manager' } },
+  ],
+} satisfies WorkflowTemplate

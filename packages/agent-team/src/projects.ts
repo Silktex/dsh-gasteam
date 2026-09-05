@@ -16,6 +16,11 @@ const verification = z.object({
   revision: positive,
   commands: z.array(z.object({ command: text, args: z.array(z.string().max(16_384)).max(256) }).strict()).min(1).max(64),
 }).strict()
+const publicationGrant = z.object({ teamId: identifier, authorization: identifier }).strict()
+const configuredPublicationGrant = publicationGrant.extend({ projectId: identifier }).strict()
+export type PublicationGrant = z.output<typeof publicationGrant>
+export type ConfiguredPublicationGrant = z.input<typeof configuredPublicationGrant>
+export const configuredPublicationGrantsSchema = z.array(configuredPublicationGrant).max(256)
 const registration = z.object({
   id: identifier,
   repository: absolutePath,
@@ -24,7 +29,7 @@ const registration = z.object({
   capacity: positive,
   verification,
 }).strict()
-const projectSchema = registration.extend({ repositoryId: absolutePath, revision: z.literal(1) })
+const projectSchema = registration.extend({ repositoryId: absolutePath, revision: z.literal(1), publicationGrants: z.array(publicationGrant).max(256).default([]) })
 const eventSchema = z.object({
   version: z.literal(1), sequence: positive, type: z.literal('project/registered'), project: projectSchema,
 }).strict()
@@ -50,14 +55,26 @@ type ProjectEvent = { type: 'project/registered'; project: ProjectRecord }
 
 /** Append-only authority for project policy and team discovery; task contents stay in session logs. */
 export class ProjectCatalog {
-  private constructor(private readonly journal: DurableJournal<ProjectRecord[], ProjectEvent>) {}
+  private constructor(private readonly journal: DurableJournal<ProjectRecord[], ProjectEvent>, private readonly configuredPublicationGrants: readonly z.output<typeof configuredPublicationGrant>[]) {}
 
-  static async open(directory: string): Promise<ProjectCatalog> {
-    return new ProjectCatalog(await DurableJournal.open<ProjectRecord[], ProjectEvent>(join(directory, 'projects.jsonl'), [], (projects, raw) => {
+  static async open(directory: string, configuredGrants: readonly ConfiguredPublicationGrant[] = []): Promise<ProjectCatalog> {
+    const grants = configuredPublicationGrantsSchema.parse(configuredGrants)
+    const journal = await DurableJournal.open<ProjectRecord[], ProjectEvent>(join(directory, 'projects.jsonl'), [], (projects, raw) => {
       const event = eventSchema.parse(raw)
       assertAvailable(projects, event.project)
       return [...projects, event.project as ProjectRecord]
-    }))
+    })
+    // Publication authority is configuration-pinned. Removing or changing a
+    // configured grant must stop restoration rather than silently preserving
+    // historic authority.
+    for (const project of journal.snapshot()) {
+      const expected = grants.filter(grant => grant.projectId === project.id).map(({ teamId, authorization }) => ({ teamId, authorization }))
+      if (JSON.stringify(expected) !== JSON.stringify(project.publicationGrants)) {
+        await journal.close()
+        throw new Error('Configured publication grants disagree with durable project authority')
+      }
+    }
+    return new ProjectCatalog(journal, grants)
   }
 
   /** Register before accepting tasks in any referenced team. Duplicate identities are never reused. */
@@ -69,7 +86,10 @@ export class ProjectCatalog {
       await runGit(input.repository, ['check-ref-format', `refs/heads/${input.targetBranch}`], signal, 10_000)
       const repository = await realpath(await runGit(input.repository, ['rev-parse', '--show-toplevel'], signal, 10_000))
       const repositoryId = await realpath(await runGit(repository, ['rev-parse', '--path-format=absolute', '--git-common-dir'], signal, 10_000))
-      const project = { ...input, repository, repositoryId, revision: 1 } as ProjectRecord
+      const publicationGrants = this.configuredPublicationGrants.filter(grant => grant.projectId === input.id).map(({ teamId, authorization }) => ({ teamId, authorization }))
+      if (publicationGrants.some(grant => !input.teamIds.includes(grant.teamId))) throw new Error('Configured publication grant is not bound to a registered project Lead')
+      if (new Set(publicationGrants.map(grant => `${grant.teamId}:${grant.authorization}`)).size !== publicationGrants.length) throw new Error('Configured publication grant is duplicated')
+      const project = { ...input, repository, repositoryId, revision: 1, publicationGrants } as ProjectRecord
       assertAvailable(projects, project)
       await runGit(repository, ['show-ref', '--verify', `refs/heads/${input.targetBranch}`], signal, 10_000)
       return { type: 'project/registered', project }

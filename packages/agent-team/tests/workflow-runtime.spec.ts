@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { ReportStore } from '../src/reports.ts'
 import { WorkflowRuntime, type WorkflowCodeStatus, type WorkflowCodeTaskCreateIntent, type WorkflowIntegrationApproval, type WorkflowTaskCreateIntent, type WorkflowTaskHost } from '../src/workflow-runtime.ts'
 import { WorkflowStore } from '../src/workflows.ts'
+import { releasePublicationTemplate } from '../src/workflow-templates.ts'
 
 const roots: string[] = []
 const closeables: { close(): Promise<void> }[] = []
@@ -48,6 +49,21 @@ class CodeHost extends Host {
   async codeStatus(_input: WorkflowCodeTaskCreateIntent): Promise<WorkflowCodeStatus | undefined> { return this.status }
   async approvePinnedIntegration(receipt: WorkflowIntegrationApproval): Promise<void> {
     if (!this.approvals.some(candidate => JSON.stringify(candidate) === JSON.stringify(receipt))) this.approvals.push(receipt)
+  }
+}
+class PublicationHost extends CodeHost {
+  readonly publicationPublisher = { identity: 'release-publisher', revision: 1 }
+  readonly publicationCalls: import('../src/workflow-runtime.ts').WorkflowPublicationIntent[] = []
+  readonly effects = new Set<string>()
+  failure?: 'definite' | 'unknown'
+  failWithoutClassification = false
+  async publishAuthorizedRelease(intent: import('../src/workflow-runtime.ts').WorkflowPublicationIntent): Promise<import('../src/workflow-runtime.ts').WorkflowPublicationReceipt> {
+    this.publicationCalls.push(intent)
+    this.effects.add(intent.idempotencyKey)
+    if (this.failure) { const error = Object.assign(new Error(this.failure), { publicationOutcome: this.failure }); throw error }
+    if (this.failWithoutClassification) throw new Error('unclassified publisher failure')
+    return { publisher: 'release-publisher', reference: { kind: 'publication', ref: `published:${intent.idempotencyKey}` }, idempotencyKey: intent.idempotencyKey,
+      publisherIdentity: intent.publisherIdentity, publisherRevision: intent.publisherRevision, authorization: intent.authorization, evidence: intent.evidence, release: intent.release }
   }
 }
 
@@ -100,6 +116,22 @@ it('pins report template work to the registered Lead, creates each managed task 
   expect(host.calls[1]!.description).toContain('findings: report:' + reports.list()[0]!.id)
   expect(host.calls[1]!.description).toContain('The job failed because the credential expired.')
   expect(host.calls[1]!.description).toContain('The report identifies the observed cause.')
+})
+
+it.each([
+  ['definite', 'definite' as const, false, /definitely/],
+  ['classified unknown', 'unknown' as const, false, /uncertain/],
+  ['unclassified', undefined, true, /uncertain/],
+])('persists a %s publisher failure and never repeats its side effect on scans', async (_name, failure, failWithoutClassification, reason) => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-release-failure-')); roots.push(directory)
+  const workflows = await WorkflowStore.open(directory), reports = await ReportStore.open(directory), host = new PublicationHost()
+  const project = { id: 'project', teamIds: ['lead'], publicationGrants: [{ teamId: 'lead', authorization: 'release-manager' }], publicationPublisher: { identity: 'release-publisher', revision: 1 } }
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [releasePublicationTemplate]); closeables.push(runtime, reports, workflows)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'release-publication', templateVersion: 1, parameters: { release: 'v1' }, executionId: 'release-failure' }, project); await runtime.scan(project)
+  const prepare = workflows.inspect('release-failure')!.steps[0]!; await workflows.completeStep('release-failure', prepare.id, prepare.revision, { artifacts: { 'release-candidate': { kind: 'report', ref: 'manifest' } }, receipt: { kind: 'report-review', reviewer: 'lead', decision: 'approved', reference: { kind: 'report', ref: 'manifest' } } }); await runtime.scan(project)
+  const publish = workflows.inspect('release-failure')!.steps[1]!; await runtime.authorizePublication('release-failure', publish.id, publish.revision, { kind: 'ticket', ref: 'CAB-2' }, 'lead')
+  host.failure = failure; host.failWithoutClassification = failWithoutClassification; await runtime.scan(project); await runtime.scan(project)
+  expect(host.publicationCalls).toHaveLength(1); expect(workflows.inspect('release-failure')!.steps[1]).toMatchObject({ phase: 'failed', failure: { reason: expect.stringMatching(reason) } })
 })
 
 it('rejects invalid parameters before it records runtime intent, then accepts a valid execution', async () => {
@@ -226,6 +258,63 @@ it('reconciles already-submitted repair ancestry in source order after a missed 
   await runtime.scan({ id: 'project', teamIds: ['lead'] })
   expect(workflows.inspect('missed-repair-lineage')!.steps.find(step => step.id === 'implement')).toMatchObject({ phase: 'completed', artifacts: { source: { ref: repaired } } })
   expect(host.codeCalls).toHaveLength(1)
+})
+
+it('requires a pinned server grant and replays one idempotent publication after a post-effect crash', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-release-runtime-'))
+  roots.push(directory)
+  const workflows = await WorkflowStore.open(directory)
+  const reports = await ReportStore.open(directory)
+  const host = new PublicationHost()
+  const project = { id: 'project', teamIds: ['lead'], publicationGrants: [{ teamId: 'lead', authorization: 'release-manager' }], publicationPublisher: { identity: 'release-publisher', revision: 1 } }
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [releasePublicationTemplate])
+  closeables.push(runtime, reports, workflows)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'release-publication', templateVersion: 1, parameters: { release: 'v1' }, executionId: 'release-crash' }, project)
+  await runtime.scan(project)
+  const prepare = workflows.inspect('release-crash')!.steps.find(step => step.id === 'prepare')!
+  await workflows.completeStep('release-crash', 'prepare', prepare.revision, { artifacts: { 'release-candidate': { kind: 'report', ref: 'manifest-v1' } }, receipt: { kind: 'report-review', reviewer: 'lead', decision: 'approved', reference: { kind: 'report', ref: 'manifest-v1' } } })
+  await runtime.scan(project)
+  const publish = workflows.inspect('release-crash')!.steps.find(step => step.id === 'publish')!
+  await expect(runtime.authorizePublication('release-crash', 'publish', publish.revision, { kind: 'ticket', ref: 'CAB-1' }, 'other')).rejects.toThrow(/grant/)
+  await runtime.authorizePublication('release-crash', 'publish', publish.revision, { kind: 'ticket', ref: 'CAB-1' }, 'lead')
+  const journal = (runtime as unknown as { journal: { append(producer: () => unknown): Promise<unknown> } }).journal
+  const append = journal.append.bind(journal)
+  journal.append = async producer => {
+    const event = producer() as { type?: string }
+    if (event.type === 'workflow-runtime/publication-recorded') throw new Error('injected crash after publisher effect')
+    return await append(() => event)
+  }
+  await expect(runtime.scan(project)).rejects.toThrow(/publisher effect/)
+  const firstKey = host.publicationCalls[0]!.idempotencyKey
+  await runtime.close(); await reports.close(); await workflows.close(); closeables.length = 0
+  const restoredWorkflows = await WorkflowStore.open(directory), restoredReports = await ReportStore.open(directory)
+  const restored = await WorkflowRuntime.open(directory, restoredWorkflows, restoredReports, host, [releasePublicationTemplate])
+  closeables.push(restored, restoredReports, restoredWorkflows)
+  await restored.resume('release-crash', project)
+  expect(host.publicationCalls.map(call => call.idempotencyKey)).toEqual([firstKey, firstKey])
+  expect(host.effects).toEqual(new Set([firstKey]))
+  expect(restoredWorkflows.inspect('release-crash')!.steps.find(step => step.id === 'publish')).toMatchObject({ phase: 'completed', receipt: { kind: 'externally-authorized-publication', publisher: 'release-publisher' } })
+})
+
+it('fails closed before any publisher call when the restored publisher identity or revision differs', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-release-publisher-mismatch-')); roots.push(directory)
+  const workflows = await WorkflowStore.open(directory), reports = await ReportStore.open(directory), host = new PublicationHost()
+  const project = { id: 'project', teamIds: ['lead'], publicationGrants: [{ teamId: 'lead', authorization: 'release-manager' }], publicationPublisher: { identity: 'release-publisher', revision: 1 } }
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [releasePublicationTemplate]); closeables.push(runtime, reports, workflows)
+  await runtime.create({ projectId: 'project', teamId: 'lead', templateId: 'release-publication', templateVersion: 1, parameters: { release: 'v1' }, executionId: 'release-mismatch' }, project)
+  await runtime.scan(project)
+  const prepare = workflows.inspect('release-mismatch')!.steps[0]!
+  await workflows.completeStep('release-mismatch', prepare.id, prepare.revision, { artifacts: { 'release-candidate': { kind: 'report', ref: 'manifest' } }, receipt: { kind: 'report-review', reviewer: 'lead', decision: 'approved', reference: { kind: 'report', ref: 'manifest' } } })
+  await runtime.scan(project)
+  const publish = workflows.inspect('release-mismatch')!.steps[1]!
+  await runtime.authorizePublication('release-mismatch', publish.id, publish.revision, { kind: 'ticket', ref: 'CAB-3' }, 'lead')
+  await runtime.close(); await reports.close(); await workflows.close(); closeables.length = 0
+  const restoredWorkflows = await WorkflowStore.open(directory), restoredReports = await ReportStore.open(directory), changed = new PublicationHost()
+  ;(changed as unknown as { publicationPublisher: { identity: string; revision: number } }).publicationPublisher = { identity: 'release-publisher', revision: 2 }
+  const restored = await WorkflowRuntime.open(directory, restoredWorkflows, restoredReports, changed, [releasePublicationTemplate]); closeables.push(restored, restoredReports, restoredWorkflows)
+  await expect(restored.resume('release-mismatch', project)).rejects.toThrow(/publisher configuration disagrees/)
+  expect(changed.publicationCalls).toEqual([])
+  expect(restoredWorkflows.inspect('release-mismatch')!.steps[1]).toMatchObject({ phase: 'running' })
 })
 
 it('replays a durable candidate invalidation after the binding-reset crash boundary without reusing its report or approval', async () => {

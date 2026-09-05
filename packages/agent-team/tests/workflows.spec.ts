@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { validateWorkflowTemplate, WorkflowStore, type StepCompletion } from '../src/workflows.ts'
 
+import { implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate } from '../src/workflow-templates.ts'
+
 const roots: string[] = []
 const stores: WorkflowStore[] = []
 
@@ -196,6 +198,8 @@ it('ships valid JSON templates for code, investigation, and explicitly authorize
   for (const filename of ['implementation-test-review-integration.json', 'investigation-report.json', 'release-publication.json']) {
     const template = JSON.parse(await readFile(join(process.cwd(), 'workflows', filename), 'utf8'))
     expect(validateWorkflowTemplate(template)).toMatchObject({ format: 'agent-team-workflow/v1' })
+    const shipped = [implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate].find(value => value.id === template.id)
+    expect(template).toEqual(shipped)
   }
 })
 

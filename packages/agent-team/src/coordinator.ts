@@ -9,7 +9,7 @@ import z from 'zod'
 import schema from '@deepseek-ai/schemastery'
 import { DurableJournal } from './durable-journal.ts'
 import { ProjectCatalog } from './projects.ts'
-import type { ProjectRecord, RegisterProjectRequest } from './projects.ts'
+import type { ConfiguredPublicationGrant, ProjectRecord, RegisterProjectRequest } from './projects.ts'
 import { teamProjectionDefinition } from './projection.ts'
 import { TeamTaskId } from './types.ts'
 import type { CreateTeamTaskRequest, TeamTaskSnapshot, TeamTaskView } from './types.ts'
@@ -25,8 +25,8 @@ import type { DispatchRequest } from './dispatch-queue.ts'
 import type { AttemptRecord } from './assignments.ts'
 import { WorkflowStore } from './workflows.ts'
 import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime.ts'
-import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
-import { implementationTestReviewIntegrationTemplate, investigationReportTemplate } from './workflow-templates.ts'
+import type { CreateWorkflowRequest, WorkflowPublicationReceipt, WorkflowPublicationIntent, WorkflowRuntimeView } from './workflow-runtime.ts'
+import { implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate } from './workflow-templates.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
 
 export type CoordinatorId = Branded<'CoordinatorId'>
@@ -67,14 +67,17 @@ function reduce(state: State, raw: unknown): State {
   return { ...state, reconciliations: [...state.reconciliations.filter(value =>
     value.projectId !== next.projectId || value.teamId !== next.teamId), next] }
 }
-export interface CoordinatorConfig { readonly directory: string; readonly execution?: ExecutionConfig | undefined }
+export interface PublicationConfig { readonly grants: readonly ConfiguredPublicationGrant[]; readonly publisher: { readonly identity: string; readonly revision: number; publish(intent: WorkflowPublicationIntent): Promise<WorkflowPublicationReceipt> } }
+export interface CoordinatorConfig { readonly directory: string; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined }
 export interface Config extends CoordinatorConfig { readonly scanIntervalMs: number }
 export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
 export const Config: schema<Config> = schema.object({
   directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000),
   execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), health: schema.union([schema.const(undefined), schema.object({ dshDeadlineMs: schema.number().step(1).min(1), externalDeadlineMs: schema.number().step(1).min(1), escalationCooldownMs: schema.number().step(1).min(0), maxEscalationsPerCondition: schema.number().step(1).min(1).max(100) })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
-})
+  // The publisher is a server object, never a model-supplied value.
+  publication: schema.union([schema.const(undefined), schema.object({ grants: schema.array(schema.object({ projectId: schema.string().required(), teamId: schema.string().required(), authorization: schema.string().required() })).required(), publisher: schema.object({ identity: schema.string().required(), revision: schema.number().step(1).min(1).required(), publish: schema.function().required() }).required() })]),
+}) as schema<Config>
 
 /** Opt-in server lifecycle: startup is awaited before service publication; scans do not overlap. */
 export async function* apply(ctx: Context, config: Config): AsyncGenerator<() => Promise<void>> {
@@ -132,7 +135,7 @@ export class WorkspaceCoordinator {
   private constructor(
     private readonly ctx: Context,
     private readonly journal: DurableJournal<State, Payload>,
-    private readonly catalog: ProjectCatalog,
+    private readonly catalog: ProjectCatalog, private readonly publication: PublicationConfig | undefined,
   ) {}
 
   static async open(ctx: Context, config: CoordinatorConfig): Promise<WorkspaceCoordinator> {
@@ -148,8 +151,9 @@ export class WorkspaceCoordinator {
     let workflows: WorkflowRuntime | undefined
     try {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
-      catalog = await ProjectCatalog.open(config.directory)
-      const coordinator = new WorkspaceCoordinator(ctx, journal, catalog)
+      if (config.publication && (!config.publication.grants.length || typeof config.publication.publisher.publish !== 'function' || !config.publication.publisher.identity || !Number.isInteger(config.publication.publisher.revision) || config.publication.publisher.revision < 1)) throw new Error('Publication configuration requires grants and an identified idempotent publisher')
+      catalog = await ProjectCatalog.open(config.directory, config.publication?.grants)
+      const coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication)
       const ownedCatalog = catalog
       execution = await CoordinatorExecution.open(ctx, config.directory, config.execution, () => ownedCatalog.list())
       coordinator.execution = execution
@@ -159,7 +163,8 @@ export class WorkspaceCoordinator {
         createPinnedCodeTask: async intent => await execution!.createPinnedWorkflowCodeTask(intent),
         codeStatus: async intent => await execution!.workflowCodeStatus(intent),
         approvePinnedIntegration: async receipt => await execution!.approveWorkflowIntegration(receipt),
-      }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate])
+        ...(config.publication === undefined ? {} : { publishAuthorizedRelease: async intent => await config.publication!.publisher.publish(intent), publicationPublisher: { identity: config.publication.publisher.identity, revision: config.publication.publisher.revision } }),
+      }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate, ...(config.publication === undefined ? [] : [releasePublicationTemplate])])
       coordinator.workflowStore = workflowStore
       coordinator.workflows = workflows
       await coordinator.reconcile()
@@ -204,7 +209,7 @@ export class WorkspaceCoordinator {
       const project = this.authorize(caller, snapshot.projectId)
       if (snapshot.teamId !== caller.id) throw new Error('Workflow team must be the registered calling Lead')
       if (!this.workflows) throw new Error('Workflow runtime is unavailable')
-      const created = await this.workflows.create(snapshot, project)
+      const created = await this.workflows.create(snapshot, { ...project, ...(this.publication === undefined ? {} : { publicationPublisher: { identity: this.publication.publisher.identity, revision: this.publication.publisher.revision } }) })
       await this.scan()
       return this.workflows.inspect(created.executionId)!
     })
@@ -224,9 +229,23 @@ export class WorkspaceCoordinator {
     return this.run(async () => {
       const workflow = this.inspectWorkflow(caller, executionId)
       const project = this.authorize(caller, workflow.projectId)
+      if (this.journal.snapshot().controls.find(control => control.projectId === project.id)?.paused) throw new Error('Paused project cannot resume workflow work')
       const resumed = await this.workflows!.resume(executionId, project)
       await this.scan()
       return resumed === undefined ? undefined : this.workflows!.inspect(executionId)!
+    })
+  }
+
+  /** Trusted server operation. It derives authorization actor from the pinned project/execution grant. */
+  authorizeWorkflowPublication(caller: Agent, request: { executionId: string; stepId: string; expectedRevision: number; evidence: { kind: string; ref: string } }): Promise<WorkflowRuntimeView> {
+    const snapshot = z.object({ executionId: id, stepId: id, expectedRevision: revision, evidence: z.object({ kind: id, ref: z.string().trim().min(1).max(16_384) }).strict() }).strict().parse(structuredClone(request))
+    return this.run(async () => {
+      const workflow = this.inspectWorkflow(caller, snapshot.executionId)
+      const project = this.authorize(caller, workflow.projectId)
+      if (this.journal.snapshot().controls.find(control => control.projectId === project.id)?.paused) throw new Error('Paused project cannot authorize publication')
+      const authorized = await this.workflows!.authorizePublication(snapshot.executionId, snapshot.stepId, snapshot.expectedRevision, snapshot.evidence, caller.id)
+      await this.scan()
+      return authorized
     })
   }
 
