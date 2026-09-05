@@ -25,7 +25,7 @@ export type WorkspaceTaskRef = z.output<typeof taskRefSchema>
 export type WorkspaceTaskAcceptanceState = z.output<typeof stateSchema>
 export interface WorkspaceBatchItem { readonly ref: WorkspaceTaskRef; readonly dependsOn?: readonly WorkspaceTaskRef[] | undefined }
 export interface CreateWorkspaceBatchRequest { readonly id?: string | undefined; readonly name: string; readonly items: readonly WorkspaceBatchItem[]; readonly subscriptions?: readonly { readonly id: string; readonly destination: string }[] | undefined }
-export interface WorkspaceObservationRevision { readonly task: number; readonly generation: number; readonly attempt: number; /** Monotonic accepted-receipt materialization for an otherwise unchanged attempt. */ readonly acceptance: number }
+export interface WorkspaceObservationRevision { readonly task: number; readonly generation: number; readonly attempt: number; /** Monotonic terminal integration receipt: 0 pending, 1 failed, 2 accepted. */ readonly acceptance: number }
 export interface WorkspaceTaskObservation { readonly ref: WorkspaceTaskRef; readonly revision: WorkspaceObservationRevision; readonly state: WorkspaceTaskAcceptanceState; readonly activeAssignment: boolean }
 export interface WorkspaceBatchNotification { readonly intentId: string; readonly batchId: string; readonly subscriptionId: string; readonly destination: string; readonly completionEpoch: number }
 

@@ -38,6 +38,19 @@ it('leaves an unrelated project item ready after another required item fails', a
   await batches.close()
 })
 
+it('reopens a failed current integration for its active repair generation and retains its failure history', async () => {
+  const { batches } = await fixture()
+  const work = ref('project-a', 'lead-a', 'repairable')
+  await batches.create({ id: 'repair-current-outcome', name: 'repair current outcome', items: [{ ref: work }] })
+  const failed = await batches.observe('repair-current-outcome', [{ ref: work, revision: { task: 1, generation: 1, attempt: 1, acceptance: 1 }, state: 'failed', activeAssignment: true }])
+  expect(failed).toMatchObject({ phase: 'failed', items: [{ state: 'failed', activeAssignment: true }] })
+  const active = await batches.observe('repair-current-outcome', [{ ref: work, revision: { task: 1, generation: 2, attempt: 1, acceptance: 0 }, state: 'active', activeAssignment: true }])
+  expect(active).toMatchObject({ phase: 'active', items: [{ state: 'active', activeAssignment: true, history: [{ state: 'failed' }, { state: 'active' }] }], history: [{ phase: 'failed' }] })
+  await expect(batches.observe('repair-current-outcome', [{ ref: work, revision: { task: 2, generation: 2, attempt: 1, acceptance: 2 }, state: 'accepted', activeAssignment: false }]))
+    .resolves.toMatchObject({ phase: 'completed', completedRequired: 1 })
+  await batches.close()
+})
+
 it('retains failed and reopened history and deduplicates completion intents across JSONL restart', async () => {
   const { root, batches } = await fixture()
   const work = ref('project-a', 'lead-a', 'task')
@@ -74,6 +87,16 @@ it('records a durable accepted receipt that materializes after an otherwise unch
   await batches.observe('receipt-transition', [{ ref: work, revision: { task: 2, generation: 1, attempt: 4, acceptance: 0 }, state: 'blocked', activeAssignment: false }])
   await expect(batches.observe('receipt-transition', [{ ref: work, revision: { task: 2, generation: 1, attempt: 4, acceptance: 1 }, state: 'accepted', activeAssignment: false }]))
     .resolves.toMatchObject({ phase: 'completed', completedRequired: 1 })
+  await batches.close()
+})
+
+it('upgrades a legacy accepted receipt revision without creating a second completion epoch', async () => {
+  const { batches } = await fixture()
+  const work = ref('project-a', 'lead-a', 'legacy-accepted')
+  await batches.create({ id: 'legacy-accepted-receipt', name: 'legacy accepted receipt', items: [{ ref: work }] })
+  await batches.observe('legacy-accepted-receipt', [{ ref: work, revision: { task: 2, generation: 1, attempt: 4, acceptance: 1 }, state: 'accepted', activeAssignment: false }])
+  const upgraded = await batches.observe('legacy-accepted-receipt', [{ ref: work, revision: { task: 2, generation: 1, attempt: 4, acceptance: 2 }, state: 'accepted', activeAssignment: false }])
+  expect(upgraded).toMatchObject({ phase: 'completed', completionEpoch: 1, history: [{ phase: 'completed' }] })
   await batches.close()
 })
 

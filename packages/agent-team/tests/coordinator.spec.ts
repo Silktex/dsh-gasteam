@@ -149,15 +149,18 @@ it('restores a two-project batch between controlled-worker report and acceptance
   ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Controlled batch report with evidence.'))))
   const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } }, workspaceOperatorId: lead.id })
   cleanup.push(() => running.close())
-  await expect(running.planWorkspaceBatch(otherLead, { id: 'denied-batch', name: 'denied', items: [{ id: 'one', projectId: 'project', teamId: lead.id, subject: 'one', description: 'one' }] })).rejects.toThrow(/operator/i)
-  await expect(running.planWorkspaceBatch(lead, { id: 'cycle-batch', name: 'cycle', items: [
+  ctx.provide('workspaceCoordinator', running)
+  await expect(ctx.agentTeams.remotePlanWorkspaceBatch(otherLead, { id: 'denied-batch', name: 'denied', items: [{ id: 'one', projectId: 'project', teamId: lead.id, subject: 'one', description: 'one' }] })).rejects.toThrow(/operator/i)
+  await expect(ctx.agentTeams.remotePlanWorkspaceBatch(lead, { id: 'cycle-batch', name: 'cycle', items: [
     { id: 'a', projectId: 'project', teamId: lead.id, subject: 'a', description: 'a', dependsOn: ['b'] },
     { id: 'b', projectId: 'project-batch-b', teamId: otherLead.id, subject: 'b', description: 'b', dependsOn: ['a'] },
   ] })).rejects.toThrow(/cycle/i)
-  const batch = await running.planWorkspaceBatch(lead, { id: 'two-repositories', name: 'two repositories', items: [
+  const batch = await ctx.agentTeams.remotePlanWorkspaceBatch(lead, { id: 'two-repositories', name: 'two repositories', items: [
     { id: 'first', projectId: 'project', teamId: lead.id, subject: 'First repository', description: 'First controlled task', nonCodeCriteria: 'Report first evidence.' },
     { id: 'second', projectId: 'project-batch-b', teamId: otherLead.id, subject: 'Second repository', description: 'Must wait for the first acceptance', nonCodeCriteria: 'Report second evidence.', dependsOn: ['first'] },
-  ], subscriptions: [{ id: 'operator', destination: `in-app:${lead.id}` }] })
+  ] })
+  expect(ctx.agentTeams.remoteInspectWorkspaceBatch(lead, { batchId: 'two-repositories' })).toMatchObject({ id: 'two-repositories', required: 2 })
+  await ctx.agentTeams.remoteSubscribeWorkspaceBatch(lead, { batchId: 'two-repositories', subscriptionId: 'operator' })
   expect(batch.readyWithoutActiveAssignment).toEqual([])
   expect(ctx.agentTeams.listTasks(lead).some(task => task.subject === 'First repository')).toBe(true)
   expect(ctx.agentTeams.listTasks(otherLead).some(task => task.subject === 'Second repository')).toBe(true)
@@ -178,6 +181,7 @@ it('restores a two-project batch between controlled-worker report and acceptance
   restoredCtx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Controlled batch report with evidence.'))))
   const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution, workspaceOperatorId: lead.id })
   cleanup.push(() => restored.close())
+  restoredCtx.provide('workspaceCoordinator', restored)
   await restored.reconcile()
   firstAttempt = restored.view().attempts.find(attempt => attempt.taskId === firstTask.id)!
   await restored.acceptReport(restoredLead, 'project', { attemptId: firstAttempt.attemptId, generation: firstAttempt.generation, expectedRevision: firstAttempt.revision, expectedTaskRevision: firstTask.revision, rationale: 'First accepted.' })
@@ -189,7 +193,9 @@ it('restores a two-project batch between controlled-worker report and acceptance
   secondAttempt = restored.view().attempts.find(attempt => attempt.taskId === secondTask.id)!
   await restored.acceptReport(restoredOtherLead, 'project-batch-b', { attemptId: secondAttempt.attemptId, generation: secondAttempt.generation, expectedRevision: secondAttempt.revision, expectedTaskRevision: secondTask.revision, rationale: 'Second accepted.' })
   await vi.waitFor(() => expect(restored.inspectWorkspaceBatch(restoredLead, 'two-repositories').phase).toBe('completed'))
-  expect(await restored.workspaceBatchInbox(restoredLead)).toMatchObject([{ batchId: 'two-repositories', completionEpoch: 1 }])
+  const inbox = await restoredCtx.agentTeams.remoteWorkspaceBatchInbox(restoredLead, {})
+  expect(inbox).toMatchObject([{ batchId: 'two-repositories', completionEpoch: 1, destination: `in-app:${lead.id}` }])
+  expect(await restoredCtx.agentTeams.remoteAcknowledgeWorkspaceBatchNotification(restoredLead, { intentId: inbox[0]!.intentId })).toEqual([])
   expect(restored.inspectWorkspaceBatch(restoredLead, 'two-repositories')).toMatchObject({ required: 2, completedRequired: 2, phase: 'completed', completionEpoch: 1 })
   expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(task => task.subject === 'First repository')).toHaveLength(1)
   expect(restoredCtx.agentTeams.listTasks(restoredOtherLead).filter(task => task.subject === 'Second repository')).toHaveLength(1)

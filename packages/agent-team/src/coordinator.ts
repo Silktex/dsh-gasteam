@@ -32,6 +32,10 @@ import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { CoordinatorBatchStore } from './coordinator-batches.ts'
 import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, WorkspaceBatchView, WorkspaceTaskRef } from './coordinator-batches.ts'
 
+function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
+  return ctx.agentTeams.listIntegrations(lead).some(integration => integration.id === integrationId && integration.phase === 'failed')
+}
+
 export type CoordinatorId = Branded<'CoordinatorId'>
 declare module '@deepseek-ai/cordis' {
   interface Context { workspaceCoordinator: WorkspaceCoordinator }
@@ -561,13 +565,33 @@ export class WorkspaceCoordinator {
         const task = team?.tasks.find(task => task.id === item.ref.taskId)
         if (!task) return []
         const attempt = execution?.attempts.findLast(attempt => attempt.projectId === item.ref.projectId && attempt.teamId === item.ref.teamId && attempt.taskId === item.ref.taskId)
-        const reportAccepted = execution?.reports.some(report => report.phase === 'accepted' && report.projectId === item.ref.projectId && report.teamId === item.ref.teamId && report.taskId === item.ref.taskId) ?? false
-        const submissionAccepted = execution?.submissions.some(submission => submission.phase === 'accepted' && submission.projectId === item.ref.projectId && submission.teamId === item.ref.teamId && submission.taskId === item.ref.taskId) ?? false
+        const currentReport = attempt === undefined ? undefined : execution?.reports.findLast(report => report.projectId === item.ref.projectId && report.teamId === item.ref.teamId && report.taskId === item.ref.taskId
+          && report.attemptId === attempt.attemptId && report.generation === attempt.generation)
+        const reportAccepted = currentReport?.phase === 'accepted'
+        const currentSubmission = attempt === undefined ? undefined : execution?.submissions.findLast(submission => submission.projectId === item.ref.projectId && submission.teamId === item.ref.teamId && submission.taskId === item.ref.taskId
+          && submission.attemptId === attempt.attemptId && submission.generation === attempt.generation)
+        const submissionAccepted = currentSubmission?.phase === 'accepted'
         const accepted = task.status === 'completed' && (task.nonCodeCriteria === undefined ? submissionAccepted : reportAccepted)
-        const failed = attempt?.phase === 'terminal' && !!attempt.stopReason
+        // Verification failure is a durable integration outcome even when the
+        // worker itself ended normally and has no stop reason. Surface it to
+        // the workspace graph so it cannot masquerade as active/waiting work.
+        const lead = this.ctx.agents.get(SessionId(item.ref.teamId))
+        const integrationFailed = lead !== undefined && currentSubmission !== undefined
+          && ctxIntegrationFailed(this.ctx, lead, currentSubmission.integrationId)
+        const failed = integrationFailed || (attempt?.phase === 'terminal' && !!attempt.stopReason)
+        // Failure is the batch outcome; assignment ownership is independent.
+        // A successor repair can still be running while a prior integration is
+        // failed, and observers must retain its live runtime ownership.
         const activeAssignment = attempt !== undefined && attempt.phase !== 'terminal'
         const state = accepted ? 'accepted' as const : failed ? 'failed' as const : task.status !== 'pending' && !activeAssignment ? 'blocked' as const : activeAssignment ? 'active' as const : 'waiting' as const
-        return [{ ref: item.ref, revision: { task: task.revision, generation: attempt?.generation ?? 0, attempt: attempt?.revision ?? 0, acceptance: accepted ? 1 : 0 }, state, activeAssignment }]
+        // `acceptance` is the terminal integration receipt component of the
+        // observation tuple: 0 is no terminal receipt, 1 is a failed
+        // verification/integration receipt, and 2 is an accepted receipt.
+        // The task and assignment records need not change when Git writes a
+        // failed receipt, so omitting this component would replay a stale
+        // waiting observation at the same source revision.
+        const terminalReceipt = accepted ? 2 : integrationFailed ? 1 : 0
+        return [{ ref: item.ref, revision: { task: task.revision, generation: attempt?.generation ?? 0, attempt: attempt?.revision ?? 0, acceptance: terminalReceipt }, state, activeAssignment }]
       })
       if (observations.length) await this.batches.observe(batch.id, observations)
     }

@@ -91,6 +91,26 @@ it('SIGKILLs a two-repository code batch between independent first integration a
   } finally { try { for (const process of processes.reverse()) await process.stop(true) } finally { await rm(directory, { recursive: true, force: true }) } }
 }, 30_000)
 
+it('continues independent real-Git repository B after A fails verification, across a fresh coordinator process', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-workspace-batch-failure-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed-workspace-batch-failure', directory); processes.push(seed)
+    expect(await seed.barrier<{ barrier: string; file: string }>(), 'A commits the source that will fail verification').toMatchObject({ barrier: 'batch-worker-committed', file: 'failed-a.txt' })
+    const failed = await seed.barrier<{ barrier: string; job: { phase: string } }>()
+    expect(failed).toMatchObject({ barrier: 'batch-integration', job: { phase: 'failed' } })
+    await seed.stop(true); processes.pop()
+    const restored = processFixture('restore-workspace-batch-failure', directory); processes.push(restored)
+    const result = await restored.barrier<{ barrier: string; batch: { phase: string; history: { phase: string }[]; items: { ref: { projectId: string }; state: string }[] }; artifactB: string; integrations: { phase: string }[]; view: { attempts: { projectId: string }[]; submissions: { projectId: string; phase: string }[] } }>()
+    expect(result).toMatchObject({ barrier: 'batch-independent-completed', artifactB: 'verified', batch: { phase: 'failed' } })
+    expect(result.batch.items).toEqual(expect.arrayContaining([expect.objectContaining({ ref: expect.objectContaining({ projectId: 'batch-a' }), state: 'failed' }), expect.objectContaining({ ref: expect.objectContaining({ projectId: 'batch-b' }), state: 'accepted' })]))
+    expect(result.batch.history).toEqual(expect.arrayContaining([expect.objectContaining({ phase: 'failed' })]))
+    expect(result.integrations).toEqual(expect.arrayContaining([expect.objectContaining({ phase: 'failed' }), expect.objectContaining({ phase: 'merged' })]))
+    expect(result.view.submissions).toEqual(expect.arrayContaining([expect.objectContaining({ projectId: 'batch-b', phase: 'accepted' })]))
+    expect(result.view.attempts.filter(value => value.projectId === 'batch-b')).toHaveLength(1)
+  } finally { try { for (const process of processes.reverse()) await process.stop(true) } finally { await rm(directory, { recursive: true, force: true }) } }
+}, 30_000)
+
 it('keeps a real-Git candidate verified when its durable reviewer decision is rejected, including after restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-workflow-rejected-process-'))
   const processes: ReturnType<typeof processFixture>[] = []

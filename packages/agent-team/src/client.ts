@@ -24,3 +24,4 @@ export type { AcceptReportRequest, RemoteAcceptReportRequest, ReportAcceptanceRe
 export type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 export type { AttemptHealth, OperatorEscalation, HealthInboxRequest, AcknowledgeHealthRequest } from './health.ts'
 export type { WorkspaceBatchView, WorkspaceBatchNotification } from './coordinator-batches.ts'
+export type { WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'

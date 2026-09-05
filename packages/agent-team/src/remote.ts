@@ -7,6 +7,8 @@ import type { CreateTeamTaskRequest, TeamTaskMutationResult, TeamView, UpdateTea
 import type { SchedulingQuery, SchedulingControl, SchedulingView, RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport, AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './client.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
+import type { WorkspaceBatchPlanRequestWire, WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
+import type { WorkspaceBatchNotification, WorkspaceBatchView } from './coordinator-batches.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$6167656e745465616d73 {
@@ -19,6 +21,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     createWorkflow: (agentId: SessionId, request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     inspectWorkflow: (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     resumeWorkflow: (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    planWorkspaceBatch: (agentId: SessionId, request: WorkspaceBatchPlanRequestWire) => Promise<RemoteResult<WorkspaceBatchView>>
+    inspectWorkspaceBatch: (agentId: SessionId, request: WorkspaceBatchQuery) => Promise<RemoteResult<WorkspaceBatchView>>
+    subscribeWorkspaceBatch: (agentId: SessionId, request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
+    workspaceBatchInbox: (agentId: SessionId, request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    acknowledgeWorkspaceBatchNotification: (agentId: SessionId, request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     healthInbox: (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     acknowledgeHealth: (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     view: (agentId: SessionId) => Promise<RemoteResult<TeamView>>
@@ -33,6 +40,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agentTeams/createWorkflow': (agentId: SessionId, request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agentTeams/inspectWorkflow': (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agentTeams/resumeWorkflow': (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    'agentTeams/planWorkspaceBatch': (agentId: SessionId, request: WorkspaceBatchPlanRequestWire) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agentTeams/inspectWorkspaceBatch': (agentId: SessionId, request: WorkspaceBatchQuery) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agentTeams/subscribeWorkspaceBatch': (agentId: SessionId, request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agentTeams/workspaceBatchInbox': (agentId: SessionId, request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    'agentTeams/acknowledgeWorkspaceBatchNotification': (agentId: SessionId, request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     'agentTeams/healthInbox': (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     'agentTeams/acknowledgeHealth': (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agentTeams/view': (agentId: SessionId) => Promise<RemoteResult<TeamView>>
@@ -50,6 +62,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agent:agentTeams/createWorkflow': (request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agent:agentTeams/inspectWorkflow': (request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agent:agentTeams/resumeWorkflow': (request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    'agent:agentTeams/planWorkspaceBatch': (request: WorkspaceBatchPlanRequestWire) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agent:agentTeams/inspectWorkspaceBatch': (request: WorkspaceBatchQuery) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agent:agentTeams/subscribeWorkspaceBatch': (request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
+    'agent:agentTeams/workspaceBatchInbox': (request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    'agent:agentTeams/acknowledgeWorkspaceBatchNotification': (request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     'agent:agentTeams/healthInbox': (request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     'agent:agentTeams/acknowledgeHealth': (request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agent:agentTeams/view': () => Promise<RemoteResult<TeamView>>

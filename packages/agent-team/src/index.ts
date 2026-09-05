@@ -4,6 +4,8 @@ import type { SchedulingQuery, SchedulingControl, SchedulingView } from './sched
 import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './health.ts'
+import type { WorkspaceBatchPlanRequestWire, WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
+import type { WorkspaceBatchNotification, WorkspaceBatchView } from './coordinator-batches.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -572,6 +574,37 @@ export class TeamService extends TypertRemoteService {
     if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
     const { projectId, ...review } = request
     return await this.ctx.workspaceCoordinator.acceptReport(agent, projectId, review)
+  }
+
+  @Remote('planWorkspaceBatch')
+  remotePlanWorkspaceBatch(agent: Agent, request: WorkspaceBatchPlanRequestWire): Promise<WorkspaceBatchView> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.planWorkspaceBatch(agent, request)
+  }
+
+  @Remote('inspectWorkspaceBatch')
+  remoteInspectWorkspaceBatch(agent: Agent, request: WorkspaceBatchQuery): WorkspaceBatchView {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.inspectWorkspaceBatch(agent, request.batchId)
+  }
+
+  @Remote('subscribeWorkspaceBatch')
+  remoteSubscribeWorkspaceBatch(agent: Agent, request: WorkspaceBatchSubscriptionRequest): Promise<WorkspaceBatchView> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.subscribeWorkspaceBatch(agent, request.batchId, request.subscriptionId)
+  }
+
+  @Remote('workspaceBatchInbox')
+  remoteWorkspaceBatchInbox(agent: Agent, _request: WorkspaceBatchInboxRequest): Promise<WorkspaceBatchNotification[]> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.workspaceBatchInbox(agent)
+  }
+
+  @Remote('acknowledgeWorkspaceBatchNotification')
+  async remoteAcknowledgeWorkspaceBatchNotification(agent: Agent, request: WorkspaceBatchAcknowledgementRequest): Promise<WorkspaceBatchNotification[]> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    await this.ctx.workspaceCoordinator.acknowledgeWorkspaceBatchNotification(agent, request.intentId)
+    return await this.ctx.workspaceCoordinator.workspaceBatchInbox(agent)
   }
 
   @Remote('healthInbox')

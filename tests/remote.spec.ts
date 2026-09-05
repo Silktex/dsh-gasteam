@@ -15,6 +15,7 @@ import {
   acknowledgeHealthRequestSchema,
   operatorEscalationSchema,
 } from '../packages/agent-team/src/remote-schemas.ts'
+import { workspaceBatchPlanRequestSchema, workspaceBatchQuerySchema, workspaceBatchSubscriptionRequestSchema, workspaceBatchInboxRequestSchema, workspaceBatchAcknowledgementRequestSchema, workspaceBatchViewSchema, workspaceBatchNotificationsSchema } from '../packages/agent-team/src/workspace-batch-remote.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from '../packages/agent-team/src/scheduling-schemas.ts'
 import { TYPERT } from '../packages/agent-team/src/typert.ts'
 import { TYPERT_REMOTE } from '../packages/agent-team/src/remote.ts'
@@ -33,6 +34,11 @@ describe('Team RPC codecs', () => {
         ['createWorkflow', 'remoteCreateWorkflow', ['agentId', 'request']],
         ['inspectWorkflow', 'remoteInspectWorkflow', ['agentId', 'request']],
         ['resumeWorkflow', 'remoteResumeWorkflow', ['agentId', 'request']],
+        ['planWorkspaceBatch', 'remotePlanWorkspaceBatch', ['agentId', 'request']],
+        ['inspectWorkspaceBatch', 'remoteInspectWorkspaceBatch', ['agentId', 'request']],
+        ['subscribeWorkspaceBatch', 'remoteSubscribeWorkspaceBatch', ['agentId', 'request']],
+        ['workspaceBatchInbox', 'remoteWorkspaceBatchInbox', ['agentId', 'request']],
+        ['acknowledgeWorkspaceBatchNotification', 'remoteAcknowledgeWorkspaceBatchNotification', ['agentId', 'request']],
         ['healthInbox', 'remoteHealthInbox', ['agentId', 'request']],
         ['acknowledgeHealth', 'remoteAcknowledgeHealth', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],
@@ -47,6 +53,21 @@ describe('Team RPC codecs', () => {
     expect(workflowQuerySchema.parse({ executionId: 'workflow-1' })).toEqual({ executionId: 'workflow-1' })
     expect(workflowViewSchema.parse({ executionId: 'workflow-1', projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1,
       steps: [{ stepId: 'investigate', phase: 'running', taskId: 'workflow-intent', revision: 1, attempts: 0 }] })).toMatchObject({ executionId: 'workflow-1' })
+  })
+
+  it('validates strict workspace-batch RPC requests and actionable durable views', () => {
+    const plan = { id: 'batch', name: 'two repositories', items: [{ id: 'first', projectId: 'project-a', teamId: 'lead-a', subject: 'First', description: 'Complete first' }], subscriptions: [{ id: 'operator', destination: 'in-app:lead-a' }] }
+    expect(workspaceBatchPlanRequestSchema.parse(plan)).toEqual({ ...plan, items: [{ ...plan.items[0], dependsOn: [] }] })
+    expect(() => workspaceBatchPlanRequestSchema.parse({ ...plan, unexpected: true })).toThrow()
+    expect(workspaceBatchQuerySchema.parse({ batchId: 'batch' })).toEqual({ batchId: 'batch' })
+    expect(workspaceBatchSubscriptionRequestSchema.parse({ batchId: 'batch', subscriptionId: 'operator' })).toEqual({ batchId: 'batch', subscriptionId: 'operator' })
+    expect(workspaceBatchInboxRequestSchema.parse({})).toEqual({})
+    expect(workspaceBatchAcknowledgementRequestSchema.parse({ intentId: 'notice' })).toEqual({ intentId: 'notice' })
+    const view = { id: 'batch', name: 'two repositories', phase: 'blocked' as const, completionEpoch: 0, completedRequired: 1, required: 2, readyWithoutActiveAssignment: [],
+      items: [{ ref: { projectId: 'project-a', teamId: 'lead-a', taskId: 'task-a' }, state: 'accepted' as const, activeAssignment: false, dependsOn: [], history: [{ state: 'accepted' as const, activeAssignment: false, at: 1 }] },
+        { ref: { projectId: 'project-b', teamId: 'lead-b', taskId: 'task-b' }, state: 'blocked' as const, activeAssignment: false, dependsOn: [{ projectId: 'project-a', teamId: 'lead-a', taskId: 'task-a' }], history: [{ state: 'blocked' as const, activeAssignment: false, at: 2 }] }], history: [] }
+    expect(workspaceBatchViewSchema.parse(view)).toEqual(view)
+    expect(workspaceBatchNotificationsSchema.parse([{ intentId: 'notice', batchId: 'batch', subscriptionId: 'operator', destination: 'in-app:lead-a', completionEpoch: 1 }])).toHaveLength(1)
   })
 
   it('validates revision-fenced health inbox controls', () => {
