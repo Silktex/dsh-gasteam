@@ -9,6 +9,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 import type { WorkspaceBatchPlanRequestWire, WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
 import type { WorkspaceBatchNotification, WorkspaceBatchView } from './coordinator-batches.ts'
+import type { WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$6167656e745465616d73 {
@@ -26,6 +27,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     subscribeWorkspaceBatch: (agentId: SessionId, request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
     workspaceBatchInbox: (agentId: SessionId, request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     acknowledgeWorkspaceBatchNotification: (agentId: SessionId, request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    workspaceDashboard: (agentId: SessionId, request: WorkspaceDashboardRequest) => Promise<RemoteResult<WorkspaceDashboardView>>
     healthInbox: (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     acknowledgeHealth: (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     view: (agentId: SessionId) => Promise<RemoteResult<TeamView>>
@@ -45,6 +47,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agentTeams/subscribeWorkspaceBatch': (agentId: SessionId, request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
     'agentTeams/workspaceBatchInbox': (agentId: SessionId, request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     'agentTeams/acknowledgeWorkspaceBatchNotification': (agentId: SessionId, request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    'agentTeams/workspaceDashboard': (agentId: SessionId, request: WorkspaceDashboardRequest) => Promise<RemoteResult<WorkspaceDashboardView>>
     'agentTeams/healthInbox': (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     'agentTeams/acknowledgeHealth': (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agentTeams/view': (agentId: SessionId) => Promise<RemoteResult<TeamView>>
@@ -67,6 +70,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agent:agentTeams/subscribeWorkspaceBatch': (request: WorkspaceBatchSubscriptionRequest) => Promise<RemoteResult<WorkspaceBatchView>>
     'agent:agentTeams/workspaceBatchInbox': (request: WorkspaceBatchInboxRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
     'agent:agentTeams/acknowledgeWorkspaceBatchNotification': (request: WorkspaceBatchAcknowledgementRequest) => Promise<RemoteResult<WorkspaceBatchNotification[]>>
+    'agent:agentTeams/workspaceDashboard': (request: WorkspaceDashboardRequest) => Promise<RemoteResult<WorkspaceDashboardView>>
     'agent:agentTeams/healthInbox': (request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
     'agent:agentTeams/acknowledgeHealth': (request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agent:agentTeams/view': () => Promise<RemoteResult<TeamView>>

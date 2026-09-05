@@ -48,6 +48,7 @@ describe('Agent Teams built LIB service', () => {
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/subscribeWorkspaceBatch',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/workspaceBatchInbox',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/acknowledgeWorkspaceBatchNotification',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/workspaceDashboard',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/healthInbox',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/acknowledgeHealth',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/view',

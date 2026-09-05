@@ -4,6 +4,7 @@ import type {
   TeamMemberView as TeamRosterMember,
   TeamView,
   OperatorEscalation,
+  WorkspaceDashboardView,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/remote'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -17,6 +18,7 @@ import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import {
   TeamAction, type TeamActionInjected, type TeamActionResult, type TeamTaskActionResult,
 } from './TeamAction.tsx'
+import { WorkspaceDashboard, type WorkspaceDashboardProps } from './WorkspaceDashboard.tsx'
 import { en, NS, zh, type TeamKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -69,6 +71,11 @@ function registerUi(ctx: ClientContext): void {
       return await ctx.remote.agentTeams.acknowledgeHealth(leadSessionId(sessionId), { projectId, escalationId, expectedRevision })
     },
   }
+  const dashboard: Pick<WorkspaceDashboardProps, 'load'> = {
+    async load(sessionId): Promise<TeamActionResult<WorkspaceDashboardView>> {
+      return await ctx.remote.agentTeams.workspaceDashboard(leadSessionId(sessionId), {})
+    },
+  }
 
   ctx.slots.inject(
     'conversation.session.header.actions',
@@ -79,6 +86,16 @@ function registerUi(ctx: ClientContext): void {
       locale: NS,
       inject: () => actions,
     }, TeamAction),
+  )
+  ctx.slots.inject(
+    'conversation.session.header.actions',
+    () => ctx.slots.register({
+      name: 'conversation.session.header.actions',
+      id: 'workspace-dashboard',
+      order: 21,
+      locale: NS,
+      inject: () => dashboard,
+    }, WorkspaceDashboard),
   )
 }
 

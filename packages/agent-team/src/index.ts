@@ -6,6 +6,7 @@ import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runt
 import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './health.ts'
 import type { WorkspaceBatchPlanRequestWire, WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
 import type { WorkspaceBatchNotification, WorkspaceBatchView } from './coordinator-batches.ts'
+import type { WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -607,6 +608,12 @@ export class TeamService extends TypertRemoteService {
     if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
     await this.ctx.workspaceCoordinator.acknowledgeWorkspaceBatchNotification(agent, request.intentId)
     return await this.ctx.workspaceCoordinator.workspaceBatchInbox(agent)
+  }
+
+  @Remote('workspaceDashboard')
+  remoteWorkspaceDashboard(agent: Agent, _request: WorkspaceDashboardRequest): WorkspaceDashboardView {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.workspaceDashboard(agent)
   }
 
   @Remote('healthInbox')

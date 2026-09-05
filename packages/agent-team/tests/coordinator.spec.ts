@@ -7,6 +7,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as CoordinatorTools from '../../tool-agent-team/src/coordinator.ts'
 import { schedulingViewSchema, schedulingControlSchema } from '../src/scheduling-schemas.ts'
+import { workspaceDashboardViewSchema } from '../src/workspace-dashboard.ts'
 import { createTaskSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, updateTaskSchema } from '../src/remote-schemas.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -159,6 +160,11 @@ it('restores a two-project batch between controlled-worker report and acceptance
     { id: 'first', projectId: 'project', teamId: lead.id, subject: 'First repository', description: 'First controlled task', nonCodeCriteria: 'Report first evidence.' },
     { id: 'second', projectId: 'project-batch-b', teamId: otherLead.id, subject: 'Second repository', description: 'Must wait for the first acceptance', nonCodeCriteria: 'Report second evidence.', dependsOn: ['first'] },
   ] })
+  expect(workspaceDashboardViewSchema.parse(ctx.agentTeams.remoteWorkspaceDashboard(lead, {}))).toMatchObject({
+    projects: expect.arrayContaining([expect.objectContaining({ id: 'project', capacity: request.capacity })]),
+    batches: [expect.objectContaining({ id: 'two-repositories', required: 2, completedRequired: 0 })],
+  })
+  expect(() => ctx.agentTeams.remoteWorkspaceDashboard(otherLead, {})).toThrow(/operator/i)
   expect(ctx.agentTeams.remoteInspectWorkspaceBatch(lead, { batchId: 'two-repositories' })).toMatchObject({ id: 'two-repositories', required: 2 })
   await ctx.agentTeams.remoteSubscribeWorkspaceBatch(lead, { batchId: 'two-repositories', subscriptionId: 'operator' })
   expect(batch.readyWithoutActiveAssignment).toEqual([])
@@ -235,6 +241,9 @@ it('admits a workspace batch code item only through verified integration and ret
   const submission = running.view().submissions.find(candidate => candidate.taskId === task.id)!
   expect(submission.phase).toBe('accepted')
   expect(ctx.agentTeams.listIntegrations(lead)).toContainEqual(expect.objectContaining({ id: submission.integrationId, phase: 'merged' }))
+  expect(running.workspaceDashboard(lead).integrations).toContainEqual(expect.objectContaining({
+    integrationId: submission.integrationId, projectId: 'project', teamId: lead.id, phase: 'merged', sourceCommit: submission.sourceCommit,
+  }))
   expect(ctx.agentTeams.getTask(lead, task.id).status).toBe('completed')
   expect(running.inspectWorkspaceBatch(lead, 'code-batch')).toMatchObject({ phase: 'completed', completedRequired: 1 })
   expect((await git('show', 'main:shared.txt')).stdout).toBe('batch')

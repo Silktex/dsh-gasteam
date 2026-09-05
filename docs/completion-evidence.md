@@ -527,3 +527,12 @@ Final isolated archive `/tmp/gasteam-m2-disposal-4ac4f1c` contains four reviewed
 ## 2026-09-05 — Deterministic process enumeration in containment acceptance
 
 Published shutdown checkpoint `857b66d` CI33996466355 failed the existing escaped-descendant fixture with `ENOENT` from `lstat /proc/<pid>`; 375 regular tests passed and two were explicitly skipped. `readdir` with file types can inspect an entry that disappears before its internal lstat. The fixture now enumerates plain names and ignores only ENOENT when reading a vanished process, preserving all ownership and positive termination assertions. Its regression forces the old file-type enumeration to fail. Focused supervisor12 and typecheck pass (`/tmp/gasteam-ci-proc-race-{focused,typecheck}.log`); failure log `/tmp/gasteam-ci-857b66d-failed.log`. Runtime code is unchanged by this fixture correction.
+
+Checkpoint `49cee91e68a54c11e806d079f1dc85b77e5fd1cc` passed [exact-commit GitHub CI](https://github.com/Silktex/dsh-gasteam/actions/runs/33996702114), validating the complete bounded Team teardown and containment fixture correction. Receipt `/tmp/gasteam-ci-49cee91.json`; log `/tmp/gasteam-ci-49cee91.log`.
+
+
+## 2026-09-05 — Operator-authorized workspace dashboard
+
+A read-only session-header dashboard now uses the typed `workspaceDashboard` Remote, guarded by the exact configured workspace operator. The browser-safe projection carries real assignment/health/workflow/batch states, separate dispatch and integration queues, durable references, and explicit collection/step/blocker truncation. Missing health stays unobserved; no usage is inferred. EN/ZH presentation handles loading, empty, errors and selection changes. Agent identity changes clear old data and invalidate late responses, including A→B→A and unauthorized B.
+
+Final isolated49cee archive `/tmp/gasteam-m8-dashboard-final-1788648479`, authoritative `M8-DASHBOARD-OVERLAY.sha256`, passes install/build/types, regular387 with two explicit skips, process acceptance19, docs and smoke (`/tmp/gasteam-m8-final-*.log`). Root inspected `/tmp/gasteam-m8-dashboard-browser.png`; its controlled component fixture visibly shows every section, selection, uncertain health, failed integration diagnostics and no page errors. This is browser component evidence, not a production-service demonstration. Cursor pagination, reconnecting activity feed, workspace mutation controls, provider usage and full M8 acceptance remain unfinished.

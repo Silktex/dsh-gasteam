@@ -17,6 +17,7 @@ import {
 } from '../packages/agent-team/src/remote-schemas.ts'
 import { workspaceBatchPlanRequestSchema, workspaceBatchQuerySchema, workspaceBatchSubscriptionRequestSchema, workspaceBatchInboxRequestSchema, workspaceBatchAcknowledgementRequestSchema, workspaceBatchViewSchema, workspaceBatchNotificationsSchema } from '../packages/agent-team/src/workspace-batch-remote.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from '../packages/agent-team/src/scheduling-schemas.ts'
+import { workspaceDashboardRequestSchema } from '../packages/agent-team/src/workspace-dashboard.ts'
 import { TYPERT } from '../packages/agent-team/src/typert.ts'
 import { TYPERT_REMOTE } from '../packages/agent-team/src/remote.ts'
 
@@ -39,6 +40,7 @@ describe('Team RPC codecs', () => {
         ['subscribeWorkspaceBatch', 'remoteSubscribeWorkspaceBatch', ['agentId', 'request']],
         ['workspaceBatchInbox', 'remoteWorkspaceBatchInbox', ['agentId', 'request']],
         ['acknowledgeWorkspaceBatchNotification', 'remoteAcknowledgeWorkspaceBatchNotification', ['agentId', 'request']],
+        ['workspaceDashboard', 'remoteWorkspaceDashboard', ['agentId', 'request']],
         ['healthInbox', 'remoteHealthInbox', ['agentId', 'request']],
         ['acknowledgeHealth', 'remoteAcknowledgeHealth', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],
@@ -68,6 +70,11 @@ describe('Team RPC codecs', () => {
         { ref: { projectId: 'project-b', teamId: 'lead-b', taskId: 'task-b' }, state: 'blocked' as const, activeAssignment: false, dependsOn: [{ projectId: 'project-a', teamId: 'lead-a', taskId: 'task-a' }], history: [{ state: 'blocked' as const, activeAssignment: false, at: 2 }] }], history: [] }
     expect(workspaceBatchViewSchema.parse(view)).toEqual(view)
     expect(workspaceBatchNotificationsSchema.parse([{ intentId: 'notice', batchId: 'batch', subscriptionId: 'operator', destination: 'in-app:lead-a', completionEpoch: 1 }])).toHaveLength(1)
+  })
+
+  it('validates the strict read-only workspace dashboard request', () => {
+    expect(workspaceDashboardRequestSchema.parse({})).toEqual({})
+    expect(() => workspaceDashboardRequestSchema.parse({ projectId: 'project' })).toThrow()
   })
 
   it('validates revision-fenced health inbox controls', () => {

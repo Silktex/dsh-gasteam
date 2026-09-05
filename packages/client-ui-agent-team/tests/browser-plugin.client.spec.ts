@@ -9,6 +9,7 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
 import { TeamAction, type TeamActionInjected } from '../src/client/TeamAction.tsx'
 import { inject, mountAgentTeamUi } from '../src/client/mount.ts'
+import { WorkspaceDashboard, type WorkspaceDashboardProps } from '../src/client/WorkspaceDashboard.tsx'
 import { apply as nodeApply } from '../src/index.ts'
 
 const SESSION = 'team-session' as SessionId
@@ -55,7 +56,7 @@ async function bench(options: {
     error: new RemoteError('gateway/internal', 'offline', {}),
   }
   const view = {
-    batches: [], integrations: [],
+    batches: [], integrations: [], integrationsTruncated: false,
     members: [{
       id: SESSION, name: 'lead', role: 'lead' as const, status: 'idle' as const, diagnostics: [],
     }], tasks: [task],
@@ -83,6 +84,10 @@ async function bench(options: {
           },
         }
         : { ok: true as const, value: { ok: true as const, value: { ...task, revision: 2 } } })
+    },
+    workspaceDashboard: (...args: unknown[]) => {
+      calls.push({ method: 'agentTeams/workspaceDashboard', args })
+      return Promise.resolve({ ok: true as const, value: { projects: [], projectsTruncated: false, attempts: [], attemptsTruncated: false, workflows: [], workflowsTruncated: false, batches: [], batchesTruncated: false, queue: [], queueTruncated: false, escalations: [], escalationsTruncated: false } })
     },
   })
   const navigation: unknown[] = []
@@ -129,6 +134,8 @@ async function bench(options: {
   }
   const entry = () => ctx.slots.entries('conversation.session.header.actions')
     .find(candidate => candidate.component === TeamAction)
+  const dashboardEntry = () => ctx.slots.entries('conversation.session.header.actions')
+    .find(candidate => candidate.component === WorkspaceDashboard)
   return {
     ctx,
     fiber,
@@ -137,6 +144,7 @@ async function bench(options: {
     navigation,
     remote,
     entry,
+    dashboardEntry,
     collapseHeader,
     select: (sessionId: SessionId) => { current = sessionId },
   }
@@ -180,6 +188,15 @@ describe('ui-team browser plugin', () => {
     await b.fiber.dispose()
     expect(b.entry()).toBeUndefined()
     expect(b.remote.disposeMount).toHaveBeenCalledOnce()
+  })
+
+  it('registers the dashboard separately and resolves an addressed session to its Lead before its read-only Remote call', async () => {
+    const b = await bench({ addressed: true })
+    expect(b.dashboardEntry()).toMatchObject({ options: { id: 'workspace-dashboard', order: 21 }, locale: 'agent-team' })
+    const dashboard = (b.dashboardEntry()!.inject as unknown as () => Pick<WorkspaceDashboardProps, 'load'>)()
+    await expect(dashboard.load(CHILD)).resolves.toMatchObject({ ok: true, value: { projects: [] } })
+    expect(b.calls.at(-1)).toEqual({ method: 'agentTeams/workspaceDashboard', args: [SESSION, {}] })
+    await b.fiber.dispose()
   })
 
   it('unmounts the Remote contribution when later Client registration fails', async () => {
