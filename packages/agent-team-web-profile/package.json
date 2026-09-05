@@ -1,0 +1,51 @@
+{
+  "name": "@deepseek-ai/dsh-experimental-agent-team-web-profile",
+  "description": "Private Web profile layer for Agent Teams Remote and UI plugins",
+  "version": "0.1.2-alpha.2",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Silktex/dsh-gasteam.git",
+    "directory": "packages/agent-team-web-profile"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "cordis.patch.yml",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-experimental-client-ui-agent-team": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/cordis": "4.0.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis-plugin-include": "1.0.7",
+    "@deepseek-ai/dsh-invariants": "0.1.2-rc.1",
+    "@deepseek-ai/cordis": "4.0.2",
+    "js-yaml": "^4.2.0"
+  }
+}

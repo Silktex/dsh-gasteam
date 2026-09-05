@@ -1,0 +1,20 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/tool-agent-team/tsconfig.json"
+    },
+    {
+      "path": "./packages/agent-team/tsconfig.json"
+    },
+    {
+      "path": "./packages/agent-team-profile/tsconfig.json"
+    },
+    {
+      "path": "./packages/client-ui-agent-team/tsconfig.host.json"
+    },
+    {
+      "path": "./packages/agent-team-web-profile/tsconfig.json"
+    }
+  ]
+}

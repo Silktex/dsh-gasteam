@@ -1,0 +1,39 @@
+diff --git a/lib/index.js b/lib/index.js
+index 878d4475852177ab73abd8cbd18b31c190f63fdd..d7daa7cdd63152579e0fdb2b6a87b9b46fa785c4 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1054,7 +1054,7 @@ var SubagentContinuationManager = class {
+ 					parent,
+ 					create: {
+ 						seed,
+-						meta: childSessionMeta(parent, childDepth, prepared.seed !== void 0),
++						meta: { ...childSessionMeta(parent, childDepth, prepared.seed !== void 0), ...(spec.cwd === void 0 ? {} : { cwd: spec.cwd }) },
+ 						inheritedEventCount,
+ 						delegatedPolicies
+ 					},
+diff --git a/lib/types/continuation.d.ts b/lib/types/continuation.d.ts
+index 72114b111451b78a53da00588e5f48d225f7d013..2e89e3972ed0b563a9310cd724ebf8894335fbb4 100644
+--- a/lib/types/continuation.d.ts
++++ b/lib/types/continuation.d.ts
+@@ -69,6 +69,8 @@ export interface ContinuableStartSpec {
+      * before child materialization without a second identity handshake.
+      */
+     readonly childId?: SessionId;
++    /** Absolute workspace directory persisted before activation. */
++    readonly cwd?: string;
+     /**
+      * The delegation request. The manager reserves the stable child id, resolves
+      * the durable descriptor, and composes the child itself.
+diff --git a/lib/types/continuation.js b/lib/types/continuation.js
+index 23f59ad80a5974ae60bfc4e274ce9765ab7d2c0e..1058ec7511e5a59a2a696a5cc07fe3458ab158ec 100644
+--- a/lib/types/continuation.js
++++ b/lib/types/continuation.js
+@@ -291,7 +291,7 @@ export class SubagentContinuationManager {
+                 parent,
+                 create: {
+                     seed,
+-                    meta: childSessionMeta(parent, childDepth, prepared.seed !== undefined),
++                    meta: { ...childSessionMeta(parent, childDepth, prepared.seed !== undefined), ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }) },
+                     inheritedEventCount,
+                     delegatedPolicies,
+                 },

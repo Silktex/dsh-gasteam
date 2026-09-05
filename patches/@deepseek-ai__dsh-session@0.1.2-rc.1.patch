@@ -1,0 +1,34 @@
+diff --git a/lib/index.js b/lib/index.js
+index 46fd18ca5cbcc4d5436bd31153ea54418f8c0867..b77f771bd2e152e49d5796937fc666eaf3fc7de8 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -946,7 +946,11 @@ const KNOWN_SESSION_EVENT_TYPES = new Set([
+ 	"step/start",
+ 	"subagent/descriptor",
+ 	"subagent/model-selection-policy",
+-	"team/member",
++	"team/batch",
++"team/integration",
++"team/recovery",
++"team/worktree",
++"team/member",
+ 	"team/message/delivered",
+ 	"team/message/queued",
+ 	"team/task",
+diff --git a/lib/types/known-event-types.js b/lib/types/known-event-types.js
+index 28a72730157faa82c5def094987a0deb43371b53..e03e6d1a46859aa8181b35167c54acd9738ec96c 100644
+--- a/lib/types/known-event-types.js
++++ b/lib/types/known-event-types.js
+@@ -53,7 +53,11 @@ export const KNOWN_SESSION_EVENT_TYPES = new Set([
+     'step/start',
+     'subagent/descriptor',
+     'subagent/model-selection-policy',
+-    'team/member',
++    'team/batch',
++'team/integration',
++'team/recovery',
++'team/worktree',
++'team/member',
+     'team/message/delivered',
+     'team/message/queued',
+     'team/task',

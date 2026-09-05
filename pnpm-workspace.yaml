@@ -1,0 +1,15 @@
+packages:
+  - packages/*
+
+autoInstallPeers: true
+allowBuilds:
+  esbuild: true
+  node-pty: true
+  better-sqlite3: true
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  koffi: true
+  protobufjs: true
+patchedDependencies:
+  '@deepseek-ai/dsh-session@0.1.2-rc.1': patches/@deepseek-ai__dsh-session@0.1.2-rc.1.patch
+  '@deepseek-ai/dsh-subagent@0.1.2-rc.1': patches/@deepseek-ai__dsh-subagent@0.1.2-rc.1.patch
