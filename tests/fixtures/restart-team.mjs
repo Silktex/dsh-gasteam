@@ -26,7 +26,7 @@ class FixtureSessionQuery extends SessionQueryEngine {
 }
 
 const [mode, directory] = process.argv.slice(2)
-if (!directory || !['seed', 'seed-repair', 'seed-report', 'seed-workflow-crash', 'seed-code-workflow', 'seed-code-workflow-repair', 'seed-workspace-batch', 'restore-workspace-batch', 'ack-workspace-batch', 'seed-workspace-batch-failure', 'restore-workspace-batch-failure', 'restore-code-review', 'restore-code-reject', 'restore-code-repair-review', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-workflow', 'restore-worker-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'restore-report-intent-crash', 'restore-report-receipt-crash', 'restore-report', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
+if (!directory || !['seed', 'seed-repair', 'seed-report', 'seed-workflow-crash', 'seed-code-workflow', 'seed-code-workflow-repair', 'seed-workspace-batch', 'restore-workspace-batch', 'ack-workspace-batch', 'seed-workspace-batch-failure', 'restore-workspace-batch-failure', 'restore-code-review', 'restore-code-reject', 'restore-code-repair-review', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-workflow', 'restore-worker-crash', 'restore-worker-activation-crash', 'restore-worker-mail-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'restore-report-intent-crash', 'restore-report-receipt-crash', 'restore-report', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
 const repairMode = mode.includes('repair')
 const reportMode = mode.includes('report')
 const workflowMode = mode.includes('workflow')
@@ -34,7 +34,7 @@ const codeWorkflowMode = mode === 'seed-code-workflow' || mode === 'seed-code-wo
 const workspaceBatchFailureMode = mode === 'seed-workspace-batch-failure' || mode === 'restore-workspace-batch-failure'
 const workspaceBatchMode = mode === 'seed-workspace-batch' || mode === 'restore-workspace-batch' || mode === 'ack-workspace-batch' || workspaceBatchFailureMode
 const verification = [{ command: process.execPath, args: repairMode ? ['-e', "if(!require('node:fs').existsSync('repaired.txt'))process.exit(1)"] : ['--version'] }]
-const acceptanceMode = mode === 'restore-repair-crash' || mode === 'restore-repair' || mode === 'restore-stale-target' || mode === 'restore-worker-recovery' || mode === 'restore-ambiguous-promotion' || mode === 'restore-promotion-crash' || mode === 'restore-acceptance-crash' || mode === 'restore-acceptance' || mode === 'restore-dag'
+const acceptanceMode = mode === 'restore-repair-crash' || mode === 'restore-repair' || mode === 'restore-stale-target' || mode === 'restore-worker-activation-crash' || mode === 'restore-worker-mail-crash' || mode === 'restore-worker-recovery' || mode === 'restore-ambiguous-promotion' || mode === 'restore-promotion-crash' || mode === 'restore-acceptance-crash' || mode === 'restore-acceptance' || mode === 'restore-dag'
 const ctx = new Context()
 let assignments
 let coordinator
@@ -354,6 +354,27 @@ try {
         return await spawn(...args)
       }
     }
+    if (mode === 'restore-worker-activation-crash') {
+      const spawn = ctx.agentTeams.spawnReservedTeammate.bind(ctx.agentTeams)
+      ctx.agentTeams.spawnReservedTeammate = async (...args) => {
+        const provisioned = await spawn(...args)
+        const events = (await readFile(join(directory, 'workspace', 'assignments.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+        const reservation = events.findLast(event => event.type === 'assignment/reserved' && event.request.runtimeId === args[2])
+        const activated = reservation === undefined ? undefined : events.find(event => event.type === 'attempt/activated'
+          && event.token.attemptId === `attempt-${reservation.sequence}`)
+        const member = ctx.agentTeams.listMembers(args[0]).find(candidate => candidate.id === args[2])
+        const leadLog = await ctx.sessionPersistence.inspect(args[0].id)
+        const memberActivation = leadLog.events.findLast(event => event.type === 'team/member' && event.data.member.id === args[2])?.data.member.phase
+        await send({ barrier: 'worker-provisioned-before-activation',
+          reserved: reservation === undefined ? undefined : { attemptId: `attempt-${reservation.sequence}`,
+            runtimeId: reservation.request.runtimeId, workerId: reservation.request.workerId,
+            generation: reservation.request.expectedGeneration + 1, phase: activated === undefined ? 'reserved' : 'active' },
+          activationEvent: activated, leadId: args[0].id, member,
+          memberActivation, liveWorker: ctx.agents.get(SessionId(args[2]))?.id, workerRequests })
+        await new Promise(() => {})
+        return provisioned
+      }
+    }
     if (mode === 'restore-stale-target') {
       const register = ctx.agentTeams.registerIntegrationProvider.bind(ctx.agentTeams)
       ctx.agentTeams.registerIntegrationProvider = provider => {
@@ -393,12 +414,13 @@ try {
     await ctx.plugin(GitIntegration, { providerName: 'git', targetBranch: 'main', verification, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
     const { adapter } = progressAdapter()
     let workerRequests = 0
-    adapter.stream = async function* (options) {
+    if (mode !== 'restore-worker-mail-crash') adapter.stream = async function* (options) {
       const lead = ctx.agents.get(rootId)
       const text = options.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n')
       const member = ctx.agentTeams.listMembers(lead).find(member => member.role === 'teammate' && text.includes(`"attemptId":"${member.name}"`))
       if (member) {
         workerRequests++
+        if (mode === 'restore-worker-activation-crash') await new Promise(() => {})
         const cwd = member.worktree.cwd
         if (repairMode && text.includes('"step":"repair"')) {
           const commit = text.match(/"sourceCommit":"([a-f0-9]+)"/)?.[1]
@@ -439,6 +461,21 @@ try {
     await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 50,
       execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 2, ...(repairMode ? { maxRepairAttempts: mode === 'restore-repair-crash' ? 1 : 10 } : {}) } })
     coordinator = ctx.workspaceCoordinator
+    if (mode === 'restore-worker-mail-crash') {
+      const lead = ctx.agents.get(rootId)
+      const attempt = coordinator.view().attempts[0]
+      if (lead === undefined || attempt === undefined) throw new Error('Coordinator did not provision the persisted assignment')
+      const member = ctx.agentTeams.listMembers(lead).find(candidate => candidate.id === attempt.runtimeId)
+      await ctx.agents.get(SessionId(attempt.runtimeId))?.dispose()
+      const messageId = `m2-provisioning-replay-${attempt.attemptId}`
+      const receipt = await ctx.agentTeams.sendReservedMessage(lead, {
+        target: attempt.attemptId, delivery: 'quiet', signal: new AbortController().signal,
+        content: [{ type: 'text', text: 'Durable M2 provisioning replay message.' }],
+      }, messageId)
+      await send({ barrier: 'recovery-mail-side-effect', messageId: receipt.messageId, status: receipt.status, attempt, member,
+        liveAgents: ctx.agents.list().length })
+      await new Promise(() => {})
+    }
     if (mode === 'restore-repair-crash' || mode === 'restore-stale-target' || mode === 'restore-acceptance-crash' || mode === 'restore-promotion-crash' || mode === 'restore-ambiguous-promotion') await new Promise(() => {})
     if (mode === 'restore-repair') await new Promise(resolve => {
       const timer = setInterval(() => {
@@ -456,9 +493,23 @@ try {
           && submissions.length === ctx.agentTeams.listTasks(lead).length && submissions.every(submission => submission.phase === 'accepted')) { clearInterval(timer); resolve() }
       }, 25)
     })
-    await send({ barrier: 'accepted-replay', submissions: coordinator.view().submissions, attempts: coordinator.view().attempts,
-      tasks: ctx.agentTeams.listTasks(ctx.agents.get(rootId)), integrations: ctx.agentTeams.listIntegrations(ctx.agents.get(rootId)),
-      head: (await git('rev-parse', 'main')).stdout, workerRequests, initial: (await git('show', 'main:initial.txt')).stdout })
+    const attempts = coordinator.view().attempts
+    const lead = ctx.agents.get(rootId)
+    const recovery = [...new Set([...attempts.flatMap(attempt => attempt.recovery === undefined ? [] : [attempt.recovery.messageId]),
+      ...attempts.map(attempt => `m2-provisioning-replay-${attempt.attemptId}`)])]
+    const leadLog = await ctx.sessionPersistence.inspect(rootId)
+    const mailbox = leadLog.events.filter(event => event.type === 'team/message/queued' && recovery.includes(event.data.message.id)).map(event => event.data.message.id)
+    const workerLog = attempts[0] === undefined ? undefined : await ctx.sessionPersistence.inspect(SessionId(attempts[0].runtimeId))
+    const delivered = workerLog?.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'team-message'
+      && recovery.includes(event.data.source.messageId)).map(event => event.data.source.messageId) ?? []
+    const member = lead === undefined || attempts[0] === undefined ? undefined : ctx.agentTeams.listMembers(lead).find(candidate => candidate.id === attempts[0].runtimeId)
+    await send({ barrier: 'accepted-replay', submissions: coordinator.view().submissions, attempts,
+      tasks: ctx.agentTeams.listTasks(lead), integrations: ctx.agentTeams.listIntegrations(lead),
+      head: (await git('rev-parse', 'main')).stdout, workerRequests, initial: (await git('show', 'main:initial.txt')).stdout,
+      recoveryMailbox: { ids: recovery, queued: mailbox, delivered },
+      provisioningMailbox: { ids: recovery.filter(id => id.startsWith('m2-provisioning-replay-')),
+        queued: mailbox.filter(id => id.startsWith('m2-provisioning-replay-')),
+        delivered: delivered.filter(id => id.startsWith('m2-provisioning-replay-')) }, member })
   } else {
     // Read-only inspection proves the input survived without materializing a Lead.
     const stored = await ctx.sessionPersistence.inspect(rootId)

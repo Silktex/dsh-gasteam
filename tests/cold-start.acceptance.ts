@@ -331,6 +331,88 @@ it.each([false, true])('resumes an interrupted worker after SIGKILL with preserv
   }
 }, 30_000)
 
+it('replays one recovery mailbox identity after a fresh coordinator loses its admitted runtime', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-unopened-mail-replay-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed', directory)
+    processes.push(seed)
+    await seed.barrier()
+    await seed.stop(true)
+    processes.pop()
+    const provisioned = processFixture('restore-worker-crash', directory)
+    processes.push(provisioned)
+    await provisioned.barrier()
+    const admitted = await provisioned.barrier<{ attempts: { attemptId: string; runtimeId: string; generation: number }[]; workerCwd: string }>()
+    await provisioned.stop(true)
+    processes.pop()
+    const mailCrash = processFixture('restore-worker-mail-crash', directory)
+    processes.push(mailCrash)
+    const sideEffect = await mailCrash.barrier<{ barrier: string; messageId: string; status: string; attempt: { attemptId: string; runtimeId: string; generation: number }; member: { id: string; worktree?: { cwd: string } }; liveAgents: number }>()
+    expect(sideEffect).toMatchObject({ barrier: 'recovery-mail-side-effect', attempt: {
+      attemptId: admitted.attempts[0]!.attemptId, runtimeId: admitted.attempts[0]!.runtimeId, generation: admitted.attempts[0]!.generation,
+    }, member: { id: admitted.attempts[0]!.runtimeId } })
+    expect(sideEffect.status).toBe('queued')
+    expect(sideEffect.member.worktree?.cwd).toBe(admitted.workerCwd)
+    expect(sideEffect.liveAgents).toBe(1)
+    await mailCrash.stop(true)
+    processes.pop()
+    const restored = processFixture('restore-worker-recovery', directory)
+    processes.push(restored)
+    const replay = await restored.barrier<{ barrier: string; attempts: { attemptId: string; runtimeId: string; generation: number }[]; member: { id: string; worktree?: { cwd: string } }; provisioningMailbox: { ids: string[]; queued: string[]; delivered: string[] } }>()
+    expect(replay.barrier).toBe('accepted-replay')
+    expect(replay.attempts).toEqual([expect.objectContaining({
+      attemptId: admitted.attempts[0]!.attemptId, runtimeId: admitted.attempts[0]!.runtimeId, generation: admitted.attempts[0]!.generation,
+    })])
+    expect(replay.member).toMatchObject({ id: admitted.attempts[0]!.runtimeId })
+    expect(replay.member.worktree?.cwd).toBe(admitted.workerCwd)
+    expect(replay.provisioningMailbox).toEqual({ ids: [sideEffect.messageId], queued: [sideEffect.messageId], delivered: [sideEffect.messageId] })
+  } finally {
+    try { for (const process of processes.reverse()) await process.stop(true) }
+    finally { await rm(directory, { recursive: true, force: true }) }
+  }
+}, 30_000)
+
+it('reconciles a real worker provisioning crash before its assignment activation receipt', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-unopened-provisioning-replay-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed', directory)
+    processes.push(seed)
+    await seed.barrier()
+    await seed.stop(true)
+    processes.pop()
+    const crash = processFixture('restore-worker-activation-crash', directory)
+    processes.push(crash)
+    const sideEffect = await crash.barrier<{ barrier: string; reserved: { attemptId: string; runtimeId: string; workerId: string; generation: number; phase: string }; activationEvent?: unknown; leadId: string; member: { id: string; name: string; status: string; worktree?: { cwd: string } }; memberActivation: string; liveWorker: string; workerRequests: number }>()
+    expect(sideEffect).toMatchObject({ barrier: 'worker-provisioned-before-activation', leadId: 'restart-ready-team',
+      reserved: { phase: 'reserved', generation: 1 } })
+    expect(sideEffect.activationEvent).toBeUndefined()
+    expect(sideEffect.member).toMatchObject({ id: sideEffect.reserved.runtimeId, name: sideEffect.reserved.attemptId })
+    expect(sideEffect.memberActivation).toBe('active')
+    expect(sideEffect.member.status).toMatch(/running|idle/)
+    expect(sideEffect.member.worktree?.cwd).toBeTruthy()
+    expect(sideEffect.liveWorker).toBe(sideEffect.reserved.runtimeId)
+    expect(sideEffect.workerRequests).toBe(1)
+    await crash.stop(true)
+    processes.pop()
+    const restored = processFixture('restore-worker-recovery', directory)
+    processes.push(restored)
+    const replay = await restored.barrier<{ barrier: string; attempts: { attemptId: string; runtimeId: string; workerId: string; generation: number; phase: string }[]; member: { id: string; name: string; worktree?: { cwd: string } }; workerRequests: number }>()
+    expect(replay.barrier).toBe('accepted-replay')
+    expect(replay.attempts).toEqual([expect.objectContaining({
+      attemptId: sideEffect.reserved.attemptId, runtimeId: sideEffect.reserved.runtimeId,
+      workerId: sideEffect.reserved.workerId, generation: sideEffect.reserved.generation, phase: 'terminal',
+    })])
+    expect(replay.member).toMatchObject({ id: sideEffect.reserved.runtimeId, name: sideEffect.reserved.attemptId })
+    expect(replay.member.worktree?.cwd).toBe(sideEffect.member.worktree?.cwd)
+    expect(replay.workerRequests).toBe(1)
+  } finally {
+    try { for (const process of processes.reverse()) await process.stop(true) }
+    finally { await rm(directory, { recursive: true, force: true }) }
+  }
+}, 30_000)
+
 
 it('replays a durable stale-target retry in a fresh process with retained candidates', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-stale-retry-'))

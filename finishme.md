@@ -130,10 +130,10 @@ Done evidence: persistence/replay tests and a documented transition table. Sugge
 Dependencies: M1.
 
 - [x] Discover unfinished projects/teams from durable state on startup without requiring a user to open their sessions. Built-plugin fresh-process acceptance discovers the original ready task with zero live Agents.
-- [ ] Establish the coordinator's explicit mutation authority and single-owner protection. Resolve uncertain prior operations before creating replacements.
-- [ ] Restore assignment context and mailbox delivery; reconcile missing workers, provisioning attempts, queued integration, and verified-but-unpromoted candidates.
+- [x] Establish the coordinator's explicit mutation authority and single-owner protection. Resolve uncertain prior operations before creating replacements.
+- [x] Restore assignment context and mailbox delivery; reconcile missing workers, provisioning attempts, queued integration, and verified-but-unpromoted candidates.
 - [x] Persist pause state. A restart must not reactivate work an operator paused. Built-plugin SIGKILL/restart acceptance preserves revision-one pause and excludes the task from ready work.
-- [ ] Bound shutdown, cancel and await background work, and release coordinator ownership safely.
+- [x] Bound shutdown, cancel and await background work, and release coordinator ownership safely.
 
 Red tests: full process restart with no live Lead resumes accepted work; two coordinator instances cannot double-dispatch; crash between worker creation and admission is reconciled; pending mail is not duplicated; paused work stays paused; teardown leaves no timer or child process.
 
@@ -293,7 +293,7 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 | --- | --- | --- |
 | M0 Baseline/harness | done | Baseline verified, fresh-process behavioral red established, and real-worker progress/crash fixture passes. See `docs/completion-evidence.md`. |
 | M1 Durable records | done | Canonical project registration, distinct durable attempt/worker/runtime identities, legal revision-fenced transitions and stop evidence, immutable structured workflow checkpoints, and concurrent capacity/turnover are implemented. Requirement-specific assignment/projection/coordinator tests and 17 process scenarios pass; current clean M1 archive passes 325 regular tests with one explicitly optional local CLI probe skipped. See completion evidence and transition table. |
-| M2 Cold-start coordinator | in_progress | Stable identity, directory ownership, scoped host admission, startup discovery, durable diagnostics, and pause implemented; nine fresh-process scenarios pass, including a complete DAG and crashes after promotion/task receipt. In-process interrupted-worker continuation preserves worktree edits and completes a dependent DAG. Broader provisioning/mail/integration recovery remains. |
+| M2 Cold-start coordinator | done | Published discovery, explicit mutation authority/single-owner fencing, pause and integration recovery are joined by aggregate close deadlines (b759ae1 CI) and fresh-process pre-activation provisioning plus queued-mail replay (21 acceptance scenarios). Exact identities and worktree survive without duplicate provision/delivery. See completion evidence. |
 | M3 Scheduler | in_progress | Configured scans reserve/admit independent tasks with global/project capacity and durable priority/order, fair project turns, and restart-safe pacing. Three process acceptance scenarios pass. Scoped model/Remote status, pause and priority controls are implemented. Cancellation intent and paused shutdown reconciliation are implemented. Verified dependency release passes a real-Git diamond DAG. Retry/backoff and global operator controls remain. |
 | M4 Integration lifecycle | done | All six requirements have published evidence: immutable idempotent submissions; canonical repository/target exclusion; bounded stale-target re-verification; distinct bounded repair attempts; verified code and explicitly reviewed report acceptance; conservative opt-in candidate retention. Real-Git, process crash/replay, installed smoke, and visible integration/task states are covered by published e0b57bb CI. See completion evidence. |
 | M5 Workflows/handoff | done | Requirement audit maps validated versioned JSON, immutable execution definitions, checkpointed fresh-worker handoff, report/code/release templates, and typed controls/diagnostics to workflow, coordinator, tool/Remote, and real-Git process tests. Publication remains an explicitly configured host publisher with a server-only gate; no actual external publication is claimed. See completion evidence. |
@@ -307,8 +307,8 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 Continuation fields:
 
 - Active goal identifier/objective: existing active thread goal `/home/dsh/projects/gasteam/finishme.md`; no token budget.
-- Current milestone and acceptance slice: M2 final published-behavior audit, M6 durable nudge final isolation/acceptance, M9 authenticated Codex conformance, and remaining M8 pagination/activity/controls.
-- Last completed slice: external-code integration d73f580 and dashboard1b209a3 passed exact CI; comparison9e06fc9 published; durable stale-operation nudges00f4c80 published with isolated407regular/19process checks and CI running.
+- Current milestone and acceptance slice: M3 pinned retry/backoff integration; M6 remaining handoff/replacement/resolution; M8 pagination/activity/controls; M9 canonical Git grant and authenticated cancel/restart/usage conformance.
+- Last completed slice: durable nudges00f4c80 and aggregate shutdownb759ae1 passed exact CI; pre-activation provision and queued mailbox replay now pass21 cold-process scenarios and complete M2. Actual authenticated Codex integration succeeds with an uncommitted canonical Git-directory grant fix.
 - Red evidence: non-code test initially entered Git submission; review caught report receipt replay/durability gaps and missing review queue. Workflow review caught erased authorization history, unenforced backoff and conflated receipt stages. Consolidated tests caught two obsolete Remote expectations; new codec tests tighten report revision/rationale validation.
 - Green evidence and exact commands: latest exact CI33995336253 passed build/types/regular/process/docs/smoke. M7 process suite has19 scenarios; combined cf56 + M7 archive passes build/types and57focused tests. See completion evidence and /tmp/gasteam-ci-03a6920.json.
 - Changed files and commit: published through00f4c80. Active drafts are M2 aggregate shutdown/provisioning-mail acceptance and M9 canonical Git metadata sandbox capability. Preserve local readme.md draft, .agents/, skills-lock.json and pending.md.
