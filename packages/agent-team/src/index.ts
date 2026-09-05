@@ -3,6 +3,7 @@ import type {} from './coordinator.ts'
 import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
 import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
+import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './health.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -571,6 +572,18 @@ export class TeamService extends TypertRemoteService {
     if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
     const { projectId, ...review } = request
     return await this.ctx.workspaceCoordinator.acceptReport(agent, projectId, review)
+  }
+
+  @Remote('healthInbox')
+  remoteHealthInbox(agent: Agent, request: HealthInboxRequest): OperatorEscalation[] {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.healthInbox(agent, request.projectId)
+  }
+
+  @Remote('acknowledgeHealth')
+  remoteAcknowledgeHealth(agent: Agent, request: AcknowledgeHealthRequest): Promise<OperatorEscalation> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.acknowledgeHealth(agent, request.projectId, request.escalationId, request.expectedRevision)
   }
 
   /** Preserve Team task rejections while allowing unexpected failures to reject the Remote call. */

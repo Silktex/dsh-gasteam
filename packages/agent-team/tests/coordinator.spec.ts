@@ -21,6 +21,7 @@ import { MockAdapter, textResponse } from '../../../tests/support/mock-adapter.t
 import TeamService from '../src/index.ts'
 import { ProjectCatalog } from '../src/projects.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
+import { HealthStore } from '../src/health.ts'
 import * as CoordinatorPlugin from '../src/coordinator.ts'
 import { gitFixture } from './git-fixture.ts'
 
@@ -143,6 +144,27 @@ it('mounts the server plugin with awaited startup and releases its service and o
 })
 
 const execution = { modelProvider: 'mock', model: 'mock', maxConcurrent: 2 }
+it('restores a Lead-scoped health inbox and acknowledges it with a durable revision fence', async () => {
+  const { config, coordinator, lead, request, ctx } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  const healthConfig = { dshDeadlineMs: 1, externalDeadlineMs: 1, escalationCooldownMs: 10, maxEscalationsPerCondition: 2 }
+  const health = await HealthStore.open(config.directory, healthConfig)
+  await health.assess({ attemptId: 'health-attempt', generation: 1, provider: 'dsh', work: { projectId: 'project', teamId: lead.id, taskId: 'task-health', state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, 0)
+  const escalation = (await health.assess({ attemptId: 'health-attempt', generation: 1, provider: 'dsh', work: { projectId: 'project', teamId: lead.id, taskId: 'task-health', state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, 1)).escalation!
+  await health.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
+  cleanup.push(() => running.close())
+  expect(running.healthInbox(lead, 'project')[0]?.id).toBe(escalation.id)
+  expect(running.healthInbox(lead, 'project')[0]?.acknowledgement).toBeUndefined()
+  await expect(running.acknowledgeHealth(lead, 'project', escalation.id, escalation.revision + 1)).rejects.toThrow(/revision/i)
+  expect(await running.acknowledgeHealth(lead, 'project', escalation.id, escalation.revision)).toMatchObject({ acknowledgement: { actor: lead.id } })
+  await running.close()
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
+  cleanup.push(() => restored.close())
+  expect(restored.healthInbox(lead, 'project')[0]).toMatchObject({ id: escalation.id, acknowledgement: { actor: lead.id } })
+})
+
 it('automatically dispatches durable independent work and keeps the worker report separate from task acceptance', async () => {
   const { ctx, lead, coordinator, request, config } = await fixture()
   await coordinator.register(lead, request)
@@ -416,7 +438,7 @@ it('persists active cancellation before draining and reconciles failed shutdown 
   const task = await coordinator.acceptTask(lead, 'project', { subject: 'Active cancel', description: 'Preserve the stop intent' })
   await coordinator.close()
   ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
-  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 2, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
   cleanup.push(() => running.close())
   const attempt = running.view().attempts[0]!
   await running.pause(lead, 'project', 0, true)
@@ -431,6 +453,8 @@ it('persists active cancellation before draining and reconciles failed shutdown 
   await expect(ctx.agentTeams.sendMessage(lead, { target: attempt.attemptId, content: [{ type: 'text', text: 'late wake' }], delivery: 'wakeup', signal: new AbortController().signal })).rejects.toMatchObject({ code: 'TEAM_ATTEMPT_FENCED' })
   await running.reconcile()
   expect(running.view().attempts[0]).toMatchObject({ phase: 'terminal', stopReason: 'Operator stop', stopEvidence: { kind: 'stopped' } })
+  expect(running.view().health).toContainEqual(expect.objectContaining({ attemptId: attempt.attemptId, provider: 'dsh', deadlineMs: 1_000, classification: 'operator-wait' }))
+  expect(running.healthInbox(lead, 'project')).toEqual([])
   expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined()
   drain.mockRestore()
   await running.pause(lead, 'project', 1, false)
@@ -506,7 +530,7 @@ it.each([true, false])('automatically submits real worker output and protects ac
       yield* super.stream(options)
     }
   }([textResponse('Committed shared.txt and ready for verification'), textResponse('Lead acknowledgement')]))
-  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxRepairAttempts: 0 } })
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxRepairAttempts: 0, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
   cleanup.push(() => running.close())
   const active = running.view().attempts[0]!
   await vi.waitFor(() => { expect(ctx.agents.get(SessionId(active.runtimeId))).toBeUndefined() })
@@ -517,6 +541,10 @@ it.each([true, false])('automatically submits real worker output and protects ac
   expect((await git('show', 'main:shared.txt')).stdout).toBe(passes ? 'worker' : 'base')
   expect(ctx.agentTeams.getTask(lead, task.id).status).toBe(passes ? 'completed' : 'pending')
   expect(running.view().dispatchStatus[0]!.state).toBe(passes ? 'accepted' : 'finished')
+  if (!passes) {
+    expect(running.view().health).toContainEqual(expect.objectContaining({ attemptId: active.attemptId, classification: 'failed' }))
+    expect(running.healthInbox(lead, 'project')).toContainEqual(expect.objectContaining({ attemptId: active.attemptId, condition: 'failed', severity: 'critical', diagnostics: expect.stringContaining('Integration ') }))
+  }
   if (passes) {
     const accepted = ctx.agentTeams.getTask(lead, task.id)
     const job = ctx.agentTeams.listIntegrations(lead)[0]!
@@ -715,7 +743,8 @@ it('requires explicit audited review for non-code work and releases dependents o
   const dependent = await coordinator.acceptTask(lead, 'project', { subject: 'Follow up', description: 'Use accepted findings', blockedBy: [report.id] })
   await coordinator.close()
   ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Cause identified with evidence in the report'))))
-  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  const healthConfig = { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 }
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
   cleanup.push(() => running.close())
   let attempt = running.view().attempts[0]!
   await vi.waitFor(() => expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined())
@@ -724,6 +753,7 @@ it('requires explicit audited review for non-code work and releases dependents o
   expect(running.view().submissions).toEqual([])
   expect(ctx.agentTeams.getTask(lead, report.id).status).toBe('pending')
   expect(running.view().attempts).toHaveLength(1)
+  expect(running.view().health).toContainEqual(expect.objectContaining({ attemptId: attempt.attemptId, classification: 'operator-wait' }))
   const review = { attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision,
     expectedTaskRevision: report.revision, rationale: 'The report identifies the cause and supporting evidence.' }
   const unrelated = ctx.agentLoop.create(SessionId('unrelated-reviewer'), { provider: 'mock', model: 'mock' })

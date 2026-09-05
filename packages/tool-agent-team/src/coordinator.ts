@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/coordinator'
-import type { ReviewableReport, SchedulingView, WorkflowRuntimeView } from '@deepseek-ai/dsh-experimental-agent-team/client'
+import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'tool-team-coordinator'
@@ -33,6 +33,14 @@ const workflowSchema = { type: 'object', additionalProperties: false, properties
   } } },
 } } as const
 const workflowOutput = { schema: workflowSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+const escalationSchema = { type: 'object', additionalProperties: false, properties: {
+  id: { type: 'string', required: true }, attemptId: { type: 'string', required: true }, generation: { type: 'integer', required: true }, condition: { type: 'string', required: true, enum: ['stale', 'failed'] }, severity: { type: 'string', required: true, enum: ['warning', 'critical'] }, source: { type: 'string', required: true, enum: ['health'] }, diagnostics: { type: 'string', required: true }, revision: { type: 'integer', required: true }, cooldownUntil: { type: 'number', required: true },
+  work: { type: 'object', additionalProperties: false, required: true, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true }, state: { type: 'string', required: true, enum: ['active', 'dependency-wait', 'operator-wait', 'failed', 'unavailable'] } } },
+  acknowledgement: { type: 'object', additionalProperties: false, properties: { actor: { type: 'string', required: true }, at: { type: 'number', required: true } } },
+  resolution: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true, enum: ['condition-cleared', 'accepted-terminal'] }, source: { type: 'string', required: true, enum: ['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration'] }, at: { type: 'number', required: true } } },
+} } as const
+const healthInboxOutput = { schema: { type: 'array', items: escalationSchema } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+const healthOutput = { schema: escalationSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 function value(view: SchedulingView) {
   return { ...view, requests: view.requests.map(({ attemptId, nextDispatchAt, cancelReason, ...request }) => ({ ...request,
     ...(cancelReason === undefined ? {} : { cancelReason }),
@@ -41,6 +49,9 @@ function value(view: SchedulingView) {
 }
 function reports(value: readonly ReviewableReport[]) { return value.map(report => ({ ...report })) }
 function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.steps.map(step => ({ ...step })) } }
+function escalation(item: OperatorEscalation) { const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
+  ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution }) } }
+function escalations(value: readonly OperatorEscalation[]) { return value.map(escalation) }
 export function apply(ctx: Context): void {
   const installed = new Map<Agent, (() => unknown)[]>()
   const install = (agent: Agent) => {
@@ -60,6 +71,16 @@ export function apply(ctx: Context): void {
       name: 'team_report_status', description: 'Read audited non-code reports, criteria, pinned revisions, and acceptance rationale for this project.',
       parameters: { project_id: { type: 'string', required: true } }, output: reportsOutput,
       async execute(args, exec) { return reports(ctx.workspaceCoordinator.reviewReports(caller(exec.agent), args.project_id)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_health_inbox', description: 'Read this registered Lead’s durable health escalations. Health observation never stops or reassigns work.',
+      parameters: { project_id: { type: 'string', required: true } }, output: healthInboxOutput,
+      async execute(args, exec) { return escalations(ctx.workspaceCoordinator.healthInbox(caller(exec.agent), args.project_id)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_health_ack', description: 'Acknowledge one health escalation using its current revision. Acknowledgement does not change task ownership.',
+      parameters: { project_id: { type: 'string', required: true }, escalation_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true } }, output: healthOutput,
+      async execute(args, exec) { return escalation(await ctx.workspaceCoordinator.acknowledgeHealth(caller(exec.agent), args.project_id, args.escalation_id, args.expected_revision)) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_report_accept', description: 'Accept a terminal non-code worker report after reviewing its evidence against the task criteria. This records an immutable rationale.',

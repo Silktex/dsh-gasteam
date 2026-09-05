@@ -23,6 +23,8 @@ import { DurableJournal } from './durable-journal.ts'
 import { CandidateRetentionStore } from './candidate-retention.ts'
 import type { CandidateRetentionRecord } from './candidate-retention.ts'
 import { GitCandidateCleanup } from './git-candidate-cleanup.ts'
+import { HealthStore, healthConfigSchema } from './health.ts'
+import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { TeamError } from './error.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
@@ -35,6 +37,8 @@ export const executionConfigSchema = z.object({
   dispatchIntervalMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   /** Disabled unless explicitly set. The delay is pinned when a merged candidate is first observed. */
   candidateRetention: z.object({ delayMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), commandTimeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(30_000) }).strict().optional(),
+  /** Disabled unless an operator explicitly enables durable health observation. */
+  health: healthConfigSchema.optional(),
   maxConcurrent: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict()
 export type ExecutionConfig = z.input<typeof executionConfigSchema>
@@ -73,6 +77,7 @@ export class CoordinatorExecution {
     private readonly reports: ReportStore,
     private readonly retention: CandidateRetentionStore,
     private readonly failures: DurableJournal<ExecutionBlock[], { type: 'work/blocked'; block: ExecutionBlock }>,
+    private readonly health: HealthStore | undefined,
   ) {
     this.runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true)
     this.removePolicy = ctx.agentTeams.registerExecutionPolicy({
@@ -137,7 +142,11 @@ export class CoordinatorExecution {
               try {
                 retention = await CandidateRetentionStore.open(directory)
                 await retention.recoverInterrupted()
-                return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures)
+                let health: HealthStore | undefined
+                try {
+                  health = validated?.health === undefined ? undefined : await HealthStore.open(directory, validated.health)
+                  return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures, health)
+                } catch (error) { await health?.close(); throw error }
               } catch (error) { await retention?.close(); throw error }
             } catch (error) { await reports.close(); throw error }
           } catch (error) { await submissions.close(); throw error }
@@ -146,10 +155,19 @@ export class CoordinatorExecution {
     } catch (error) { await assignments.close(); throw error }
   }
 
-  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[]; reports: ReportAcceptanceRecord[]; candidateRetention: CandidateRetentionRecord[] } {
+  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[]; reports: ReportAcceptanceRecord[]; candidateRetention: CandidateRetentionRecord[]; health: AttemptHealth[]; escalations: OperatorEscalation[] } {
     const now = Date.now()
     return { submissions: this.submissions.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
-      dispatchStatus: this.queue.list().map(request => this.status(request, views, now)) }
+      dispatchStatus: this.queue.list().map(request => this.status(request, views, now)), health: this.health?.listHealth() ?? [], escalations: this.health?.listEscalations() ?? [] }
+  }
+
+  healthInbox(projectId: string, teamId: string): OperatorEscalation[] {
+    return this.health?.listEscalations().filter(item => item.work.projectId === projectId && item.work.teamId === teamId) ?? []
+  }
+
+  acknowledgeHealth(id: string, expectedRevision: number, actor: string): Promise<OperatorEscalation> {
+    if (!this.health) throw new Error('Coordinator health is disabled')
+    return this.health.acknowledge(id, expectedRevision, actor, Date.now())
   }
 
   /** Shared read-only ReportStore handle; WorkspaceCoordinator owns the single writer lifecycle. */
@@ -345,6 +363,57 @@ export class CoordinatorExecution {
         })
         await this.block(work, error)
       }
+    }
+    await this.scanHealth(views)
+  }
+
+  /** Observational mapping only: no health result can wake, stop, or replace an assignment. */
+  private async scanHealth(views: readonly CoordinatorProjectView[]): Promise<void> {
+    if (!this.health) return
+    const now = Date.now()
+    for (const existing of this.health.listHealth()) {
+      const report = this.reports.list().find(item => item.attemptId === existing.attemptId && item.generation === existing.generation && item.projectId === existing.work.projectId && item.teamId === existing.work.teamId && item.taskId === existing.work.taskId && item.phase === 'accepted')
+      const submission = this.submissions.list().find(item => item.attemptId === existing.attemptId && item.generation === existing.generation && item.projectId === existing.work.projectId && item.teamId === existing.work.teamId && item.taskId === existing.work.taskId && item.phase === 'accepted')
+      if (report) await this.health.clearAcceptedAttempt(existing.attemptId, existing.generation, 'accepted-report', report.id, now)
+      else if (submission) await this.health.clearAcceptedAttempt(existing.attemptId, existing.generation, 'accepted-submission', submission.id, now)
+    }
+    for (const attempt of this.assignments.list()) {
+      const project = views.find(view => view.project.id === attempt.projectId)
+      const team = project?.teams.find(team => team.teamId === attempt.teamId)
+      const task = team?.tasks.find(task => task.id === attempt.taskId)
+      const report = this.reports.list().find(item => item.attemptId === attempt.attemptId && item.generation === attempt.generation && item.projectId === attempt.projectId && item.teamId === attempt.teamId && item.taskId === attempt.taskId)
+      const submission = this.submissions.list().find(item => item.attemptId === attempt.attemptId && item.generation === attempt.generation && item.projectId === attempt.projectId && item.teamId === attempt.teamId && item.taskId === attempt.taskId)
+      if (attempt.phase === 'terminal' && (report?.phase === 'accepted' || submission?.phase === 'accepted')) continue
+      let state: 'active' | 'dependency-wait' | 'operator-wait' | 'failed' | 'unavailable'
+      if (team?.status === 'unavailable' || !task) state = 'unavailable'
+      else state = task.blockedBy.some(id => team!.tasks.find(candidate => candidate.id === id)?.status !== 'completed') ? 'dependency-wait' : 'active'
+      let execution: 'known-active-operation' | 'idle' | 'waiting' | 'failed' | 'unknown' = 'unknown'
+      let diagnostic: string | undefined
+      let evidenceRef: string | undefined
+      if (attempt.phase === 'terminal') {
+        if (attempt.stopReason) {
+          // A durable cancellation is intentional and must not be presented as a runtime failure.
+          if (this.queue.list().some(request => sameWork(request, attempt) && request.cancelReason !== undefined)) { state = 'operator-wait'; execution = 'idle' }
+          else { state = 'failed'; execution = 'failed'; diagnostic = attempt.stopReason; evidenceRef = attempt.attemptId }
+        }
+        else if (task?.nonCodeCriteria !== undefined && attempt.result) { state = 'operator-wait'; execution = 'idle' }
+        else if (submission) {
+          const lead = this.ctx.agents.get(SessionId(attempt.teamId))
+          const integration = lead ? this.ctx.agentTeams.listIntegrations(lead).find(item => item.id === submission.integrationId) : undefined
+          if (integration?.phase === 'failed') { state = 'failed'; execution = 'failed'; diagnostic = `Integration ${integration.id}: ${integration.error ?? 'verification failed'}`.slice(0, 16_384); evidenceRef = integration.id }
+          else if (integration) { state = 'dependency-wait'; execution = 'waiting' }
+          else state = 'unavailable'
+        }
+      }
+      const runtime = this.ctx.agents.get(SessionId(attempt.runtimeId))
+      const provider = ['spawn', 'fork'].includes(attempt.provider) ? 'dsh' : attempt.provider === 'external' ? 'external' : 'unknown'
+      await this.health.assess({ attemptId: attempt.attemptId, generation: attempt.generation, provider,
+        work: { projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, state },
+        // A resident session and its sequence are evidence of life, not evidence that a tool is active.
+        runtime: execution !== 'unknown' ? { availability: 'available', execution } : runtime ? { availability: 'available', execution: 'unknown' } : { availability: 'unknown', execution: 'unknown' },
+        ...(execution === 'unknown' && runtime ? { progress: { source: 'session-sequence' as const, cursor: String(runtime.session.seq) } } : {}),
+        ...(diagnostic === undefined ? {} : { diagnostic }), ...(evidenceRef === undefined ? {} : { evidenceRef }),
+      }, now)
     }
   }
 
@@ -544,6 +613,7 @@ export class CoordinatorExecution {
       await this.submissions.close()
       await this.reports.close()
       await this.retention.close()
+      await this.health?.close()
       this.removePolicy()
     })().catch((error: unknown) => {
       // A failed observation retains ownership; a later close may rejoin the drain.

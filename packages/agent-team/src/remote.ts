@@ -4,7 +4,7 @@ import type {
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
 import type { CreateTeamTaskRequest, TeamTaskMutationResult, TeamView, UpdateTeamTaskRequest } from './client.ts'
-import type { SchedulingQuery, SchedulingControl, SchedulingView, RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './client.ts'
+import type { SchedulingQuery, SchedulingControl, SchedulingView, RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport, AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './client.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 
@@ -19,6 +19,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     createWorkflow: (agentId: SessionId, request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     inspectWorkflow: (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     resumeWorkflow: (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    healthInbox: (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
+    acknowledgeHealth: (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     view: (agentId: SessionId) => Promise<RemoteResult<TeamView>>
   }
   interface TypertRemoteMap {
@@ -31,6 +33,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agentTeams/createWorkflow': (agentId: SessionId, request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agentTeams/inspectWorkflow': (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agentTeams/resumeWorkflow': (agentId: SessionId, request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    'agentTeams/healthInbox': (agentId: SessionId, request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
+    'agentTeams/acknowledgeHealth': (agentId: SessionId, request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agentTeams/view': (agentId: SessionId) => Promise<RemoteResult<TeamView>>
   }
   interface TypertRemoteNamespaceMap {
@@ -46,6 +50,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agent:agentTeams/createWorkflow': (request: CreateWorkflowRequest) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agent:agentTeams/inspectWorkflow': (request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView>>
     'agent:agentTeams/resumeWorkflow': (request: { executionId: string }) => Promise<RemoteResult<WorkflowRuntimeView | undefined>>
+    'agent:agentTeams/healthInbox': (request: HealthInboxRequest) => Promise<RemoteResult<OperatorEscalation[]>>
+    'agent:agentTeams/acknowledgeHealth': (request: AcknowledgeHealthRequest) => Promise<RemoteResult<OperatorEscalation>>
     'agent:agentTeams/view': () => Promise<RemoteResult<TeamView>>
   }
 }

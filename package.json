@@ -14,6 +14,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -b tsconfig.host.json tsconfig.client.json",
     "test": "vitest run",
+    "check:docs": "node scripts/check-docs.mjs",
     "dsh": "dsh",
     "install:profile": "node scripts/install-profile.mjs",
     "start": "dsh --profile web --no-open",

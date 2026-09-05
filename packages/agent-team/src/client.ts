@@ -22,3 +22,4 @@ export type {
 export type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
 export type { AcceptReportRequest, RemoteAcceptReportRequest, ReportAcceptanceRecord, ReviewReportsRequest, ReviewableReport } from './reports.ts'
 export type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
+export type { AttemptHealth, OperatorEscalation, HealthInboxRequest, AcknowledgeHealthRequest } from './health.ts'

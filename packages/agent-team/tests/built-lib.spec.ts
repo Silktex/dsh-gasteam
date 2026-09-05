@@ -43,6 +43,8 @@ describe('Agent Teams built LIB service', () => {
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/createWorkflow',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/inspectWorkflow',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/resumeWorkflow',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/healthInbox',
+        '@deepseek-ai/dsh-experimental-agent-team#agentTeams/acknowledgeHealth',
         '@deepseek-ai/dsh-experimental-agent-team#agentTeams/view',
       ],
     })

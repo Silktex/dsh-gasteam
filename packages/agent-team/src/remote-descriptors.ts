@@ -1,6 +1,6 @@
 /** Host lookup and JSON codecs for Team task and scoped scheduling operations. */
 import type { InvocationDescriptor, InvocationParameterDescriptor, TypertCodec } from '@deepseek-ai/dsh-typert-protocol'
-import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, reviewReportsRequestSchema, createWorkflowSchema, workflowQuerySchema, workflowViewSchema, nullableWorkflowViewSchema } from './remote-schemas.ts'
+import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, reviewReportsRequestSchema, createWorkflowSchema, workflowQuerySchema, workflowViewSchema, nullableWorkflowViewSchema, healthInboxRequestSchema, acknowledgeHealthRequestSchema, operatorEscalationSchema, operatorEscalationsSchema } from './remote-schemas.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from './scheduling-schemas.ts'
 import type { TeamService } from './index.ts'
 
@@ -30,5 +30,7 @@ export const descriptors: readonly InvocationDescriptor[] = [
   invocation('createWorkflow', 'remoteCreateWorkflow', codec('WorkflowRuntimeView', workflowViewSchema), codec('CreateWorkflowRequest', createWorkflowSchema)),
   invocation('inspectWorkflow', 'remoteInspectWorkflow', codec('WorkflowRuntimeView', workflowViewSchema), codec('WorkflowQuery', workflowQuerySchema)),
   invocation('resumeWorkflow', 'remoteResumeWorkflow', codec('WorkflowRuntimeView | undefined', nullableWorkflowViewSchema), codec('WorkflowQuery', workflowQuerySchema)),
+  invocation('healthInbox', 'remoteHealthInbox', codec('OperatorEscalation[]', operatorEscalationsSchema), codec('HealthInboxRequest', healthInboxRequestSchema)),
+  invocation('acknowledgeHealth', 'remoteAcknowledgeHealth', codec('OperatorEscalation', operatorEscalationSchema), codec('AcknowledgeHealthRequest', acknowledgeHealthRequestSchema)),
   invocation('view', 'remoteView', codec('TeamView', teamViewSchema)),
 ]

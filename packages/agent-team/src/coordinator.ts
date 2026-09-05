@@ -27,6 +27,7 @@ import { WorkflowStore } from './workflows.ts'
 import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 import { investigationReportTemplate } from './workflow-templates.ts'
+import type { AttemptHealth, OperatorEscalation } from './health.ts'
 
 export type CoordinatorId = Branded<'CoordinatorId'>
 declare module '@deepseek-ai/cordis' {
@@ -72,7 +73,7 @@ export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
 export const Config: schema<Config> = schema.object({
   directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000),
-  execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
+  execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), health: schema.union([schema.const(undefined), schema.object({ dshDeadlineMs: schema.number().step(1).min(1), externalDeadlineMs: schema.number().step(1).min(1), escalationCooldownMs: schema.number().step(1).min(0), maxEscalationsPerCondition: schema.number().step(1).min(1).max(100) })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
 })
 
 /** Opt-in server lifecycle: startup is awaited before service publication; scans do not overlap. */
@@ -112,6 +113,8 @@ export interface CoordinatorView {
   readonly executionBlocks: ExecutionBlock[]
   readonly dispatchRequests: DispatchRequest[]
   readonly dispatchStatus: DispatchStatus[]
+  readonly health: AttemptHealth[]
+  readonly escalations: OperatorEscalation[]
   readonly readyTasks: { projectId: string; teamId: string; taskId: string }[]
   readonly workflows: WorkflowRuntimeView[]
 }
@@ -292,6 +295,21 @@ export class WorkspaceCoordinator {
       requests: view.dispatchStatus.filter(request => request.projectId === projectId && request.teamId === caller.id) }
   }
 
+  /** Read only the registered calling Lead's durable operator inbox. */
+  healthInbox(caller: Agent, projectId: string): OperatorEscalation[] {
+    this.authorize(caller, projectId)
+    if (!this.execution) throw new Error('Coordinator execution is unavailable')
+    return this.execution.healthInbox(projectId, caller.id)
+  }
+
+  acknowledgeHealth(caller: Agent, projectId: string, escalationId: string, expectedRevision: number): Promise<OperatorEscalation> {
+    return this.run(async () => {
+      this.authorize(caller, projectId)
+      if (!this.execution || !this.execution.healthInbox(projectId, caller.id).some(item => item.id === escalationId)) throw new Error('Escalation is not in this Lead inbox')
+      return await this.execution.acknowledgeHealth(escalationId, expectedRevision, caller.id)
+    })
+  }
+
   async controlScheduling(caller: Agent, request: SchedulingControl): Promise<SchedulingView> {
     const control = schedulingControlSchema.parse(request)
     if (control.action === 'pause') await this.pause(caller, control.projectId, control.expectedRevision, control.paused)
@@ -307,7 +325,7 @@ export class WorkspaceCoordinator {
   reconcile(): Promise<void> { return this.run(() => this.scan()) }
 
   view(): CoordinatorView {
-    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [], reports: [], candidateRetention: [] }
+    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [], reports: [], candidateRetention: [], health: [], escalations: [] }
     return structuredClone({
       ...execution,
       id: this.journal.snapshot().id!, projects: this.projects,

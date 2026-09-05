@@ -95,6 +95,12 @@ Before resuming an interrupted, absent DSH runtime, the coordinator bridge recor
 
 Fresh-process tests kill an actual in-process worker inside its model request after flushing state and writing an uncommitted edit. Startup resumes the same attempt/runtime, retains that edit, and completes verified acceptance. The dependent-DAG variant also completes all four tasks without duplicate assignments. This does not implement external-process continuation, configurable retry policy, workflow handoff, or operator escalation.
 
+### Observational health and escalation
+
+Health is opt-in coordinator observation. A configured patrol records generation-fenced attempt observations and keeps an operator inbox scoped to the registered Lead. A live DSH session contributes only a durable sequence cursor and is classified as execution-unknown; the coordinator does not infer a stuck tool and does not nudge, stop, hand off, or replace it. Spawn and fork runtimes are mapped to their DSH provider identity for observation.
+
+Known dependency and report-review waits become actionable wait incidents. Authoritative stop reasons and failed integration records become failed incidents. Intentional cancellation is not critical. A pinned health policy and compare-and-swap scoped acknowledgement fence operator updates; only an accepted receipt with the exact generation may clear an incident while retaining its history. Provider-specific live-operation probes, recovery stages, replacement fencing, external notifications, and dashboard controls remain unfinished.
+
 ### Canonical integration exclusion
 
 Each Team integration run acquires an OS-backed lock under the canonical Git common directory, keyed by the target branch hash. Aliases, linked worktrees, Teams, and server processes therefore share exclusion for the same repository/target. Ownership spans target observation, verification, promotion and the durable job update, and releases only after those operations settle. Contention rejects with TEAM_INTEGRATION_BUSY before changing the job phase. Lock files remain in place; closing the owning descriptor or process exit releases the flock. This implements shared execution exclusion; globally ordered backlog policy and bounded target-movement/reverification remain unfinished.

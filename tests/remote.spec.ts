@@ -11,6 +11,9 @@ import {
   createWorkflowSchema,
   workflowQuerySchema,
   workflowViewSchema,
+  healthInboxRequestSchema,
+  acknowledgeHealthRequestSchema,
+  operatorEscalationSchema,
 } from '../packages/agent-team/src/remote-schemas.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from '../packages/agent-team/src/scheduling-schemas.ts'
 import { TYPERT } from '../packages/agent-team/src/typert.ts'
@@ -30,6 +33,8 @@ describe('Team RPC codecs', () => {
         ['createWorkflow', 'remoteCreateWorkflow', ['agentId', 'request']],
         ['inspectWorkflow', 'remoteInspectWorkflow', ['agentId', 'request']],
         ['resumeWorkflow', 'remoteResumeWorkflow', ['agentId', 'request']],
+        ['healthInbox', 'remoteHealthInbox', ['agentId', 'request']],
+        ['acknowledgeHealth', 'remoteAcknowledgeHealth', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],
       ])
     expect(descriptors.every(value => value.parameters[0]?.source === 'lookup')).toBe(true)
@@ -42,6 +47,14 @@ describe('Team RPC codecs', () => {
     expect(workflowQuerySchema.parse({ executionId: 'workflow-1' })).toEqual({ executionId: 'workflow-1' })
     expect(workflowViewSchema.parse({ executionId: 'workflow-1', projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1,
       steps: [{ stepId: 'investigate', phase: 'running', taskId: 'workflow-intent' }] })).toMatchObject({ executionId: 'workflow-1' })
+  })
+
+  it('validates revision-fenced health inbox controls', () => {
+    expect(healthInboxRequestSchema.parse({ projectId: 'project' })).toEqual({ projectId: 'project' })
+    expect(acknowledgeHealthRequestSchema.parse({ projectId: 'project', escalationId: 'escalation-1', expectedRevision: 1 })).toMatchObject({ escalationId: 'escalation-1' })
+    expect(() => acknowledgeHealthRequestSchema.parse({ projectId: 'project', escalationId: 'escalation-1', expectedRevision: 0 })).toThrow()
+    expect(operatorEscalationSchema.parse({ id: 'escalation-1', attemptId: 'attempt-1', generation: 1, condition: 'failed', severity: 'critical', source: 'health', diagnostics: 'provider failed',
+      work: { projectId: 'project', teamId: 'lead', taskId: 'task', state: 'failed' }, revision: 1, cooldownUntil: 10 })).toMatchObject({ condition: 'failed' })
   })
 
   it('validates scheduling controls and preserves typed blocker responses', () => {

@@ -5,6 +5,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { CreateTeamTaskRequest, UpdateTeamTaskRequest, TeamTaskMutationResult, TeamView } from './types.ts'
 import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
+import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './health.ts'
 
 /** Branded strings retain their ordinary JSON string representation. */
 type Wire<T> = T extends Branded<string> ? string : T extends readonly (infer Item)[] ? readonly Wire<Item>[] : T extends object ? { [Key in keyof T]: Wire<T[Key]> | ({} extends Pick<T, Key> ? undefined : never) } : T
@@ -48,6 +49,17 @@ export const workflowViewSchema = wireSchema<WorkflowRuntimeView>(z.object({
     phase: z.union([z.literal('pending'), z.literal('running'), z.literal('completed'), z.literal('failed')]).readonly() }).strict().readonly()).readonly(),
 }).strict().readonly())
 export const nullableWorkflowViewSchema = wireSchema<WorkflowRuntimeView | undefined>(z.union([workflowViewSchema, z.undefined()]))
+export const healthInboxRequestSchema = wireSchema<HealthInboxRequest>(z.object({ projectId: z.string().readonly() }).strict())
+export const acknowledgeHealthRequestSchema = wireSchema<AcknowledgeHealthRequest>(z.object({ projectId: z.string().readonly(), escalationId: z.string().readonly(), expectedRevision: z.number().int().positive().readonly() }).strict())
+export const operatorEscalationSchema = wireSchema<OperatorEscalation>(z.object({
+  id: z.string().readonly(), attemptId: z.string().readonly(), generation: z.number().int().positive().readonly(), condition: z.union([z.literal('stale'), z.literal('failed')]).readonly(),
+  severity: z.union([z.literal('warning'), z.literal('critical')]).readonly(), source: z.literal('health').readonly(), diagnostics: z.string().readonly(),
+  work: z.object({ projectId: z.string().readonly(), teamId: z.string().readonly(), taskId: z.string().readonly(), state: z.union([z.literal('active'), z.literal('dependency-wait'), z.literal('operator-wait'), z.literal('failed'), z.literal('unavailable')]).readonly() }).strict().readonly(),
+  revision: z.number().int().positive().readonly(), cooldownUntil: z.number().readonly(),
+  acknowledgement: z.object({ actor: z.string().readonly(), at: z.number().readonly() }).strict().readonly().optional(),
+  resolution: z.object({ reason: z.union([z.literal('condition-cleared'), z.literal('accepted-terminal')]).readonly(), source: z.union([z.literal('health-observation'), z.literal('accepted-report'), z.literal('accepted-submission'), z.literal('accepted-integration')]).readonly(), at: z.number().readonly() }).strict().readonly().optional(),
+}).strict().readonly())
+export const operatorEscalationsSchema = wireSchema<OperatorEscalation[]>(z.array(operatorEscalationSchema))
 
 export const taskResultSchema = wireSchema<TeamTaskMutationResult>(z.union([z.object({
   'ok': z.literal(true).readonly(),
