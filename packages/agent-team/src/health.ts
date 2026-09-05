@@ -39,6 +39,8 @@ const escalationSchema = z.object({
 export const healthConfigSchema = z.object({
   dshDeadlineMs: positive, externalDeadlineMs: positive, escalationCooldownMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   maxEscalationsPerCondition: z.number().int().positive().max(100),
+  /** Explicit host authorization for bounded live DSH recovery nudges. */
+  recovery: z.object({ maxNudges: z.number().int().positive().max(3) }).strict().optional(),
 }).strict()
 
 export type AttemptHealthObservation = z.input<typeof observationSchema>

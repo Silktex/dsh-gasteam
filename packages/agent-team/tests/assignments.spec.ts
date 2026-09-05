@@ -195,6 +195,20 @@ it('persists recovery intent and budget across replay without releasing ownershi
 })
 
 
+it('replays one recovery message identity after reopening without incrementing its budget', async () => {
+  const { store, directory } = await fixture()
+  const active = await store.activate(token(await store.reserve(request)))
+  const recovered = await store.recover(token(active), 10, 1_000, 'recovery-replay')
+  await store.close()
+  stores.splice(stores.indexOf(store), 1)
+  const restored = await AssignmentStore.open(directory, limits)
+  stores.push(restored)
+  const replay = await restored.recover(token(recovered), 99, 9_999, 'recovery-replay')
+  expect(replay).toEqual(recovered)
+  expect(restored.list()).toEqual([recovered])
+  await expect(restored.recover(token(recovered), 20, 2_000, 'other-recovery')).resolves.toMatchObject({ recovery: { count: 2, messageId: 'other-recovery' } })
+})
+
 it('pins repair policy and predecessor evidence across JSONL replay and rejects budget resets', async () => {
   const { directory, store } = await fixture()
   let first = await store.activate(token(await store.reserve({ ...request, repairLimit: 1 })))

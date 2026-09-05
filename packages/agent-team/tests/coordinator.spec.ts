@@ -18,14 +18,16 @@ import * as GitIntegration from '../src/git-integration.ts'
 import { runGit } from '../src/git-command.ts'
 import * as GitWorktrees from '../src/git-worktrees.ts'
 import { TestSessionQuery } from './test-session-query.ts'
-import { MockAdapter, textResponse } from '../../../tests/support/mock-adapter.ts'
+import { MockAdapter, textResponse, toolCallResponse } from '../../../tests/support/mock-adapter.ts'
 import TeamService from '../src/index.ts'
 import { ProjectCatalog } from '../src/projects.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
 import { CoordinatorExecution } from '../src/coordinator-execution.ts'
 import { HealthStore } from '../src/health.ts'
+import { HealthRecoveryStore } from '../src/health-recovery.ts'
 import * as CoordinatorPlugin from '../src/coordinator.ts'
 import { gitFixture } from './git-fixture.ts'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 
 const cleanup: (() => Promise<unknown>)[] = []
 afterEach(async () => {
@@ -340,6 +342,134 @@ it('restores a Lead-scoped health inbox and acknowledges it with a durable revis
   const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
   cleanup.push(() => restored.close())
   expect(restored.healthInbox(lead, 'project')[0]).toMatchObject({ id: escalation.id, acknowledgement: { actor: lead.id } })
+})
+
+it('nudges one exact stale live tool only after its durable provider deadline', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.acceptTask(lead, 'project', { subject: 'Live long tool', description: 'Retain one host-owned operation' })
+  await coordinator.close()
+  let started!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { started = resolve })
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  ctx.tools.register(defineContentToolFixture({ name: 'coordinator_health_long_tool', description: 'controlled operation', parameters: {},
+    async execute() { started(); await blocked; return [{ type: 'text', text: 'released' }] },
+  }))
+  ctx.llm.registerAdapter(['mock'], new MockAdapter([toolCallResponse('coordinator-health-live', 'coordinator_health_long_tool', {})]))
+  let now = 0
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    const health = { dshDeadlineMs: 5, externalDeadlineMs: 5, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2, recovery: { maxNudges: 1 } }
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health } })
+    cleanup.push(() => running.close())
+    await entered
+    const active = running.view().attempts[0]!
+    await running.reconcile()
+    expect(running.view().health[0]).toMatchObject({ classification: 'progressing', lastProgress: { source: 'provider', cursor: 'operation:coordinator-health-live' } })
+    expect(running.view().attempts[0]?.recovery).toBeUndefined()
+    now = 6
+    await running.pause(lead, 'project', 0, true)
+    await running.reconcile()
+    expect(running.view().attempts[0]?.recovery).toBeUndefined()
+    await running.pause(lead, 'project', 1, false)
+    await running.reconcile()
+    await vi.waitFor(() => expect(running.view().attempts[0]?.recovery).toMatchObject({ count: 1, messageId: expect.stringMatching(/^health-nudge-/) }))
+    const recovered = running.view().attempts[0]!
+    const messages = lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.recovery!.messageId)
+    expect(messages).toHaveLength(1)
+    await running.reconcile()
+    expect(running.view().attempts[0]?.recovery).toEqual(recovered.recovery)
+    expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.recovery!.messageId)).toHaveLength(1)
+  } finally { clock.mockRestore(); release?.() }
+})
+
+it('keeps scanning independent projects when a later stale revision exhausts the health nudge budget', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  const other = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const otherLead = ctx.agentLoop.create(SessionId('independent-team'), { provider: 'mock', model: 'mock' }, { cwd: other.repository })
+  await coordinator.register(lead, request)
+  await coordinator.register(otherLead, { ...request, id: 'independent-project', repository: other.repository, teamIds: [otherLead.id] })
+  await coordinator.acceptTask(lead, 'project', { subject: 'Live long tool', description: 'Retain one host-owned operation' })
+  await coordinator.close()
+  let started!: () => void
+  let release!: () => void
+  const entered = new Promise<void>(resolve => { started = resolve })
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  ctx.tools.register(defineContentToolFixture({ name: 'coordinator_health_budget_tool', description: 'controlled operation', parameters: {},
+    async execute() { started(); await blocked; return [{ type: 'text', text: 'released' }] },
+  }))
+  ctx.llm.registerAdapter(['mock'], new MockAdapter([
+    toolCallResponse('coordinator-health-budget', 'coordinator_health_budget_tool', {}), 'hang',
+  ]))
+  let now = 0
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    const health = { dshDeadlineMs: 5, externalDeadlineMs: 5, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2, recovery: { maxNudges: 1 } }
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health } })
+    cleanup.push(() => running.close())
+    await entered
+    now = 6
+    await running.reconcile()
+    await vi.waitFor(() => expect(running.view().attempts.find(attempt => attempt.projectId === 'project')?.recovery).toMatchObject({
+      count: 1, messageId: expect.stringMatching(/^health-nudge-/),
+    }))
+    const first = running.view().attempts.find(attempt => attempt.projectId === 'project')!
+    const nudgeMessages = () => lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id.startsWith('health-nudge-'))
+    const recoveryStore = (running as unknown as { execution: { healthRecovery: HealthRecoveryStore } }).execution.healthRecovery
+    expect(nudgeMessages()).toHaveLength(1)
+    expect(recoveryStore.list()).toHaveLength(1)
+    const initialEscalation = running.healthInbox(lead, 'project').find(item => item.attemptId === first.attemptId && item.condition === 'stale')
+    expect(initialEscalation).toBeDefined()
+    expect(initialEscalation?.resolution).toBeUndefined()
+
+    // A distinct diagnostic is a new authoritative stale health revision for the
+    // same live operation. It must consume no second mailbox delivery once the
+    // generation's one-nudge budget has been durably reserved.
+    now = 7
+    const healthStore = (running as unknown as { execution: { health: HealthStore } }).execution.health
+    await healthStore.assess({ attemptId: first.attemptId, generation: first.generation, provider: 'dsh',
+      work: { projectId: 'project', teamId: lead.id, taskId: first.taskId, state: 'active' },
+      runtime: { availability: 'available', execution: 'known-active-operation' },
+      progress: { source: 'provider', cursor: 'operation:coordinator-health-budget' }, diagnostic: 'fixture observed unchanged stale tool with a later health revision',
+    }, now)
+    const revised = running.view().health.find(item => item.attemptId === first.attemptId)!
+    expect(revised).toMatchObject({ classification: 'stale' })
+    expect(revised.revision).toBeGreaterThan(2)
+
+    // Admit this task directly to the other Lead log so it first becomes ready
+    // in the same coordinator scan that sees the exhausted nudge budget.
+    const independent = await ctx.agentTeams.createTask(otherLead, { subject: 'Independent work', description: 'Must not be starved by another project health incident' })
+    const intent = vi.spyOn(recoveryStore, 'intent')
+    await running.reconcile()
+    expect(intent).toHaveBeenCalledWith(expect.objectContaining({ attemptId: first.attemptId, generation: first.generation, healthRevision: revised.revision, condition: 'stale', maxNudges: 1 }))
+    expect(recoveryStore.list()).toHaveLength(1)
+    expect(running.view().attempts).toContainEqual(expect.objectContaining({ projectId: 'independent-project', teamId: otherLead.id, taskId: independent.id, phase: 'active' }))
+    expect(running.healthInbox(lead, 'project').find(item => item.id === initialEscalation!.id)?.resolution).toBeUndefined()
+    expect(nudgeMessages()).toHaveLength(1)
+  } finally { clock.mockRestore(); release?.() }
+})
+
+it('does not nudge an unavailable runtime even when host health recovery is enabled', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.acceptTask(lead, 'project', { subject: 'Stale worker', description: 'Requires a bounded host recovery nudge' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang', 'hang']))
+  let now = 0
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    const health = { dshDeadlineMs: 5, externalDeadlineMs: 5, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2, recovery: { maxNudges: 1 } }
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health } })
+    cleanup.push(() => running.close())
+    const active = running.view().attempts[0]!
+    expect(active.phase).toBe('active')
+    now = 6
+    await running.reconcile()
+    expect(running.view().health[0]).toMatchObject({ classification: 'unavailable', certainty: 'uncertain' })
+    expect(running.view().attempts[0]?.recovery).toBeUndefined()
+    expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id.startsWith('health-nudge-'))).toHaveLength(0)
+  } finally { clock.mockRestore() }
 })
 
 it('automatically dispatches durable independent work and keeps the worker report separate from task acceptance', async () => {

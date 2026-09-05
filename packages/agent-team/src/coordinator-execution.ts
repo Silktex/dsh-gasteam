@@ -30,6 +30,7 @@ import { GitCandidateCleanup } from './git-candidate-cleanup.ts'
 import { HealthStore, healthConfigSchema } from './health.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { DshHealthRuntimeObserver } from './health-runtime-observation.ts'
+import { HealthRecoveryExecutor, HealthRecoveryStore } from './health-recovery.ts'
 import { TeamError } from './error.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
@@ -88,6 +89,7 @@ export class CoordinatorExecution {
     private readonly ctx: Context,
     private readonly config: z.output<typeof executionConfigSchema> | undefined,
     private readonly projects: () => ProjectRecord[],
+    private readonly isPaused: (projectId: string) => boolean,
     private readonly assignments: AssignmentStore,
     private readonly queue: DispatchQueue,
     private readonly submissions: SubmissionStore,
@@ -95,6 +97,7 @@ export class CoordinatorExecution {
     private readonly retention: CandidateRetentionStore,
     private readonly failures: DurableJournal<ExecutionBlock[], { type: 'work/blocked'; block: ExecutionBlock }>,
     private readonly health: HealthStore | undefined,
+    private readonly healthRecovery: HealthRecoveryStore | undefined,
     external: ExternalNonCodeAssignmentAdapter | undefined,
     externalStore: ExternalRuntimeStore | undefined,
   ) {
@@ -143,7 +146,7 @@ export class CoordinatorExecution {
     })
   }
 
-  static async open(ctx: Context, directory: string, config: ExecutionConfig | undefined, projects: () => ProjectRecord[]): Promise<CoordinatorExecution> {
+  static async open(ctx: Context, directory: string, config: ExecutionConfig | undefined, projects: () => ProjectRecord[], isPaused: (projectId: string) => boolean = () => false): Promise<CoordinatorExecution> {
     const validated = config === undefined ? undefined : executionConfigSchema.parse(config)
     if (validated !== undefined && !ctx.agentTeams.worktreesEnabled) throw new Error('Coordinator execution requires isolated Team worktrees')
     const assignments = await AssignmentStore.open(directory, {
@@ -166,8 +169,10 @@ export class CoordinatorExecution {
                 retention = await CandidateRetentionStore.open(directory)
                 await retention.recoverInterrupted()
                 let health: HealthStore | undefined
+                let healthRecovery: HealthRecoveryStore | undefined
                 try {
                   health = validated?.health === undefined ? undefined : await HealthStore.open(directory, validated.health)
+                  healthRecovery = validated?.health?.recovery === undefined ? undefined : await HealthRecoveryStore.open(directory)
                   const retainedExternal = assignments.list().filter(record => record.provider === 'external' && record.phase !== 'terminal')
                   let externalStore: ExternalRuntimeStore | undefined
                   try {
@@ -217,9 +222,9 @@ export class CoordinatorExecution {
                     } else if (retainedExternal.length > 0) {
                       external = await recoveryAdapter()
                     }
-                    return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures, health, external, externalStore)
+                    return new CoordinatorExecution(ctx, validated, projects, isPaused, assignments, queue, submissions, reports, retention, failures, health, healthRecovery, external, externalStore)
                   } catch (error) { await externalStore?.close(); throw error }
-                } catch (error) { await health?.close(); throw error }
+                } catch (error) { await healthRecovery?.close(); await health?.close(); throw error }
               } catch (error) { await retention?.close(); throw error }
             } catch (error) { await reports.close(); throw error }
           } catch (error) { await submissions.close(); throw error }
@@ -600,7 +605,7 @@ export class CoordinatorExecution {
       // Fresh read-only supervisor observation is required; historical process
       // identities in the journal cannot prove that an external effect remains live.
       const externalOperation = provider === 'external' ? await this.external?.health(attempt) : undefined
-      await this.health.assess({ attemptId: attempt.attemptId, generation: attempt.generation, provider,
+      const observed = await this.health.assess({ attemptId: attempt.attemptId, generation: attempt.generation, provider,
         work: { projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, state },
         // A resident session and its sequence are evidence of life, not evidence that a tool is active.
         runtime: execution !== 'unknown' ? { availability: 'available', execution }
@@ -609,10 +614,96 @@ export class CoordinatorExecution {
               ? { availability: 'available', execution: dshOperation.execution }
               : { availability: 'unknown', execution: 'unknown' },
         ...(execution === 'unknown' && dshOperation?.availability === 'available' && dshOperation.execution === 'unknown'
-          ? { progress: { source: 'session-sequence' as const, cursor: dshOperation.cursor } } : {}),
+          ? { progress: { source: 'session-sequence' as const, cursor: dshOperation.cursor } }
+          : execution === 'unknown' && dshOperation?.availability === 'available' && dshOperation.execution === 'known-active-operation'
+            ? { progress: { source: 'provider' as const, cursor: `operation:${dshOperation.operationId}` } } : {}),
         ...(diagnostic === undefined ? {} : { diagnostic }), ...(evidenceRef === undefined ? {} : { evidenceRef }),
       }, now)
+      await this.nudgeStaleDshAttempt(observed.health, attempt, project?.paused === true)
     }
+  }
+
+  /** Host-authorized, durable DSH nudge; it never resumes a Lead or replaces work. */
+  private async nudgeStaleDshAttempt(health: AttemptHealth, attempt: AttemptRecord, projectPaused: boolean): Promise<void> {
+    const configured = this.config?.health?.recovery
+    if (!this.healthRecovery || !configured || attempt.provider === 'external' || health.classification !== 'stale') return
+    const input = { attemptId: attempt.attemptId, generation: attempt.generation, healthRevision: health.revision,
+      condition: 'stale' as const, maxNudges: configured.maxNudges }
+    const current = async ({ attemptId, generation }: { attemptId: string; generation: number }) => {
+      const record = this.assignments.list().find(candidate => candidate.attemptId === attemptId)
+      let currentHealth: AttemptHealth | undefined
+      let verified: AttemptRecord | undefined
+      let observedSequence = 0
+      let ownsLiveRuntime = false
+      let unchangedProviderProgress = false
+      let taskPending = false
+      if (record?.phase === 'active') {
+        try {
+          // Inspection is asynchronous. Read all dispatch authority again after
+          // it completes so a pause, stop, replacement, acknowledgement, or
+          // provider progress change cannot borrow the pre-inspection snapshot.
+          const stored = await this.ctx.sessionPersistence.inspect(SessionId(record.runtimeId))
+          const fresh = this.assignments.list().find(candidate => candidate.attemptId === attemptId && candidate.generation === generation)
+          currentHealth = this.health?.listHealth().find(candidate => candidate.attemptId === attemptId && candidate.generation === generation)
+          const project = fresh === undefined ? undefined : this.projects().find(candidate => candidate.id === fresh.projectId && candidate.teamIds.includes(fresh.teamId))
+          const lead = fresh === undefined ? undefined : this.ctx.agents.get(SessionId(fresh.teamId))
+          const unchangedAssignment = fresh !== undefined && fresh.attemptId === record.attemptId && fresh.generation === record.generation
+            && fresh.revision === record.revision && fresh.phase === 'active' && fresh.projectId === record.projectId
+            && fresh.teamId === record.teamId && fresh.taskId === record.taskId && fresh.runtimeId === record.runtimeId
+          if (unchangedAssignment && projectPaused === false && !this.isPaused(fresh.projectId) && project !== undefined && lead !== undefined
+            && this.ctx.agentTeams.tryMembership(lead)?.role === 'lead') {
+            const runtime = this.ctx.agents.get(SessionId(fresh.runtimeId))
+            const member = this.ctx.agentTeams.listMembers(lead).find(candidate => candidate.id === fresh.runtimeId)
+            const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(fresh.taskId))
+            ownsLiveRuntime = member?.name === fresh.attemptId && runtime?.session.header.parentSession === lead.id && stored.meta.parentSession === lead.id
+            taskPending = task.status === 'pending'
+            const evidence = ownsLiveRuntime ? this.dshHealth?.observe({ attemptId, teamId: fresh.teamId, runtimeId: fresh.runtimeId }) : undefined
+            if (evidence?.availability === 'available' && evidence.execution === 'known-active-operation') {
+              unchangedProviderProgress = currentHealth?.lastProgress?.source === 'provider'
+                && currentHealth.lastProgress.cursor === `operation:${evidence.operationId}`
+            }
+            if (ownsLiveRuntime) {
+              observedSequence = stored.events.filter(event => event.type !== 'session/end-seed').at(-1)?.seq ?? 0
+              verified = fresh
+            }
+          }
+        } catch { ownsLiveRuntime = false }
+      }
+      const escalation = this.health?.listEscalations().find(item => item.attemptId === attemptId && item.generation === generation
+        && item.condition === 'stale' && item.resolution === undefined)
+      return { attemptId: record?.attemptId ?? 'missing', generation: record?.generation ?? 0,
+        healthRevision: currentHealth?.revision ?? 0, condition: 'stale' as const,
+        actionable: ownsLiveRuntime && taskPending && unchangedProviderProgress && currentHealth?.classification === 'stale',
+        acknowledged: escalation?.acknowledgement !== undefined, assignmentRevision: record?.revision ?? 0,
+        observedSequence, active: verified?.phase === 'active' }
+    }
+    const executor = new HealthRecoveryExecutor(this.healthRecovery, {
+      current,
+      reserve: async ({ attemptId, generation, assignmentRevision, observedSequence, notBefore, messageId }) => {
+        await this.assignments.recover({ attemptId, generation, expectedRevision: assignmentRevision }, observedSequence, notBefore, messageId)
+      },
+      deliver: async ({ attemptId, generation, messageId }) => {
+        // Re-read every authority and liveness fact immediately before the host
+        // side effect. A scan-time stale classification never authorizes a later
+        // nudge after progress, task acceptance, pause, or ownership turnover.
+        const fresh = await current({ attemptId, generation })
+        if (!fresh.actionable || fresh.acknowledged || fresh.healthRevision !== input.healthRevision) {
+          throw new Error('Health nudge delivery is no longer authorized by fresh runtime state')
+        }
+        const record = this.assignments.list().find(candidate => candidate.attemptId === attemptId && candidate.generation === generation)
+        const lead = record === undefined ? undefined : this.ctx.agents.get(SessionId(record.teamId))
+        if (!record || !lead) throw new Error('Live Lead ownership disappeared before health nudge delivery')
+        const receipt = await this.ctx.agentTeams.sendReservedMessage(lead, {
+          target: record.attemptId, delivery: 'wakeup', signal: new AbortController().signal,
+          content: [{ type: 'text', text: `Coordinator health check: this exact assignment is stale. Inspect your existing worktree and durable checkpoint, then continue or report a concrete blocker. Assignment ${record.assignmentId}.` }],
+        }, messageId)
+        return receipt.messageId
+      },
+    })
+    // A stale/acknowledged incident remains visible in the health inbox. Budget
+    // exhaustion, a changed configuration, or a lost race must not abort scans
+    // for independent projects or turn an observational incident into a retry storm.
+    try { await executor.nudge(input) } catch { return }
   }
 
   private repairFor(attempt: AttemptRecord): AttemptRecord['repair'] | undefined {
@@ -858,6 +949,7 @@ export class CoordinatorExecution {
       await this.submissions.close()
       await this.reports.close()
       await this.retention.close()
+      await this.healthRecovery?.close()
       await this.health?.close()
       await this.externalStore?.close()
       this.dshHealth?.close()

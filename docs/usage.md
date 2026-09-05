@@ -182,3 +182,10 @@ Inspection returns `readyWithoutActiveAssignment` for actionable work and bounde
 For the example, inspection initially shows two required items with no actionable dependent work, and coordinator status reports `workspace-batch-dependency` for `web`. After `api` is accepted, `web` receives its one assignment; after both are accepted, inspection reports `{ "phase": "completed", "required": 2, "completedRequired": 2, "completionEpoch": 1 }`. The in-app inbox then contains the completion intent until the acknowledgement request succeeds.
 
 The Web session header now includes a read-only workspace dashboard for the configured operator. It uses `agentTeams/workspaceDashboard` with `{}` and shows projects, attempts, workflow steps, cross-project batches, dispatch blockers, integration results, and health incidents. Project/attempt selection filters the view; refresh reloads the authorized snapshot. Collections show explicit truncation notices. Workspace mutations, cursor pagination, and a reconnecting activity feed remain unfinished. Batch mutations remain available through the typed Remote/model operations above.
+
+
+## Opt-in stale-operation nudges
+
+Within the coordinator's existing `execution.health` configuration, set `recovery: { maxNudges: 1 }` to enable bounded DSH nudges. Omit `recovery` to keep health observational. The per-generation budget is pinned by the first durable recovery intent. A nudge requires the same live tool operation to remain stale beyond its configured DSH deadline, with exact assignment, Lead, runtime, task and health authority rechecked before delivery. Paused projects, acknowledged incidents, uncertain ownership, changed progress and unavailable runtimes do not authorize a nudge.
+
+Delivery uses one reserved durable Team message ID; replay cannot consume another recovery count or enqueue the same message twice. Exhaustion leaves the escalation visible and allows other projects to continue. This stage does not perform handoff, replacement, or external-provider recovery. Those stages remain unfinished.

@@ -117,6 +117,13 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
   const current = records[index]
   if (!current || current.generation !== event.token.generation) throw new Error('Stale attempt generation')
   if (current.phase === 'terminal') throw new Error('Attempt is terminal; stale workers have no authority')
+  // The delivery identity is reserved before the external mailbox effect. On a
+  // post-effect crash, replaying that exact identity must preserve the original
+  // recovery revision and budget rather than consume another recovery slot.
+  if (event.type === 'attempt/recovery' && current.recovery?.messageId === event.messageId) {
+    if (current.revision !== event.token.expectedRevision) throw new Error('Stale attempt revision')
+    return records
+  }
   if (current.revision !== event.token.expectedRevision) throw new Error('Stale attempt revision')
   let next: AttemptRecord = { ...current, revision: current.revision + 1 }
   switch (event.type) {
