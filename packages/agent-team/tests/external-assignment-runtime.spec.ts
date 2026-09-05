@@ -31,6 +31,26 @@ it('durably launches, observes exact thread/report, and releases capacity only a
   await store.close()
 })
 
+it('attributes documented completed-turn provider usage to its immutable external attempt', async () => {
+  const { root, store, runtime } = await setup()
+  const launch = { attemptId: 'attempt-usage-report', generation: 1, directory: root, verifiedAdmission: admission, prompt: { mode: 'codex-usage-report' }, maxSpoolBytes: 65_536, terminateGraceMs: 50 }
+  await runtime.start(launch)
+  await waitFor(async () => (await runtime.observe('attempt-usage-report', 1, root)).phase === 'completed')
+  const record = store.get('attempt-usage-report', 1)!
+  expect(record.usage).toEqual({ inputTokens: 101, cachedInputTokens: 23, outputTokens: 37, reasoningOutputTokens: 11, runtimeRevision: record.usage!.runtimeRevision })
+  expect(record).not.toHaveProperty('cost')
+  await store.close()
+})
+
+it('leaves malformed provider usage unknown and rejects conflicting completed-turn usage', async () => {
+  const { root, store, runtime } = await setup()
+  const launch = { attemptId: 'attempt-malformed-usage', generation: 1, directory: root, verifiedAdmission: admission, prompt: { mode: 'codex-malformed-usage-report' }, maxSpoolBytes: 65_536, terminateGraceMs: 50 }
+  await runtime.start(launch)
+  await waitFor(async () => (await runtime.observe('attempt-malformed-usage', 1, root)).phase === 'completed')
+  expect(store.get('attempt-malformed-usage', 1)?.usage).toBeUndefined()
+  await store.close()
+})
+
 it('pins its supplied code-worktree common directory as the only writable grant', async () => {
   const { root, store, runtime } = await setup()
   const worktree = { attemptId: 'attempt-code-grant', generation: 1, runtimeId: 'runtime-code-grant', directory: root, repository: resolve(process.cwd()), commonDirectory: resolve(process.cwd()), cwd: root, branch: 'dsh-external/runtime-code-grant', baseCommit: 'a'.repeat(40) }

@@ -20,6 +20,13 @@ const admission = z.object({ executable: z.string().min(1).max(4096), configured
 const worktree = z.object({ attemptId: id, generation, runtimeId: id, directory: z.string().min(1).max(4096), repository: z.string().min(1).max(4096), commonDirectory: z.string().min(1).max(4096), cwd: z.string().min(1).max(4096), branch: z.string().min(1).max(512), baseCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) }).strict()
 const exit = z.object({ code: z.number().int().nonnegative().nullable(), signal: z.string().trim().min(1).max(128).nullable() }).strict()
 const receipt = z.object({ receiptId: id, process: processSchema, groupEmpty: z.literal(true) }).strict()
+const usage = z.object({
+  inputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  cachedInputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  outputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  reasoningOutputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict().refine(value => Object.values(value).some(count => count !== undefined), 'Provider usage must contain at least one reported token count')
+const usageReceipt = usage.extend({ runtimeRevision: z.number().int().positive() }).strict()
 const intent = z.object({ attemptId: id, generation, provider: id, runtimeIdentity, admission: admission.optional(), inputSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(), spool: spool.optional(), supervision: supervision.optional(), worktree: worktree.optional() }).strict().superRefine((value, ctx) => {
   if (value.provider !== value.runtimeIdentity.provider || value.attemptId !== value.runtimeIdentity.attemptId || value.generation !== value.runtimeIdentity.generation) ctx.addIssue({ code: 'custom', message: 'External runtime identity must bind the durable attempt' })
   if (value.provider === 'codex-cli' && (value.admission === undefined || value.inputSha256 === undefined || value.spool === undefined || value.supervision === undefined)) ctx.addIssue({ code: 'custom', message: 'Codex runtime launch requires verified admission, spool, supervision, and input binding' })
@@ -31,6 +38,7 @@ const recordSchema = intent.extend({
   acceptedOutputCount: z.number().int().nonnegative().max(1_000_000), fencedOutputCount: z.number().int().nonnegative().max(1_000_000), retainsCapacity: z.boolean(),
   process: processSchema.optional(), supervisor: processSchema.optional(), processExit: exit.optional(), cancellation: z.object({ reason: text, requestedAt: time }).strict().optional(),
   threadId: id.optional(), result: text.optional(), turnCompleted: z.boolean().optional(), terminal: terminal.optional(), uncertainty: text.optional(),
+  usage: usageReceipt.optional(),
 }).strict()
 export type ExternalRuntimePhase = z.output<typeof recordSchema>['phase']
 export type ProcessBirthIdentity = z.output<typeof processSchema>
@@ -38,6 +46,7 @@ export type ExternalRuntimeIdentity = z.output<typeof runtimeIdentity>
 export type ExternalRuntimeLaunchIntent = z.input<typeof intent>
 export type ExternalRuntimeRecord = z.output<typeof recordSchema>
 export interface ExternalRuntimeOutput { type: string; text: string }
+export type ExternalRuntimeUsage = z.input<typeof usage>
 type Record = ExternalRuntimeRecord
 interface State { records: Record[] }
 type Payload =
@@ -47,6 +56,7 @@ type Payload =
   | { type: 'external/thread'; attemptId: string; generation: number; threadId: string; at: number }
   | { type: 'external/result'; attemptId: string; generation: number; result: string; at: number }
   | { type: 'external/turn-completed'; attemptId: string; generation: number; at: number }
+  | { type: 'external/usage'; attemptId: string; generation: number; usage: z.output<typeof usage>; at: number }
   | { type: 'external/reconciled'; attemptId: string; generation: number; process: ProcessBirthIdentity; at: number }
   | { type: 'external/cancel'; attemptId: string; generation: number; reason: string; at: number }
   | { type: 'external/exit'; attemptId: string; generation: number; exit: z.output<typeof exit>; at: number }
@@ -61,6 +71,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/thread'), attemptId: id, generation, threadId: id, at: time }).strict(),
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/result'), attemptId: id, generation, result: text, at: time }).strict(),
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/turn-completed'), attemptId: id, generation, at: time }).strict(),
+  z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/usage'), attemptId: id, generation, usage, at: time }).strict(),
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/reconciled'), attemptId: id, generation, process: processSchema, at: time }).strict(),
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/cancel'), attemptId: id, generation, reason: text, at: time }).strict(),
   z.object({ version: z.literal(1), sequence: z.number().int().positive(), type: z.literal('external/exit'), attemptId: id, generation, exit, at: time }).strict(),
@@ -70,12 +81,13 @@ const eventSchema = z.discriminatedUnion('type', [
 
 /** Durable state only keeps spool references/counters; runtime bytes never enter the journal. */
 export class ExternalRuntimeStore {
+  private writeTail: Promise<void> = Promise.resolve()
   private constructor(private readonly journal: DurableJournal<State, Payload>) {}
   static async open(directory: string): Promise<ExternalRuntimeStore> {
     await mkdir(directory, { recursive: true })
     return new ExternalRuntimeStore(await DurableJournal.open(join(directory, 'external-runtime.jsonl'), { records: [] }, reduce))
   }
-  close(): Promise<void> { return this.journal.close() }
+  async close(): Promise<void> { await this.writeTail; await this.journal.close() }
   list(): Record[] { return this.journal.snapshot().records }
   get(attemptId: string, valueGeneration: number): Record | undefined { return this.list().find(item => key(item) === key({ attemptId, generation: valueGeneration })) }
   async prepareLaunch(value: ExternalRuntimeLaunchIntent, at = Date.now()): Promise<Record> {
@@ -104,11 +116,30 @@ export class ExternalRuntimeStore {
   async recordTurnCompleted(attemptId: string, valueGeneration: number, at = Date.now()): Promise<Record> {
     return get(await this.journal.append(current => ({ type: 'external/turn-completed', attemptId, generation: valueGeneration, at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
   }
+  async recordUsage(attemptId: string, valueGeneration: number, value: ExternalRuntimeUsage, at = Date.now()): Promise<Record> {
+    return this.exclusive(async () => {
+      const parsed = usage.parse(value), prior = this.get(attemptId, valueGeneration)
+      if (prior === undefined) throw new Error('External runtime attempt is not durable')
+      if (prior.usage !== undefined) {
+        if (sameUsage(prior.usage, parsed)) return prior
+        throw new Error('External runtime usage receipt is immutable')
+      }
+      return get(await this.journal.append(current => ({ type: 'external/usage', attemptId, generation: valueGeneration, usage: parsed, at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
+    })
+  }
   async reconcileRunning(attemptId: string, valueGeneration: number, process: ProcessBirthIdentity, at = Date.now()): Promise<Record> {
     return get(await this.journal.append(current => ({ type: 'external/reconciled', attemptId, generation: valueGeneration, process: processSchema.parse(process), at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
   }
   async recordCancellation(attemptId: string, valueGeneration: number, reason: string, at = Date.now()): Promise<Record> {
-    return get(await this.journal.append(current => ({ type: 'external/cancel', attemptId, generation: valueGeneration, reason: text.parse(reason), at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
+    return this.exclusive(async () => {
+      const parsed = text.parse(reason), prior = this.get(attemptId, valueGeneration)
+      if (prior === undefined) throw new Error('External runtime attempt is not durable')
+      if (prior.cancellation !== undefined) {
+        if (prior.cancellation.reason === parsed) return prior
+        throw new Error('External runtime cancellation reason is immutable')
+      }
+      return get(await this.journal.append(current => ({ type: 'external/cancel', attemptId, generation: valueGeneration, reason: parsed, at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
+    })
   }
   async recordExit(attemptId: string, valueGeneration: number, value: z.input<typeof exit>, at = Date.now()): Promise<Record> {
     const parsed = exit.parse(value), prior = this.get(attemptId, valueGeneration)
@@ -130,6 +161,13 @@ export class ExternalRuntimeStore {
   }
   async markUncertain(attemptId: string, valueGeneration: number, reason: string, at = Date.now()): Promise<Record> {
     return get(await this.journal.append(current => ({ type: 'external/uncertain', attemptId, generation: valueGeneration, reason: text.parse(reason), at: monotonic(current, attemptId, valueGeneration, at) })), attemptId, valueGeneration)
+  }
+  private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeTail
+    let release!: () => void
+    this.writeTail = new Promise<void>(resolve => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
   }
 }
 function reduce(state: State, raw: unknown): State {
@@ -163,14 +201,27 @@ function reduce(state: State, raw: unknown): State {
     if (old.cancellation || old.terminal || old.phase === 'uncertain') throw new Error('External runtime completion is fenced')
     return old.turnCompleted ? state : update(state, old, { ...old, turnCompleted: true, revision: old.revision + 1, lastObservedAt: event.at })
   }
+  if (event.type === 'external/usage') {
+    if (old.cancellation || old.terminal || old.phase === 'uncertain') throw new Error('External runtime usage is fenced')
+    if (!old.turnCompleted) throw new Error('External runtime usage requires a completed turn receipt')
+    if (old.usage !== undefined) {
+      if (sameUsage(old.usage, event.usage)) return state
+      throw new Error('External runtime usage receipt is immutable')
+    }
+    return update(state, old, { ...old, usage: { ...event.usage, runtimeRevision: old.revision + 1 }, revision: old.revision + 1, lastObservedAt: event.at })
+  }
   if (event.type === 'external/reconciled') {
     if (old.phase !== 'uncertain' || old.process === undefined || old.process.pid !== event.process.pid || old.process.birthId !== event.process.birthId) throw new Error('External runtime reconciliation requires matching uncertain process identity')
     const { uncertainty: _uncertainty, ...clean } = old
     return update(state, old, { ...clean, phase: old.cancellation ? 'cancelling' : 'running', revision: old.revision + 1, lastObservedAt: event.at })
   }
   if (event.type === 'external/cancel') {
+    if (old.cancellation !== undefined) {
+      if (old.cancellation.reason === event.reason) return state
+      throw new Error('External runtime cancellation reason is immutable')
+    }
     if (terminalState(old) || old.phase === 'uncertain') throw new Error('External runtime cannot cancel from this phase')
-    return update(state, old, old.cancellation ? { ...old, lastObservedAt: event.at } : { ...old, phase: 'cancelling', cancellation: { reason: event.reason, requestedAt: event.at }, revision: old.revision + 1, lastObservedAt: event.at, retainsCapacity: true })
+    return update(state, old, { ...old, phase: 'cancelling', cancellation: { reason: event.reason, requestedAt: event.at }, revision: old.revision + 1, lastObservedAt: event.at, retainsCapacity: true })
   }
   if (event.type === 'external/exit') {
     if (terminalState(old) || old.process === undefined) throw new Error('External runtime exit is not legal for this phase')
@@ -202,6 +253,7 @@ function sameIntent(old: Record, value: z.output<typeof intent>): void {
 }
 function sameExit(left: z.output<typeof exit>, right: z.output<typeof exit>): boolean { return left.code === right.code && left.signal === right.signal }
 function sameReceipt(left: z.output<typeof receipt>, right: z.output<typeof receipt>): boolean { return left.receiptId === right.receiptId && left.process.pid === right.process.pid && left.process.birthId === right.process.birthId && left.groupEmpty === right.groupEmpty }
+function sameUsage(left: z.output<typeof usageReceipt> | z.output<typeof usage>, right: z.output<typeof usage>): boolean { return left.inputTokens === right.inputTokens && left.cachedInputTokens === right.cachedInputTokens && left.outputTokens === right.outputTokens && left.reasoningOutputTokens === right.reasoningOutputTokens }
 function terminalState(value: Record): boolean { return value.terminal !== undefined }
 function assertAt(value: Record, at: number): void { if (at < value.lastObservedAt) throw new Error('External runtime clock moved backwards') }
 function increment(value: number): number { if (value >= 1_000_000) throw new Error('External runtime output counter limit reached'); return value + 1 }

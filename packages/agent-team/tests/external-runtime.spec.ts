@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { appendFile, mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ExternalRuntimeStore } from '../src/external-runtime.ts'
@@ -51,6 +51,63 @@ it('fences output received after cancellation and retains unknown ownership capa
     await store.markUncertain('attempt-a', 1, 'lifetime lock remains held')
     expect(store.get('attempt-a', 1)).toMatchObject({ phase: 'uncertain', retainsCapacity: true })
     await store.close()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+it('deduplicates the exact cancellation intent while a restarted observer retries delivery', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
+  try {
+    const store = await ExternalRuntimeStore.open(directory)
+    await store.prepareLaunch({ attemptId: 'attempt-cancel-replay', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-cancel-replay', generation: 1 } }, 0)
+    await store.recordProcessStarted('attempt-cancel-replay', 1, { pid: 46, birthId: '127' }, 1)
+    const [first, replay] = await Promise.all([
+      store.recordCancellation('attempt-cancel-replay', 1, 'operator cancellation', 2),
+      store.recordCancellation('attempt-cancel-replay', 1, 'operator cancellation', 3),
+    ])
+    expect(replay).toMatchObject({ revision: first.revision, cancellation: { reason: 'operator cancellation', requestedAt: 2 } })
+    await expect(store.recordCancellation('attempt-cancel-replay', 1, 'changed cancellation reason', 4)).rejects.toThrow(/immutable/i)
+    const journal = await readFile(join(directory, 'external-runtime.jsonl'), 'utf8')
+    expect(journal.split('"type":"external/cancel"')).toHaveLength(2)
+    await store.close()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+it('drains queued idempotent writes before close so a fresh observer sees one cancellation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
+  try {
+    const store = await ExternalRuntimeStore.open(directory)
+    await store.prepareLaunch({ attemptId: 'attempt-close-replay', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-close-replay', generation: 1 } }, 0)
+    const pending = Promise.all([store.recordCancellation('attempt-close-replay', 1, 'operator', 1), store.recordCancellation('attempt-close-replay', 1, 'operator', 2)])
+    await store.close(); await pending
+    const restored = await ExternalRuntimeStore.open(directory)
+    expect(restored.get('attempt-close-replay', 1)).toMatchObject({ cancellation: { reason: 'operator', requestedAt: 1 } })
+    expect((await readFile(join(directory, 'external-runtime.jsonl'), 'utf8')).split('"type":"external/cancel"')).toHaveLength(2)
+    await restored.close()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+it('persists an immutable provider usage receipt without estimating missing fields or cost', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
+  try {
+    const store = await ExternalRuntimeStore.open(directory)
+    await store.prepareLaunch({ attemptId: 'attempt-usage', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-usage', generation: 1 } }, 0)
+    await expect(store.recordUsage('attempt-usage', 1, { inputTokens: 3 }, 1)).rejects.toThrow(/completed turn/i)
+    await expect(store.recordUsage('attempt-usage', 1, { inputTokens: undefined }, 1)).rejects.toThrow(/at least one/i)
+    await store.recordTurnCompleted('attempt-usage', 1, 1)
+    const usage = await store.recordUsage('attempt-usage', 1, { inputTokens: 3, cachedInputTokens: 2, outputTokens: 5, reasoningOutputTokens: 1 }, 1)
+    expect(usage.usage).toEqual({ inputTokens: 3, cachedInputTokens: 2, outputTokens: 5, reasoningOutputTokens: 1, runtimeRevision: usage.revision })
+    await expect(store.recordUsage('attempt-usage', 1, { inputTokens: 4 }, 2)).rejects.toThrow(/immutable/i)
+    await store.close()
+    const restored = await ExternalRuntimeStore.open(directory)
+    await expect(restored.recordUsage('attempt-usage', 1, { inputTokens: 3, cachedInputTokens: 2, outputTokens: 5, reasoningOutputTokens: 1 }, 2)).resolves.toMatchObject({ revision: usage.revision, usage: { runtimeRevision: usage.revision } })
+    await restored.recordCancellation('attempt-usage', 1, 'operator cancellation', 3)
+    await expect(restored.recordUsage('attempt-usage', 1, { inputTokens: 3 }, 4)).rejects.toThrow(/immutable/i)
+    await restored.close()
+    const cancelled = await ExternalRuntimeStore.open(directory)
+    await cancelled.prepareLaunch({ attemptId: 'attempt-usage-cancelled', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-usage-cancelled', generation: 1 } }, 0)
+    await cancelled.recordCancellation('attempt-usage-cancelled', 1, 'cancel before provider report', 1)
+    await expect(cancelled.recordUsage('attempt-usage-cancelled', 1, { inputTokens: 3 }, 2)).rejects.toThrow(/fenced/i)
+    await cancelled.close()
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 

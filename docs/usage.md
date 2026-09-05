@@ -2,6 +2,24 @@
 
 Start with a normal coding session. The session's Agent is the Team Lead. Team operations are scoped to the exact live Agent; a task or message does not grant another Lead authority.
 
+## External-runtime restart/cancel conformance
+
+The opt-in restart/cancel fixture creates a disposable repository and may use a
+real authenticated Codex account. It is not part of the regular test suite.
+Use the local deterministic CLI fixture to exercise its harness without provider
+usage:
+
+```sh
+GASTEAM_REAL_CODEX_EXECUTABLE="$PWD/packages/agent-team/tests/fixtures/external-runtime-fixture.mjs" \
+GASTEAM_REAL_CODEX_VERSION=0.153.4 \
+GASTEAM_REAL_CODEX_MODEL=gpt-5.6-codex \
+pnpm exec tsx packages/agent-team/tests/fixtures/real-codex-restart-cancel.mts
+```
+
+The historical authenticated run under `/tmp/gasteam-real-codex-restart-cancel-vJKz4L`
+is evidence for its prior source only. Run this reconstructed fixture with the
+real configured executable before treating it as new authenticated evidence.
+
 ## Team collaboration
 
 Ask the Lead to use teammates when work should be delegated. The shipped model tools are:

@@ -40,6 +40,14 @@ if (mode === 'silent') {
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-thread"}\n')
   process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture external report"}}\n')
   process.stdout.write('{"type":"turn.completed"}\n')
+} else if (mode === 'codex-usage-report') {
+  process.stdout.write('{"type":"thread.started","thread_id":"fixture-usage-thread"}\n')
+  process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture usage report"}}\n')
+  process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":101,"cached_input_tokens":23,"output_tokens":37,"reasoning_output_tokens":11}}\n')
+} else if (mode === 'codex-malformed-usage-report') {
+  process.stdout.write('{"type":"thread.started","thread_id":"fixture-malformed-usage-thread"}\n')
+  process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture malformed usage report"}}\n')
+  process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":-1,"cached_input_tokens":"23","output_tokens":3.5}}\n')
 } else if (mode === 'codex-multi-report') {
   process.stdout.write('{"type":"turn.started"}\n')
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-thread"}\n')
@@ -68,6 +76,12 @@ if (mode === 'silent') {
   if (counter === undefined) throw new Error('side-effect-late-output fixture requires a counter path')
   appendFileSync(counter, 'target-started\n')
   process.on('SIGTERM', () => process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"late report"}}\n'))
+  setInterval(() => {}, 1_000)
+} else if (typeof mode === 'string' && mode.includes('real Codex restart cancellation marker')) {
+  appendFileSync('REAL_CODEX_RESTART_MARKER.txt', 'real-codex-restart-cancel\n')
+  execFileSync('git', ['add', 'REAL_CODEX_RESTART_MARKER.txt'])
+  execFileSync('git', ['-c', 'user.name=External Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'restart cancellation marker'])
+  process.stdout.write('{"type":"thread.started","thread_id":"fixture-restart-thread"}\n')
   setInterval(() => {}, 1_000)
 } else {
   throw new Error(`Unknown fixture mode ${mode}`)

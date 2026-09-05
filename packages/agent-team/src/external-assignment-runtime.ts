@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import type { VerifiedCodexExecutionPolicy } from './codex-admission.ts'
 import { ExternalRuntimeStore } from './external-runtime.ts'
-import type { ExternalRuntimeRecord } from './external-runtime.ts'
+import type { ExternalRuntimeRecord, ExternalRuntimeUsage } from './external-runtime.ts'
 import type { ExternalCodeWorktreeReceipt } from './external-code-worktree.ts'
 import { compiledExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, inspectProcessIdentity, readSupervisorIdentity, requestExternalSupervisorCancellation } from './external-runtime-supervisor.ts'
 import type { ExternalRuntimeSupervisorClient, ExternalSupervisorRequest } from './external-runtime-supervisor.ts'
@@ -142,6 +142,7 @@ export class ExternalAssignmentRuntime {
         // immutable result.
         if (turn?.finalResult !== undefined) record = await this.store.recordResult(attemptId, generation, turn.finalResult)
         if (turn?.completed) record = await this.store.recordTurnCompleted(attemptId, generation)
+        if (turn?.usage !== undefined) record = await this.store.recordUsage(attemptId, generation, turn.usage)
       } else if (stdoutBytes.byteLength !== 0) record = await this.store.recordOutput(attemptId, generation, { type: 'fenced-output', text: 'stdout retained after cancellation' })
       if (record.process === undefined) throw new Error('terminal observation lost wrapper identity')
       return await this.store.recordGroupStopped(attemptId, generation, { receiptId: `terminal-${createHash('sha256').update(proofRaw).digest('hex')}`, process: record.process, groupEmpty: true }, Date.now(), record.turnCompleted === true)
@@ -183,10 +184,11 @@ function isAgentMessage(value: unknown): value is { type: 'agent_message'; text:
   return item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim() !== '' && Buffer.byteLength(item.text) <= 16_384
 }
 
-function parseCompletedTurn(stdout: string): { threadId?: string; finalResult?: string; completed: boolean } {
+function parseCompletedTurn(stdout: string): { threadId?: string; finalResult?: string; completed: boolean; usage?: ExternalRuntimeUsage } {
   let threadId: string | undefined
   let finalResult: string | undefined
   let completed = false
+  let providerUsage: ExternalRuntimeUsage | undefined
   for (const line of stdout.split('\n')) {
     if (line === '') continue
     const event = JSON.parse(line) as Record<string, unknown>
@@ -198,9 +200,32 @@ function parseCompletedTurn(stdout: string): { threadId?: string; finalResult?: 
       if (completed) throw new Error('completed turn contains an agent message after turn.completed')
       finalResult = event.item.text
     }
-    if (event.type === 'turn.completed') completed = true
+    if (event.type === 'turn.completed') {
+      const nextUsage = parseProviderUsage(event.usage)
+      if (completed && !sameProviderUsage(providerUsage, nextUsage)) throw new Error('completed turn contains conflicting provider usage receipts')
+      completed = true
+      providerUsage = nextUsage
+    }
   }
-  return { ...(threadId === undefined ? {} : { threadId }), ...(finalResult === undefined ? {} : { finalResult }), completed }
+  return { ...(threadId === undefined ? {} : { threadId }), ...(finalResult === undefined ? {} : { finalResult }), ...(providerUsage === undefined ? {} : { usage: providerUsage }), completed }
+}
+
+function sameProviderUsage(left: ExternalRuntimeUsage | undefined, right: ExternalRuntimeUsage | undefined): boolean {
+  return left?.inputTokens === right?.inputTokens && left?.cachedInputTokens === right?.cachedInputTokens && left?.outputTokens === right?.outputTokens && left?.reasoningOutputTokens === right?.reasoningOutputTokens
+}
+
+/** Only Codex's completed-turn JSONL usage fields are authoritative. */
+function parseProviderUsage(value: unknown): ExternalRuntimeUsage | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const safe = (field: string): number | undefined => typeof raw[field] === 'number' && Number.isSafeInteger(raw[field]) && raw[field] >= 0 ? raw[field] : undefined
+  const parsed = {
+    ...(safe('input_tokens') === undefined ? {} : { inputTokens: safe('input_tokens') }),
+    ...(safe('cached_input_tokens') === undefined ? {} : { cachedInputTokens: safe('cached_input_tokens') }),
+    ...(safe('output_tokens') === undefined ? {} : { outputTokens: safe('output_tokens') }),
+    ...(safe('reasoning_output_tokens') === undefined ? {} : { reasoningOutputTokens: safe('reasoning_output_tokens') }),
+  }
+  return Object.keys(parsed).length === 0 ? undefined : parsed
 }
 
 async function waitForIdentity(directory: string): Promise<Awaited<ReturnType<typeof readSupervisorIdentity>> | undefined> {
