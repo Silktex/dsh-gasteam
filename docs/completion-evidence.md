@@ -560,3 +560,12 @@ M6 now has a bounded DSH nudge stage, configured by `execution.health.recovery.m
 The controlled long-tool coordinator test proves no early nudge, pause suppression, one eligible stale nudge and repeat-scan deduplication. A later stale revision after budget exhaustion keeps the incident visible, emits no second health message and dispatches independent project work in the same scan. A real TeamService delivery fixture crashes after its side effect, reopens both journals and proves one queued message and one recovery count. Handoff/replacement, external notifications and full M6 resolution/re-escalation remain open.
 
 Immutable archive `/tmp/gasteam-m6-d73-final-ryxiv7` on d73f580, authoritative nine-path `/tmp/gasteam-m6-d73-final-overlay.sha256`, passes final post-inspection-fence build/types/focused tests, regular407 with two explicit skips, process acceptance19, docs and smoke (`/tmp/gasteam-m6-d73-final-fence-*.log`). All expected paths and hashes were verified before staging; concurrent M2 aggregate-deadline edits are excluded.
+
+Nudge checkpoint `00f4c80becce0694d727dafc0cad99e1f9cc97ba` passed [exact-commit GitHub CI](https://github.com/Silktex/dsh-gasteam/actions/runs/33997734014). Receipt `/tmp/gasteam-ci-00f4c80.json`; log `/tmp/gasteam-ci-00f4c80.log`.
+
+
+## 2026-09-05 — Aggregate coordinator shutdown deadline
+
+Top-level `shutdownDeadlineMs` (default30,000) now bounds observation of the entire `WorkspaceCoordinator.close()` sequence: pending scan, workflows, execution, batches, catalog and journal. One retained shutdown promise continues after timeout without releasing ownership early; subsequent close joins it. Definite failure permits an explicit retry. The limit rejects values beyond Node's supported timer range before acquiring ownership.
+
+The real coordinator regression uses two sequential drains that exceed the aggregate deadline, confirms another coordinator cannot acquire the lock, then releases work and proves the same drains settle before reopening succeeds. Fake-clock helper tests cover joined callers and errors. Final isolated00f4c80 archive `/tmp/gasteam-m2-shutdown-vpRoBv`, five-path `M2-SHUTDOWN-OVERLAY.sha256`, passes install/build/types, regular412 with two explicit skips, acceptance19, docs and smoke (`/tmp/gasteam-m2-shutdown-*.log`). M2's combined fresh-process provisioning/mail replay acceptance remains open.

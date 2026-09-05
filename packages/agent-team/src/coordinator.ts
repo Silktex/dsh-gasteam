@@ -8,6 +8,7 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import z from 'zod'
 import schema from '@deepseek-ai/schemastery'
 import { DurableJournal } from './durable-journal.ts'
+import { MAX_TIMER_TIMEOUT_MS, RetainedShutdown } from './runtime-drain.ts'
 import { ProjectCatalog } from './projects.ts'
 import type { ConfiguredPublicationGrant, ProjectRecord, RegisterProjectRequest } from './projects.ts'
 import { teamProjectionDefinition } from './projection.ts'
@@ -98,12 +99,12 @@ function reduce(state: State, raw: unknown): State {
     value.projectId !== next.projectId || value.teamId !== next.teamId), next] }
 }
 export interface PublicationConfig { readonly grants: readonly ConfiguredPublicationGrant[]; readonly publisher: { readonly identity: string; readonly revision: number; publish(intent: WorkflowPublicationIntent): Promise<WorkflowPublicationReceipt> } }
-export interface CoordinatorConfig { readonly directory: string; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined; /** Exact server-configured Agent allowed to coordinate across projects. */ readonly workspaceOperatorId?: string | undefined }
+export interface CoordinatorConfig { readonly directory: string; /** Bounds one complete close observation; timeout retains coordinator ownership. */ readonly shutdownDeadlineMs?: number | undefined; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined; /** Exact server-configured Agent allowed to coordinate across projects. */ readonly workspaceOperatorId?: string | undefined }
 export interface Config extends CoordinatorConfig { readonly scanIntervalMs: number }
 export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
 export const Config: schema<Config> = schema.object({
-  directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000),
+  directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000), shutdownDeadlineMs: schema.number().step(1).min(1).max(MAX_TIMER_TIMEOUT_MS).default(30_000),
   execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), health: schema.union([schema.const(undefined), schema.object({ dshDeadlineMs: schema.number().step(1).min(1), externalDeadlineMs: schema.number().step(1).min(1), escalationCooldownMs: schema.number().step(1).min(0), maxEscalationsPerCondition: schema.number().step(1).min(1).max(100), recovery: schema.union([schema.const(undefined), schema.object({ maxNudges: schema.number().step(1).min(1).max(3) })]) })]), externalCodex: schema.union([schema.const(undefined), schema.object({ projectId: schema.string().required(), directory: schema.string().required(), codeWorktreeDirectory: schema.union([schema.const(undefined), schema.string()]), cwd: schema.string().required(), executable: schema.string().required(), version: schema.string().required(), model: schema.string().required(), sandbox: schema.string().required(), maxSpoolBytes: schema.number().step(1).min(1).required(), terminateGraceMs: schema.number().step(1).min(1).required(), admissionMaxOutputBytes: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), admissionTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]) })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
   // The publisher is a server object, never a model-supplied value.
   publication: schema.union([schema.const(undefined), schema.object({ grants: schema.array(schema.object({ projectId: schema.string().required(), teamId: schema.string().required(), authorization: schema.string().required() })).required(), publisher: schema.object({ identity: schema.string().required(), revision: schema.number().step(1).min(1).required(), publish: schema.function().required() }).required() })]),
@@ -158,8 +159,8 @@ export interface CoordinatorView {
 /** Owns the complete workspace while its coordinator journal remains open. No fabricated Agent authority. */
 export class WorkspaceCoordinator {
   private pending: Promise<unknown> = Promise.resolve()
-  private closing: Promise<void> | undefined
   private readonly controller = new AbortController()
+  private readonly shutdown: RetainedShutdown
   private projects: CoordinatorProjectView[] = []
   private execution: CoordinatorExecution | undefined
   private workflowStore: WorkflowStore | undefined
@@ -170,11 +171,14 @@ export class WorkspaceCoordinator {
     private readonly ctx: Context,
     private readonly journal: DurableJournal<State, Payload>,
     private readonly catalog: ProjectCatalog, private readonly publication: PublicationConfig | undefined, private readonly workspaceOperatorId: string | undefined,
-  ) {}
+    shutdownDeadlineMs: number,
+  ) { this.shutdown = new RetainedShutdown(shutdownDeadlineMs) }
 
   static async open(ctx: Context, config: CoordinatorConfig): Promise<WorkspaceCoordinator> {
     if (config.execution !== undefined) executionConfigSchema.parse(config.execution)
     if (!isAbsolute(config.directory)) throw new Error('Coordinator directory must be absolute')
+    const shutdownDeadlineMs = config.shutdownDeadlineMs ?? 30_000
+    if (!Number.isSafeInteger(shutdownDeadlineMs) || shutdownDeadlineMs < 1 || shutdownDeadlineMs > MAX_TIMER_TIMEOUT_MS) throw new Error('Coordinator shutdown deadline must be a positive integer no greater than Node\'s maximum timer delay')
     // Acquire this directory-wide service lock before opening any subordinate store.
     const journal = await DurableJournal.open<State, Payload>(join(config.directory, 'coordinator.jsonl'), {
       id: undefined, operatorId: undefined, controls: [], reconciliations: [], plans: [], admitted: [],
@@ -188,7 +192,7 @@ export class WorkspaceCoordinator {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
       if (config.publication && (!config.publication.grants.length || typeof config.publication.publisher.publish !== 'function' || !config.publication.publisher.identity || !Number.isInteger(config.publication.publisher.revision) || config.publication.publisher.revision < 1)) throw new Error('Publication configuration requires grants and an identified idempotent publisher')
       catalog = await ProjectCatalog.open(config.directory, config.publication?.grants)
-      coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId)
+      coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId, shutdownDeadlineMs)
       const activeCoordinator = coordinator
       if (journal.snapshot().operatorId !== config.workspaceOperatorId) {
         if (journal.snapshot().operatorId !== undefined || config.workspaceOperatorId === undefined) throw new Error('Configured workspace operator disagrees with durable coordinator authority')
@@ -525,17 +529,14 @@ export class WorkspaceCoordinator {
   }
 
   close(): Promise<void> {
-    if (this.closing !== undefined) return this.closing
     this.controller.abort(new Error('Coordinator is closing'))
-    return this.closing = this.pending.then(async () => {
+    return this.shutdown.close(async () => {
+      await this.pending
       await this.workflows?.close()
       await this.workflowStore?.close()
       await this.execution?.close()
       await this.batches?.close()
       try { await this.catalog.close() } finally { await this.journal.close() }
-    }).catch((error: unknown) => {
-      this.closing = undefined
-      throw error
     })
   }
 

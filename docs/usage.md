@@ -76,6 +76,8 @@ The coordinator plugin is an opt-in host service. It discovers registered Teams 
 
 Execution dispatches independent pending tasks under global and project capacity. Pause blocks new dispatch while existing workers continue. Code tasks remain pending until their exact submission is verified and accepted. Non-code tasks with immutable `nonCodeCriteria` use the separate report review and acceptance path.
 
+`shutdownDeadlineMs` is a top-level coordinator setting (default `30_000`, maximum `2_147_483_647`). It bounds observation of the *entire* coordinator close sequence, including any in-flight scan and all workflow, execution, batch, catalog, and journal closes. Expiry does not release the coordinator lock or claim that workers stopped: a later close joins the same retained shutdown operation and releases ownership only after it completes.
+
 ### Selected-project external provider
 
 An operator may opt one already registered project into the external Codex provider. Register the project first, then configure one canonical provider policy on the coordinator host:

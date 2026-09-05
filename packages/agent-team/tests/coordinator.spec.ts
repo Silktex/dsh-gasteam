@@ -309,6 +309,14 @@ it('rejects two coordinator owners, releases on close, and refuses subsequent ad
   expect(reopened.view().projects).toEqual([])
 })
 
+it('rejects an unclampable shutdown deadline before acquiring coordinator ownership', async () => {
+  const { ctx, config, coordinator } = await fixture()
+  await coordinator.close()
+  await expect(WorkspaceCoordinator.open(ctx, { ...config, shutdownDeadlineMs: 2_147_483_648 })).rejects.toThrow(/maximum timer delay/)
+  const reopened = await WorkspaceCoordinator.open(ctx, config)
+  cleanup.push(() => reopened.close())
+})
+
 it('mounts the server plugin with awaited startup and releases its service and ownership on disposal', async () => {
   const { ctx, config, coordinator } = await fixture()
   await coordinator.close()
@@ -725,6 +733,52 @@ it('retains ownership and fences admission after failed shutdown, then releases 
   const reopened = await WorkspaceCoordinator.open(ctx, config)
   cleanup.push(() => reopened.close())
   expect(reopened.view().id).toBe(running.view().id)
+})
+
+it('bounds one whole coordinator close across two retained drains without releasing its lock', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  const other = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const otherLead = ctx.agentLoop.create(SessionId('second-shutdown-team'), { provider: 'mock', model: 'mock' }, { cwd: other.repository })
+  await coordinator.register(lead, request)
+  await coordinator.register(otherLead, { ...request, id: 'second-shutdown-project', repository: other.repository, teamIds: [otherLead.id] })
+  await coordinator.acceptTask(lead, 'project', { subject: 'First close drain', description: 'The first retained provider drain' })
+  await coordinator.acceptTask(otherLead, 'second-shutdown-project', { subject: 'Second close drain', description: 'The second retained provider drain' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang', 'hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, shutdownDeadlineMs: 50, execution: { ...execution, maxConcurrent: 2 } })
+  cleanup.push(() => running.close())
+  expect(running.view().attempts).toHaveLength(2)
+
+  const firstEntered = Promise.withResolvers<void>(), secondEntered = Promise.withResolvers<void>()
+  const releaseFirst = Promise.withResolvers<void>(), releaseSecond = Promise.withResolvers<void>()
+  let calls = 0
+  const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async () => {
+    calls++
+    if (calls === 1) { firstEntered.resolve(); await releaseFirst.promise }
+    else { secondEntered.resolve(); await releaseSecond.promise }
+  })
+  vi.useFakeTimers()
+  try {
+    const timedOut = running.close()
+    await firstEntered.promise
+    await vi.advanceTimersByTimeAsync(50)
+    await expect(timedOut).rejects.toThrow(/shutdown is unconfirmed/)
+    await expect(WorkspaceCoordinator.open(ctx, config)).rejects.toThrow(/already owned/)
+
+    const joined = running.close()
+    expect(drain).toHaveBeenCalledTimes(1)
+    releaseFirst.resolve()
+    await secondEntered.promise
+    expect(drain).toHaveBeenCalledTimes(2)
+    releaseSecond.resolve()
+    await joined
+    const reopened = await WorkspaceCoordinator.open(ctx, config)
+    cleanup.push(() => reopened.close())
+  } finally {
+    releaseFirst.resolve(); releaseSecond.resolve()
+    vi.useRealTimers()
+    drain.mockRestore()
+  }
 })
 
 it('explains dependencies and both capacity limits using the same eligibility decision as dispatch', async () => {
