@@ -166,11 +166,38 @@ export interface TeamIntegrationSpec {
   readonly verification: TeamVerificationCommand[]
 }
 
+/** Host-only link from managed task acceptance to one durable submission/integration. */
+export interface IntegratedTaskAcceptance {
+  readonly taskId: TeamTaskId
+  readonly expectedRevision: number
+  readonly submissionId: string
+  readonly integrationId: TeamIntegrationId
+}
+
+/** Coordinator-pinned inputs; reusing an ID requires the exact same logical submission. */
+export interface TeamIntegrationAdmission {
+  readonly id: TeamIntegrationId
+  readonly sourceCommit: TeamCommitId
+  readonly repository: string
+  readonly targetBranch: TeamBranchName
+  readonly verification: TeamVerificationCommand[]
+}
+
+/** Retained verification invalidated by target movement. */
+export interface TeamIntegrationCandidate {
+  readonly cwd: string
+  readonly targetCommit: TeamCommitId
+  readonly candidateCommit: TeamCommitId
+  readonly error: string
+}
+
 /** Durable integration progress; verified candidates survive ambiguous promotion failures. */
 export interface TeamIntegrationSnapshot extends TeamIntegrationSpec {
   readonly id: TeamIntegrationId
   readonly memberId: SessionId
   readonly provider: string
+  readonly failureKind?: 'verification'
+  readonly previousCandidates?: TeamIntegrationCandidate[]
   readonly phase: 'queued' | 'running' | 'verified' | 'merged' | 'failed'
   readonly targetCommit?: TeamCommitId
   readonly candidateCommit?: TeamCommitId
@@ -317,6 +344,8 @@ export interface Config {
   readonly worktreeProvider?: string
   /** Maximum immutable teammate names retained by one Team. */
   readonly maxMembers?: number
+  /** Maximum provisioning or resident teammates per Team, including wakeup admission. */
+  readonly maxConcurrentMembers?: number
   /** Maximum non-deleted tasks retained by one Team. */
   readonly maxTasks?: number
   /** Maximum non-archived task batches per Team. */

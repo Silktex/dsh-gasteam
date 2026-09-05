@@ -11,6 +11,7 @@ import type { TeamTaskGraphViolation } from './task-graph.ts'
 import { TeamId, TeamTaskId } from './types.ts'
 import type {
   CreateTeamTaskRequest,
+  IntegratedTaskAcceptance,
   TeamTaskSnapshot,
   TeamTaskView,
   UpdateTeamTaskRequest,
@@ -39,6 +40,8 @@ export class TeamTaskBoard {
     private readonly journal: TeamJournal,
     private readonly maxTasks: number,
     private readonly maxResultLength: number,
+    private readonly validateMutation: (caller: Agent, root: Agent, request: UpdateTeamTaskRequest) => void = () => {},
+    private readonly validateAcceptance: (root: Agent, request: IntegratedTaskAcceptance) => boolean = () => false,
   ) {}
 
   /**
@@ -71,6 +74,28 @@ export class TeamTaskBoard {
       this.assertTaskGraph(state, task)
       await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
       return this.taskView(root, state, task)
+    })
+  }
+
+  /** Accept only a coordinator-authorized task backed by a durable verified promotion. */
+  async acceptIntegrated(membership: TeamMembership, request: IntegratedTaskAcceptance): Promise<TeamTaskView> {
+    const { root } = membership
+    if (membership.role !== 'lead') throw new TeamError('Integrated acceptance requires a Lead', 'TEAM_LEAD_ONLY')
+    return this.journal.transact(root.id, async () => {
+      if (!this.validateAcceptance(root, request)) throw new TeamError('No coordinator grant for this acceptance', 'TEAM_MANAGED_TASK')
+      const state = this.journal.state(root)
+      const task = state.tasks.find(task => task.id === request.taskId)
+      const job = state.integrations.find(job => job.id === request.integrationId)
+      if (!task || !job || job.phase !== 'merged' || !job.candidateCommit || !job.targetCommit) throw new TeamError('Task acceptance requires a verified merged integration', 'TEAM_INTEGRATION_CONFLICT')
+      const result = JSON.stringify({ submissionId: request.submissionId, integrationId: job.id, sourceCommit: job.sourceCommit,
+        candidateCommit: job.candidateCommit, targetCommit: job.targetCommit })
+      if (task.status === 'completed' && task.result === result) {
+        return this.taskView(root, state, task)
+      }
+      if (task.revision !== request.expectedRevision || task.status !== 'pending' || task.ownerId !== undefined || !this.taskReady(state, task)) throw new TeamError('Task changed or prerequisites remain unaccepted', 'TEAM_TASK_INVALID_TRANSITION')
+      const accepted: TeamTaskSnapshot = { ...task, revision: task.revision + 1, status: 'completed', result: requiredText(result, 'integration receipt', this.maxResultLength) }
+      await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task: accepted })
+      return this.taskView(root, this.journal.state(root), accepted)
     })
   }
 
@@ -115,6 +140,7 @@ export class TeamTaskBoard {
   ): Promise<TeamTaskView> {
     const root = membership.root
     return this.journal.transact(root.id, async () => {
+      this.validateMutation(caller, root, request)
       const state = this.journal.state(root)
       const current = state.tasks.find(task => task.id === request.taskId)
       if (current === undefined) throw new TeamError(`team task "${request.taskId}" not found`, 'TEAM_TASK_NOT_FOUND')

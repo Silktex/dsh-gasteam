@@ -22,6 +22,7 @@ import type {
   TeamMemberView,
 } from './types.ts'
 import { requiredText } from './validation.ts'
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 
 const MEMBER_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 
@@ -61,6 +62,8 @@ export function resolveActiveMember(
 /** Owns Team identities and the lifecycle of rostered continuable children. */
 export class TeamRoster {
   private readonly inFlightCreations = new Set<Promise<unknown>>()
+  private readonly waking = new Set<SessionId>()
+  private readonly provisioningIds = new Set<SessionId>()
 
   /**
    * @param ctx - Team service context with Agent, Session, persistence, and subagent services.
@@ -77,7 +80,32 @@ export class TeamRoster {
     private readonly maxMembers: number,
     private readonly worktrees: TeamWorktrees,
     private readonly cleanupTimeoutMs: number,
+    private readonly maxConcurrentMembers: number,
+    private readonly onCapacityAvailable: (root: Agent) => void,
+    private readonly validateRuntimeAdmission: (root: Agent, targetId: SessionId) => void,
   ) {}
+
+  assertRuntimeAdmission(root: Agent, targetId: SessionId): void { this.validateRuntimeAdmission(root, targetId) }
+
+  /** Reserve wakeup capacity under the same transaction that reserves new roster entries. */
+  async withRuntimeSlot<T>(root: Agent, childId: SessionId, operation: () => Promise<T>): Promise<T> {
+    await this.journal.transact(root.id, async () => {
+      if (this.lifecycle.disposed) throw new TeamError('Agent Teams is disposing', 'TEAM_DISPOSED')
+      this.assertRuntimeAdmission(root, childId)
+      if (this.ctx.agents.get(childId) === undefined && !this.waking.has(childId)) this.assertCapacity(root)
+      this.waking.add(childId)
+    })
+    try { return await operation() }
+    finally { this.waking.delete(childId); this.onCapacityAvailable(root) }
+  }
+
+  private assertCapacity(root: Agent): void {
+    const occupied = this.journal.state(root).members.filter(member => member.phase === 'provisioning'
+      || this.ctx.agents.get(member.id) !== undefined || this.waking.has(member.id))
+    if (occupied.length >= this.maxConcurrentMembers) {
+      throw new TeamError(`Team concurrent capacity ${this.maxConcurrentMembers} reached`, 'TEAM_CONCURRENT_LIMIT')
+    }
+  }
 
   /**
    * Resolve one exact live Agent's Team role.
@@ -177,14 +205,24 @@ export class TeamRoster {
    * @param request - immutable name, description, prompt, context mode, provider, and cancellation.
    * @returns the active roster row.
    */
-  async spawn(caller: Agent, request: SpawnTeammateRequest): Promise<SpawnTeammateResult> {
+  async spawn(caller: Agent, request: SpawnTeammateRequest, runtimeId?: string): Promise<SpawnTeammateResult> {
     if (this.lifecycle.disposed) throw new TeamError('Agent Teams service is disposing', 'TEAM_DISPOSED')
-    const operation = this.spawnAdmitted(caller, request)
+    this.membership(caller)
+    if (runtimeId !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(runtimeId)) {
+      throw new TeamError('Reserved runtime identity is invalid', 'TEAM_INVALID_ARGUMENT')
+    }
+    const childId = brandString<SessionId>(runtimeId ?? randomUUID())
+    if (this.provisioningIds.has(childId)) throw new TeamError('Runtime identity is already provisioning', 'TEAM_RUNTIME_ID_TAKEN')
+    this.provisioningIds.add(childId)
+    const operation = this.spawnAdmitted(caller, request, childId)
     this.inFlightCreations.add(operation)
     try {
       return await operation
     } finally {
       this.inFlightCreations.delete(operation)
+      this.provisioningIds.delete(childId)
+      const membership = this.tryMembership(caller)
+      if (membership?.role === 'lead') this.onCapacityAvailable(membership.root)
     }
   }
 
@@ -258,6 +296,7 @@ export class TeamRoster {
   private async spawnAdmitted(
     caller: Agent,
     request: SpawnTeammateRequest,
+    childId: SessionId,
   ): Promise<SpawnTeammateResult> {
     const membership = this.membership(caller)
     if (membership.role !== 'lead') {
@@ -268,7 +307,6 @@ export class TeamRoster {
     const root = membership.root
     const name = this.memberName(request.name)
     const description = requiredText(request.description, 'description', 200)
-    const childId = brandString<SessionId>(randomUUID())
     const member: TeamMemberSnapshot = {
       id: childId,
       name,
@@ -280,12 +318,24 @@ export class TeamRoster {
 
     await this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
+      if (state.members.some(member => member.id === childId) || this.ctx.agents.get(childId) !== undefined
+        || this.ctx.sessions.get(childId) !== undefined) {
+        throw new TeamError('Runtime identity is already owned', 'TEAM_RUNTIME_ID_TAKEN')
+      }
+      let exists = true
+      try { await this.ctx.sessionPersistence.inspect(childId, signal) }
+      catch (error) {
+        if (!(error instanceof SessionPersistenceNotFoundError)) throw error
+        exists = false
+      }
+      if (exists) throw new TeamError('Runtime identity already has durable history', 'TEAM_RUNTIME_ID_TAKEN')
       if (state.members.some(member => member.name === name)) {
         throw new TeamError(`teammate name "${name}" was already used in this Team`, 'TEAM_MEMBER_NAME_TAKEN')
       }
       if (state.members.length >= this.maxMembers) {
-        throw new TeamError(`Team member limit ${this.maxMembers} reached`, 'TEAM_MEMBER_LIMIT')
+        throw new TeamError(`Team retained member history limit ${this.maxMembers} reached; increase maxMembers to retain more names`, 'TEAM_MEMBER_LIMIT')
       }
+      this.assertCapacity(root)
       await this.journal.appendAndFlush(root, 'team/member', { version: 1, teamId: TeamId(root.id), member })
     })
 

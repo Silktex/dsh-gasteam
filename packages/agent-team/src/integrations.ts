@@ -1,13 +1,26 @@
 /** Durable integration admission and serialized verification with recoverable promotion. */
 
+import { isDeepStrictEqual } from 'node:util'
+import z from 'zod'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TeamJournal } from './journal.ts'
 import type { TeamMembership } from './roster.ts'
+import { acquireIntegrationOwnership } from './integration-ownership.ts'
 import { TeamError, errorMessage } from './error.ts'
 import { TeamId } from './types.ts'
-import type { TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationSnapshot } from './types.ts'
+import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationSnapshot } from './types.ts'
+
+const admissionSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/),
+  sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), repository: z.string().min(1), targetBranch: z.string().min(1),
+  verification: z.array(z.object({ command: z.string().min(1), args: z.array(z.string()) }).strict()).min(1),
+}).strict()
+function matchesAdmission(spec: TeamIntegrationSnapshot | Omit<TeamIntegrationSnapshot, 'id' | 'memberId' | 'provider' | 'phase'>, admission: TeamIntegrationAdmission): boolean {
+  return spec.sourceCommit === admission.sourceCommit && spec.repository === admission.repository
+    && spec.targetBranch === admission.targetBranch && isDeepStrictEqual(spec.verification, admission.verification)
+}
 
 /** Owns queue admission and one integration runner per Team. */
 export class TeamIntegrations {
@@ -41,12 +54,20 @@ export class TeamIntegrations {
    * @param signal - admission cancellation.
    * @returns durably queued integration inputs.
    */
-  async enqueue(membership: TeamMembership, target: string, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+  async enqueue(membership: TeamMembership, target: string, signal: AbortSignal, admission?: TeamIntegrationAdmission): Promise<TeamIntegrationSnapshot> {
     this.assertLead(membership)
+    if (admission !== undefined) admissionSchema.parse(admission)
     return await this.journal.transact(membership.root.id, async () => {
       signal.throwIfAborted()
       const state = this.journal.state(membership.root)
       const member = state.members.find(candidate => candidate.name === target && candidate.phase === 'active')
+      const existing = admission === undefined ? undefined : state.integrations.find(job => job.id === admission.id)
+      if (existing !== undefined) {
+        if (existing.memberId !== member?.id || !matchesAdmission(existing, admission!)) throw new TeamError('Integration identity has different pinned inputs', 'TEAM_INTEGRATION_CONFLICT')
+        // A prior append may have succeeded before its flush failed. Re-acknowledge only after durability.
+        await this.ctx.sessions.flush(membership.root.session)
+        return structuredClone(existing)
+      }
       const worktree = state.worktrees.find(candidate => candidate.memberId === member?.id && candidate.phase === 'ready')
       if (member === undefined || worktree === undefined) throw new TeamError('integration requires a ready worker worktree', 'TEAM_WORKTREE_UNAVAILABLE')
       if (this.ctx.agents.get(member.id) !== undefined
@@ -58,8 +79,9 @@ export class TeamIntegrations {
         throw new TeamError('Team integration queue limit reached', 'TEAM_INTEGRATION_LIMIT')
       }
       const provider = this.provider(this.providerName)
-      const id = randomUUID() as TeamIntegrationId
+      const id = admission?.id ?? randomUUID() as TeamIntegrationId
       const spec = await provider.resolve(worktree, id, signal)
+      if (admission !== undefined && !matchesAdmission(spec, admission)) throw new TeamError('Resolved worker commit or integration policy differs from the submission', 'TEAM_INTEGRATION_CONFLICT')
       const job: TeamIntegrationSnapshot = { ...spec, id, memberId: member.id, provider: provider.name, phase: 'queued' }
       await this.journal.appendAndFlush(membership.root, 'team/integration', { version: 1, teamId: membership.id, integration: job })
       return structuredClone(job)
@@ -86,17 +108,21 @@ export class TeamIntegrations {
     const { root } = membership
     if (this.running.has(root.id)) throw new TeamError('Team integration runner is busy', 'TEAM_INTEGRATION_BUSY')
     this.running.add(root.id)
+    let release: (() => Promise<void>) | undefined
     try {
       let job = this.list(membership).find(candidate => candidate.phase !== 'merged' && candidate.phase !== 'failed')
       if (job === undefined) return undefined
       const provider = this.provider(job.provider)
+      release = await acquireIntegrationOwnership(job.repository, job.targetBranch, signal)
       if (job.phase === 'running') {
         return await this.record(membership, { ...job, phase: 'failed', error: 'Verification was interrupted; candidate checkout is retained. Enqueue a new request.' })
       }
       if (job.phase === 'queued') {
+        let verifying = false
         try {
           const targetCommit = await provider.target(job, signal)
           job = await this.record(membership, { ...job, phase: 'running', targetCommit })
+          verifying = true
           const candidateCommit = await provider.verify(job, targetCommit, signal)
           job = await this.record(membership, { ...job, phase: 'verified', candidateCommit })
         } catch (error: unknown) {
@@ -105,7 +131,7 @@ export class TeamIntegrations {
           const durable = this.list(membership).find(candidate => candidate.id === jobId)
           if (durable === undefined) throw new Error('queued integration disappeared from its Lead log')
           if (durable.phase === 'verified') throw error
-          return await this.record(membership, { ...durable, phase: 'failed', error: errorMessage(error) })
+          return await this.record(membership, { ...durable, phase: 'failed', ...(verifying ? { failureKind: 'verification' as const } : {}), error: errorMessage(error) })
         }
       }
       if (job.phase !== 'verified' || job.targetCommit === undefined || job.candidateCommit === undefined) {
@@ -113,10 +139,24 @@ export class TeamIntegrations {
       }
       // A prior failed flush can leave a verified event visible only in memory.
       await this.ctx.sessions.flush(root.session)
-      await provider.promote(job, job.targetCommit, job.candidateCommit, signal)
+      try {
+        await provider.promote(job, job.targetCommit, job.candidateCommit, signal)
+      } catch (error: unknown) {
+        // Providers can be separately bundled plugins with a distinct TeamError constructor.
+        if (!(error instanceof Error) || !('code' in error) || error.code !== 'TEAM_INTEGRATION_STALE') throw error
+        const history = job.previousCandidates ?? []
+        if (history.length >= 3) {
+          return await this.record(membership, { ...job, phase: 'failed', error: `Target movement retry limit reached: ${errorMessage(error)}. Candidate checkouts are retained.` })
+        }
+        const { targetCommit, candidateCommit, ...inputs } = job
+        return await this.record(membership, {
+          ...inputs, phase: 'queued', cwd: `${history[0]?.cwd ?? job.cwd}.retry-${history.length + 1}`,
+          previousCandidates: [...history, { cwd: job.cwd, targetCommit, candidateCommit, error: errorMessage(error) }],
+        })
+      }
       return await this.record(membership, { ...job, phase: 'merged' })
     } finally {
-      this.running.delete(root.id)
+      try { await release?.() } finally { this.running.delete(root.id) }
     }
   }
 

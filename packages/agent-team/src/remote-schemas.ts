@@ -102,6 +102,8 @@ export const teamViewSchema = wireSchema<TeamView>(z.object({
   'archived': z.boolean().readonly(),
 })).readonly(),
   'integrations': z.array(z.object({
+  'failureKind': z.literal('verification').optional(),
+  'previousCandidates': z.array(z.object({ cwd: z.string(), targetCommit: z.intersection(z.string(), z.unknown()), candidateCommit: z.intersection(z.string(), z.unknown()), error: z.string() })).optional(),
   'id': z.intersection(z.string(), z.unknown()).readonly(),
   'memberId': z.intersection(z.string(), z.unknown()).readonly(),
   'provider': z.string().readonly(),

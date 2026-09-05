@@ -20,4 +20,5 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:acceptance
       - run: pnpm test:smoke

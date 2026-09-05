@@ -1,5 +1,6 @@
 /** Persisted integration validation and monotonic execution phases. */
 
+import { isDeepStrictEqual } from 'node:util'
 import { isAbsolute } from 'node:path'
 import { z } from 'zod'
 import { brandString } from '@deepseek-ai/dsh-brand'
@@ -20,6 +21,8 @@ export const integrationSchema = z.object({
   sourceCommit: commit,
   targetBranch: branch,
   verification: z.array(z.object({ command: z.string().min(1), args: z.array(z.string()) }).strict()).min(1),
+  failureKind: z.literal('verification').optional(),
+  previousCandidates: z.array(z.object({ cwd: z.string().refine(isAbsolute), targetCommit: commit, candidateCommit: commit, error: z.string().min(1) }).strict()).max(3).optional(),
   phase: z.enum(['queued', 'running', 'verified', 'merged', 'failed']),
   targetCommit: commit.optional(),
   candidateCommit: commit.optional(),
@@ -32,21 +35,34 @@ export const integrationSchema = z.object({
  * @param next - decoded next snapshot.
  */
 export function assertIntegrationTransition(prior: TeamIntegrationSnapshot | undefined, next: TeamIntegrationSnapshot): void {
+  const retry = prior?.phase === 'verified' && next.phase === 'queued'
   const allowed = prior === undefined ? next.phase === 'queued'
     : prior.phase === 'queued' ? next.phase === 'running' || next.phase === 'failed'
       : prior.phase === 'running' ? next.phase === 'verified' || next.phase === 'failed'
-        : prior.phase === 'verified' && (next.phase === 'merged' || next.phase === 'failed')
+        : prior.phase === 'verified' && (next.phase === 'merged' || next.phase === 'failed' || retry)
   if (!allowed) throw new Error('invalid Team integration phase transition')
   if (prior !== undefined) {
-    for (const key of ['id', 'memberId', 'provider', 'repository', 'cwd', 'sourceBranch', 'sourceCommit', 'targetBranch'] as const) {
+    for (const key of ['id', 'memberId', 'provider', 'repository', 'sourceBranch', 'sourceCommit', 'targetBranch'] as const) {
       if (prior[key] !== next[key]) throw new Error('Team integration changed immutable inputs')
     }
+    if (retry) {
+      const history = prior.previousCandidates ?? []
+      const expected = [...history, { cwd: prior.cwd, targetCommit: prior.targetCommit, candidateCommit: prior.candidateCommit, error: next.previousCandidates?.at(-1)?.error }]
+      if (history.length >= 3 || !isDeepStrictEqual(next.previousCandidates, expected)
+        || next.cwd !== `${history[0]?.cwd ?? prior.cwd}.retry-${history.length + 1}`) {
+        throw new Error('invalid Team integration retry history')
+      }
+    } else if (prior.cwd !== next.cwd || !isDeepStrictEqual(prior.previousCandidates, next.previousCandidates)) {
+      throw new Error('Team integration changed candidate history')
+    }
     if (JSON.stringify(prior.verification) !== JSON.stringify(next.verification)
-      || prior.targetCommit !== undefined && prior.targetCommit !== next.targetCommit
-      || prior.candidateCommit !== undefined && prior.candidateCommit !== next.candidateCommit) {
+      || !retry && prior.targetCommit !== undefined && prior.targetCommit !== next.targetCommit
+      || !retry && prior.candidateCommit !== undefined && prior.candidateCommit !== next.candidateCommit) {
       throw new Error('Team integration changed recorded verification inputs')
     }
   }
+  if (next.failureKind !== undefined && (next.phase !== 'failed' || prior?.phase !== 'running')) throw new Error('Invalid integration failure classification')
+  if (prior === undefined && next.previousCandidates !== undefined) throw new Error('new Team integration has retry history')
   if ((next.phase === 'running' || next.phase === 'verified' || next.phase === 'merged') && next.targetCommit === undefined
     || (next.phase === 'verified' || next.phase === 'merged') && next.candidateCommit === undefined
     || (next.phase === 'queued' || next.phase === 'running') && next.candidateCommit !== undefined

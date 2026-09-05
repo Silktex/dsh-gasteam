@@ -1,8 +1,12 @@
+import type { TeamIntegrationAdmission, IntegratedTaskAcceptance } from './types.ts'
+import type {} from './coordinator.ts'
+import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { TeamActivity } from './activity.ts'
@@ -54,7 +58,14 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-const DEFAULT_MAX_MEMBERS = 8
+const DEFAULT_MAX_MEMBERS = 4_096
+/** Host-installed policies run inside Team mutation/admission transactions. */
+export interface TeamExecutionPolicy {
+  taskMutation(caller: Agent, root: Agent, request: UpdateTeamTaskRequest): void
+  acceptance?(root: Agent, request: IntegratedTaskAcceptance): boolean
+  wake(root: Agent, targetId: SessionId): void
+}
+const DEFAULT_MAX_CONCURRENT_MEMBERS = 8
 const DEFAULT_MAX_TASKS = 256
 const DEFAULT_MAX_BATCHES = 128
 const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3
@@ -81,6 +92,7 @@ export class TeamService extends TypertRemoteService {
     integrationProvider: z.string(),
     maxIntegrations: z.number().step(1).min(1).default(32),
     maxMembers: z.number().step(1).min(1).default(DEFAULT_MAX_MEMBERS),
+    maxConcurrentMembers: z.number().step(1).min(1).default(DEFAULT_MAX_CONCURRENT_MEMBERS),
     maxTasks: z.number().step(1).min(1).default(DEFAULT_MAX_TASKS),
     maxBatches: z.number().step(1).min(1).default(DEFAULT_MAX_BATCHES),
     maxRecoveryAttempts: z.number().step(1).min(1).default(DEFAULT_MAX_RECOVERY_ATTEMPTS),
@@ -105,6 +117,14 @@ export class TeamService extends TypertRemoteService {
   private readonly integrations: TeamIntegrations
   private readonly recovery: TeamRecovery
   private readonly operations = new Set<Promise<unknown>>()
+  private readonly executionPolicies = new Set<TeamExecutionPolicy>()
+
+  registerExecutionPolicy(policy: TeamExecutionPolicy): () => void {
+    this.executionPolicies.add(policy)
+    return () => { this.executionPolicies.delete(policy) }
+  }
+
+  get worktreesEnabled(): boolean { return this.config.worktreeProvider !== undefined }
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentTeams')
@@ -115,6 +135,7 @@ export class TeamService extends TypertRemoteService {
         worktreeProvider: config.worktreeProvider.trim(),
       },
       maxMembers: positiveLimit('maxMembers', config.maxMembers ?? DEFAULT_MAX_MEMBERS),
+      maxConcurrentMembers: positiveLimit('maxConcurrentMembers', config.maxConcurrentMembers ?? DEFAULT_MAX_CONCURRENT_MEMBERS),
       maxTasks: positiveLimit('maxTasks', config.maxTasks ?? DEFAULT_MAX_TASKS),
       maxBatches: positiveLimit('maxBatches', config.maxBatches ?? DEFAULT_MAX_BATCHES),
       maxRecoveryAttempts: positiveLimit('maxRecoveryAttempts', config.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS),
@@ -142,6 +163,8 @@ export class TeamService extends TypertRemoteService {
     this.worktrees = new TeamWorktrees(ctx, this.journal, this.config.worktreeProvider)
     this.roster = new TeamRoster(
       ctx, this.journal, this.lifecycle, this.config.maxMembers, this.worktrees, this.config.disposalTimeoutMs,
+      this.config.maxConcurrentMembers, root => this.mailbox.retryCapacity(root),
+      (root, targetId) => { for (const policy of this.executionPolicies) policy.wake(root, targetId) },
     )
     this.mailbox = new TeamMailbox(
       ctx,
@@ -151,12 +174,19 @@ export class TeamService extends TypertRemoteService {
       this.config.maxPendingMessagesPerMember,
       this.config.maxMessageBytes,
     )
-    this.tasks = new TeamTaskBoard(this.journal, this.config.maxTasks, this.config.maxTaskResultLength)
+    this.tasks = new TeamTaskBoard(this.journal, this.config.maxTasks, this.config.maxTaskResultLength,
+      (caller, root, request) => { for (const policy of this.executionPolicies) policy.taskMutation(caller, root, request) },
+      (root, request) => [...this.executionPolicies].some(policy => policy.acceptance?.(root, request) === true))
     this.batches = new TeamBatches(this.journal, this.config.maxBatches, this.config.maxBatchTextLength)
     this.recovery = new TeamRecovery(ctx, this.journal, this.roster, this.mailbox, this.config.maxRecoveryAttempts)
 
     ctx.on('session/event', (session, event) => { this.mailbox.observeSessionEvent(session, event) })
     ctx.on('agent/session-start', ({ agent }) => { this.scheduleRecovery(agent) })
+    ctx.on('agent/disposed', ({ agent }) => {
+      const parent = agent.session.header.parentSession
+      const root = parent === undefined ? undefined : ctx.agents.get(parent)
+      if (root !== undefined) this.mailbox.retryCapacity(root)
+    })
     ctx.on('agent/status', ({ agent }) => {
       const membership = this.roster.tryMembership(agent)
       if (membership !== undefined) this.activity.notify(membership.id)
@@ -200,6 +230,11 @@ export class TeamService extends TypertRemoteService {
    */
   async spawnTeammate(caller: Agent, request: SpawnTeammateRequest): Promise<SpawnTeammateResult> {
     return await this.roster.spawn(caller, request)
+  }
+
+  /** Host admission for a runtime identity already reserved by the coordinator. */
+  async spawnReservedTeammate(caller: Agent, request: SpawnTeammateRequest, runtimeId: string): Promise<SpawnTeammateResult> {
+    return this.roster.spawn(caller, request, runtimeId)
   }
 
   /** Workspace policy selected for newly created teammates. */
@@ -305,6 +340,18 @@ export class TeamService extends TypertRemoteService {
       await this.integrations.enqueue(this.roster.membership(caller), target, cancellation))
   }
 
+  async acceptIntegratedTask(caller: Agent, request: IntegratedTaskAcceptance): Promise<TeamTaskView> {
+    const result = await this.tasks.acceptIntegrated(this.roster.membership(caller), structuredClone(request))
+    await this.ctx.sessions.flush(caller.session)
+    return result
+  }
+
+  /** Host-only replay-safe admission for coordinator-pinned submission inputs. */
+  async enqueuePinnedIntegration(caller: Agent, target: string, admission: TeamIntegrationAdmission, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+    const snapshot = structuredClone(admission)
+    return this.runOperation(signal, cancellation => this.integrations.enqueue(this.roster.membership(caller), target, cancellation, snapshot))
+  }
+
   /**
    * Run or recover the oldest pending integration.
    * @param caller - exact live Lead.
@@ -337,6 +384,11 @@ export class TeamService extends TypertRemoteService {
    */
   listIntegrations(caller: Agent): TeamIntegrationSnapshot[] {
     return this.integrations.list(this.roster.membership(caller))
+  }
+
+  /** Host-only stable wakeup identity for coordinator recovery replay. */
+  async sendReservedMessage(caller: Agent, request: SendTeamMessageRequest, messageId: string): Promise<SendTeamMessageResult> {
+    return this.mailbox.send(caller, request, messageId)
   }
 
   /**
@@ -445,6 +497,18 @@ export class TeamService extends TypertRemoteService {
   @Remote('updateTask')
   remoteUpdateTask(agent: Agent, request: UpdateTeamTaskRequest): Promise<TeamTaskMutationResult> {
     return this.taskMutationResult(this.updateTask(agent, request))
+  }
+
+  @Remote('scheduling')
+  remoteScheduling(agent: Agent, request: SchedulingQuery): SchedulingView {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.scheduling(agent, request)
+  }
+
+  @Remote('controlScheduling')
+  remoteControlScheduling(agent: Agent, request: SchedulingControl): Promise<SchedulingView> {
+    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.workspaceCoordinator.controlScheduling(agent, request)
   }
 
   /** Preserve Team task rejections while allowing unexpected failures to reject the Remote call. */

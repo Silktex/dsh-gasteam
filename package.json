@@ -17,7 +17,8 @@
     "dsh": "dsh",
     "install:profile": "node scripts/install-profile.mjs",
     "start": "dsh --profile web --no-open",
-    "test:smoke": "node scripts/smoke.mjs"
+    "test:smoke": "node scripts/smoke.mjs",
+    "test:acceptance": "vitest run --config vitest.acceptance.config.ts"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

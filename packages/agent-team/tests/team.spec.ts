@@ -1,5 +1,8 @@
 import { queueSubagentPrompt, type HostPromptQueue } from '@deepseek-ai/dsh-subagent/internal'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFile, writeFile } from 'node:fs/promises'
+import { execa } from 'execa'
+import { GitIntegrationProvider } from '../src/git-integration-provider.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +11,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import { SessionId, Session, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentService from '@deepseek-ai/dsh-subagent'
@@ -18,12 +21,15 @@ import { MockAdapter, textResponse } from '../../../tests/support/mock-adapter.t
 import TeamService, { TeamError, TeamId, TeamMessageId, TeamTaskId } from '../src/index.ts'
 import { TeamRuntimeLifecycle } from '../src/lifecycle.ts'
 import { teamProjectionDefinition } from '../src/projection.ts'
-import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot, TeamIntegrationSpec, TeamCommitId } from '../src/index.ts'
+import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot, TeamIntegrationSpec, TeamIntegrationId, TeamCommitId } from '../src/index.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 import { gitFixture } from './git-fixture.ts'
 import * as GitWorktrees from '../src/git-worktrees.ts'
 import * as IntegrationWorker from '../src/integration-worker.ts'
 import * as Supervisor from '../src/supervisor.ts'
+import { AssignmentStore, type AttemptRecord } from '../src/assignments.ts'
+import { acquireIntegrationOwnership } from '../src/integration-ownership.ts'
+import { DshAssignmentRuntime } from '../src/dsh-assignment-runtime.ts'
 
 const SIGNAL = new AbortController().signal
 const roots: string[] = []
@@ -71,6 +77,17 @@ async function setup(
   ctx.llm.registerAdapter(['mock'], adapter)
   const lead = ctx.agentLoop.create(SessionId('lead'), { provider: 'mock', model: 'mock' }, cwd === undefined ? {} : { cwd })
   return { ctx, lead, adapter, storageRoot, teamFiber }
+}
+
+/** Native completion notices wake the Lead; keep them out of the worker response script. */
+async function setupWorkers(script: ConstructorParameters<typeof MockAdapter>[0], config: ConstructorParameters<typeof TeamService>[1]) {
+  const fixture = await setup(script, config)
+  const stream = fixture.adapter.stream.bind(fixture.adapter)
+  vi.spyOn(fixture.adapter, 'stream').mockImplementation(async function* (options) {
+    if (options.sessionId === fixture.lead.id) yield* textResponse('Lead noted completion')
+    else yield* stream(options)
+  })
+  return fixture
 }
 
 function content(text: string) {
@@ -150,6 +167,7 @@ describe('Team identity and provisioning', () => {
   it('rejects deployment limits that are not positive safe integers', async () => {
     const fields = [
       'maxMembers',
+      'maxConcurrentMembers',
       'maxTasks',
       'maxBatches',
       'maxRecoveryAttempts',
@@ -228,6 +246,220 @@ describe('Team identity and provisioning', () => {
     ])
     await expect(spawn(ctx, lead, 'third-worker')).rejects.toMatchObject({ code: 'TEAM_MEMBER_LIMIT' })
     await expect(spawn(ctx, lead, 'fresh-worker')).rejects.toMatchObject({ code: 'TEAM_MEMBER_NAME_TAKEN' })
+  })
+
+  it('runs nine sequential teammates with capacity two while retaining immutable history', async () => {
+    const { ctx, lead } = await setupWorkers(Array.from({ length: 9 }, () => textResponse('done')), { maxConcurrentMembers: 2 })
+    for (let index = 0; index < 9; index++) {
+      const child = await spawn(ctx, lead, `turnover-${index}`)
+      await waitNoAgent(ctx, child.member.id)
+      const stored = await ctx.sessionPersistence.inspect(child.member.id)
+      expect(stored.events.some(event => event.type === 'assistant/message' && event.data.message.content.some(block => block.type === 'text' && block.text === 'done'))).toBe(true)
+    }
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(10)
+    expect(durable(lead).members.every(member => member.phase === 'active')).toBe(true)
+  })
+
+  it('reserves concurrent spawn slots before provisioning and rejects overflow without consuming a name', async () => {
+    const { ctx, lead } = await setupWorkers(['hang', 'hang', 'hang'], { maxConcurrentMembers: 2 })
+    const results = await Promise.allSettled(['one', 'two', 'three'].map(name => spawn(ctx, lead, name)))
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(2)
+    expect(results.filter(result => result.status === 'rejected')).toEqual([
+      expect.objectContaining({ reason: expect.objectContaining({ code: 'TEAM_CONCURRENT_LIMIT' }) }),
+    ])
+    expect(durable(lead).members).toHaveLength(2)
+  })
+
+  it('keeps a capacity-blocked wakeup durable and dispatches it when the occupied slot is released', async () => {
+    const { ctx, lead } = await setupWorkers([textResponse('initial'), 'hang', textResponse('resumed')], { maxConcurrentMembers: 1 })
+    const old = await spawn(ctx, lead, 'old')
+    await waitNoAgent(ctx, old.member.id)
+    const busy = await spawn(ctx, lead, 'busy')
+    expect(ctx.agents.get(busy.member.id)).toBeDefined()
+    expect(ctx.agents.get(old.member.id)).toBeUndefined()
+    const receipt = await ctx.agentTeams.sendMessage(lead, { target: 'old', content: content('resume after capacity'), delivery: 'wakeup', signal: SIGNAL })
+    expect(receipt.status).toBe('queued')
+    expect(ctx.agents.get(old.member.id)).toBeUndefined()
+    ctx.agentTeams.interrupt(lead, 'busy')
+    await waitNoAgent(ctx, busy.member.id)
+    await vi.waitFor(() => { expect(durable(lead).pendingMessages).toEqual([]) })
+    await waitNoAgent(ctx, old.member.id)
+    const stored = await ctx.sessionPersistence.inspect(old.member.id)
+    expect(stored.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'team-message'
+      && event.data.source.messageId === receipt.messageId)).toHaveLength(1)
+  })
+
+  it('retries capacity-blocked mail after provisioning fails without creating a runtime', async () => {
+    const { ctx, lead } = await setupWorkers([textResponse('initial'), textResponse('resumed')], { maxConcurrentMembers: 1 })
+    const old = await spawn(ctx, lead, 'old')
+    await waitNoAgent(ctx, old.member.id)
+    const entered = Promise.withResolvers<void>()
+    const failure = Promise.withResolvers<never>()
+    vi.spyOn(ctx.subagents, 'startContinuable').mockImplementationOnce(async () => {
+      entered.resolve()
+      return await failure.promise
+    })
+    const provisioning = spawn(ctx, lead, 'failed')
+    const rejected = expect(provisioning).rejects.toThrow('provider failed')
+    await entered.promise
+    const receipt = await ctx.agentTeams.sendMessage(lead, { target: 'old', content: content('wait for failed provisioning'), delivery: 'wakeup', signal: SIGNAL })
+    expect(receipt.status).toBe('queued')
+    failure.reject(new Error('provider failed'))
+    await rejected
+    await vi.waitFor(() => { expect(durable(lead).pendingMessages).toEqual([]) })
+    await waitNoAgent(ctx, old.member.id)
+    expect(durable(lead).members.find(member => member.name === 'failed')?.phase).toBe('failed')
+  })
+
+  it('admits the persisted runtime identity and rejects reused durable identities before roster mutation', async () => {
+    const { ctx, lead } = await setupWorkers([textResponse('assigned result')], {})
+    const request = { name: 'assigned', description: 'Reserved runtime', prompt: content('durable checkpoint'), context: 'fresh' as const, provider: 'spawn', signal: SIGNAL }
+    const result = await ctx.agentTeams.spawnReservedTeammate(lead, request, 'reserved-runtime')
+    expect(result.member.id).toBe('reserved-runtime')
+    await waitNoAgent(ctx, result.member.id)
+    const stored = await ctx.sessionPersistence.inspect(SessionId('reserved-runtime'))
+    expect(stored.events.some(event => event.type === 'user/message' && event.data.content.some(block => block.type === 'text' && block.text === 'durable checkpoint'))).toBe(true)
+    await expect(ctx.agentTeams.spawnReservedTeammate(lead, { ...request, name: 'duplicate' }, 'reserved-runtime')).rejects.toMatchObject({ code: 'TEAM_RUNTIME_ID_TAKEN' })
+    await expect(ctx.agentTeams.spawnReservedTeammate(lead, { ...request, name: 'steal-lead' }, lead.id)).rejects.toMatchObject({ code: 'TEAM_RUNTIME_ID_TAKEN' })
+    expect(durable(lead).members).toHaveLength(1)
+  })
+
+  it('serializes reserved runtime identity across racing Team roots', async () => {
+    const { ctx, lead } = await setupWorkers(['hang', 'hang'], {})
+    const other = ctx.agentLoop.create(SessionId('other-lead'), { provider: 'mock', model: 'mock' })
+    const request = { name: 'reserved', description: 'One runtime owner', prompt: content('one owner'), context: 'fresh' as const, provider: 'spawn', signal: SIGNAL }
+    const results = await Promise.allSettled([lead, other].map(root => ctx.agentTeams.spawnReservedTeammate(root, request, 'shared-runtime')))
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter(result => result.status === 'rejected')).toEqual([expect.objectContaining({ reason: expect.objectContaining({ code: 'TEAM_RUNTIME_ID_TAKEN' }) })])
+    expect(durable(lead).members.length + durable(other).members.length).toBe(1)
+  })
+
+  it('deduplicates reserved recovery mail and rejects reuse with changed content', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    await spawn(ctx, lead, 'recoverable')
+    const request = { target: 'recoverable', delivery: 'quiet' as const, content: content('Checkpoint recovery'), signal: SIGNAL }
+    const replies = await Promise.all([1, 2].map(() => ctx.agentTeams.sendReservedMessage(lead, request, 'reserved-recovery-message')))
+    expect(replies.map(reply => reply.messageId)).toEqual(['reserved-recovery-message', 'reserved-recovery-message'])
+    expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === 'reserved-recovery-message')).toHaveLength(1)
+    await expect(ctx.agentTeams.sendReservedMessage(lead, { ...request, content: content('Changed checkpoint') }, 'reserved-recovery-message')).rejects.toMatchObject({ code: 'TEAM_MESSAGE_CONFLICT' })
+  })
+
+  it('starts a reserved DSH assignment once and records its completed report without accepting the task', async () => {
+    const { ctx, lead } = await setupWorkers([textResponse('assignment report')], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Assigned work', description: 'Run one worker' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-assignments-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 2, projectCapacities: { project: 2 } })
+    try {
+      const reserved = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'assigned-session', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Produce the result' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      const token = (record: AttemptRecord) => ({ attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })
+      const active = await runtime.start(lead, token(reserved))
+      expect(active.phase).toBe('active')
+      expect(await runtime.start(lead, token(active))).toEqual(active)
+      expect(ctx.agentTeams.listMembers(lead).filter(member => member.id === reserved.runtimeId)).toHaveLength(1)
+      await waitNoAgent(ctx, SessionId(reserved.runtimeId))
+      const terminal = await runtime.observe(lead, token(active))
+      expect(terminal).toMatchObject({ phase: 'terminal', result: 'assignment report', stopEvidence: { runtimeId: reserved.runtimeId, kind: 'stopped' } })
+      expect(ctx.agentTeams.getTask(lead, task.id).status).toBe('pending')
+      const stored = await ctx.sessionPersistence.inspect(SessionId(reserved.runtimeId))
+      expect(stored.events.some(event => event.type === 'user/message' && event.data.content.some(block => block.type === 'text' && block.text.includes(reserved.assignmentId) && block.text.includes('Produce the result')))).toBe(true)
+    } finally { await assignments.close() }
+  })
+
+  it('treats a crash after a later turn starts as recovery instead of reusing the old report', async () => {
+    const { ctx, lead } = await setupWorkers([textResponse('assignment report')], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Assigned work', description: 'Run one worker' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-assignments-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 2, projectCapacities: { project: 2 } })
+    try {
+      const reserved = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'assigned-session', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Produce the result' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      const token = (record: AttemptRecord) => ({ attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })
+      const active = await runtime.start(lead, token(reserved))
+      expect(active.phase).toBe('active')
+      expect(await runtime.start(lead, token(active))).toEqual(active)
+      expect(ctx.agentTeams.listMembers(lead).filter(member => member.id === reserved.runtimeId)).toHaveLength(1)
+      await waitNoAgent(ctx, SessionId(reserved.runtimeId))
+      const stored = await ctx.sessionPersistence.inspect(SessionId(reserved.runtimeId))
+      const workerSession = Session.fromRestore(SessionId(reserved.runtimeId), stored.events, stored.meta, SessionLogOffset(0))
+      const events = workerSession.snapshotEvents()
+      const previous = events.findLast(event => event.type === 'turn/start')!
+      if (previous.type !== 'turn/start') throw new Error('Expected real worker turn')
+      workerSession.append('turn/start', { turn: previous.data.turn + 1 })
+      await ctx.sessionPersistence.append(SessionId(reserved.runtimeId), workerSession.snapshotEvents().slice(stored.events.length))
+      const terminal = await runtime.observe(lead, token(active))
+      expect(terminal).toMatchObject({ phase: 'terminal', stopReason: expect.stringContaining('DSH worker requires recovery') })
+      expect(terminal.result).toBeUndefined()
+      expect(ctx.agentTeams.getTask(lead, task.id).status).toBe('pending')
+    } finally { await assignments.close() }
+  })
+
+  it('fences DSH cancellation with awaited runtime shutdown and rejects unrelated Lead authority', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Cancel work', description: 'Must stop before retiring' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-assignments-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 2, projectCapacities: { project: 2 } })
+    try {
+      const record = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'cancel-session', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Wait for cancellation' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+      const other = ctx.agentLoop.create(SessionId('unrelated-runtime-lead'), { provider: 'mock', model: 'mock' })
+      await expect(runtime.start(other, token(record))).rejects.toThrow(/authority/)
+      const active = await runtime.start(lead, token(record))
+      expect(ctx.agents.get(SessionId(record.runtimeId))).toBeDefined()
+      const terminal = await runtime.cancel(lead, token(active), 'operator cancellation')
+      expect(terminal).toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation' })
+      expect(ctx.agents.get(SessionId(record.runtimeId))).toBeUndefined()
+      await expect(runtime.start(lead, token(record))).rejects.toThrow(/stale|terminal/i)
+    } finally { await assignments.close() }
+  })
+
+  it('retains capacity after drain timeout and rejoins shutdown of a resident stopping worker', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Cancel work', description: 'Must stop before retiring' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-assignments-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    try {
+      const record = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'cancel-session', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Wait for cancellation' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments, 50)
+      const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+      const other = ctx.agentLoop.create(SessionId('unrelated-runtime-lead'), { provider: 'mock', model: 'mock' })
+      await expect(runtime.start(other, token(record))).rejects.toThrow(/authority/)
+      const active = await runtime.start(lead, token(record))
+      expect(ctx.agents.get(SessionId(record.runtimeId))).toBeDefined()
+      const originalDrain = ctx.subagents.drainContinuableChildren.bind(ctx.subagents)
+      let release!: () => void
+      const barrier = new Promise<void>(resolve => { release = resolve })
+      const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (...args) => {
+        await barrier
+        return originalDrain(...args)
+      })
+      await expect(runtime.cancel(lead, token(active), 'operator cancellation')).rejects.toThrow(/timed out/)
+      const stopping = assignments.list()[0]!
+      expect(stopping).toMatchObject({ phase: 'stopping', stopReason: 'operator cancellation' })
+      expect(stopping.stopEvidence).toBeUndefined()
+      expect(ctx.agents.get(SessionId(record.runtimeId))).toBeDefined()
+      await expect(assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: 'another-task', workerId: 'another-worker', runtimeId: 'another-session', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: record.checkpoint })).rejects.toThrow(/capacity/)
+      const reconciliation = runtime.observe(lead, token(stopping))
+      // Let observation enter the existing pending drain before allowing the provider to finish.
+      await Promise.resolve()
+      release()
+      const terminal = await reconciliation
+      expect(drain).toHaveBeenCalledTimes(1)
+      drain.mockRestore()
+      expect(terminal).toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation' })
+      expect(ctx.agents.get(SessionId(record.runtimeId))).toBeUndefined()
+      await expect(runtime.start(lead, token(record))).rejects.toThrow(/stale|terminal/i)
+    } finally { await assignments.close() }
   })
 
   it('flushes the accepted child prompt before committing the active roster edge', async () => {
@@ -2076,7 +2308,7 @@ describe('Team supervisor recovery', () => {
 })
 
 describe('durable Team integration queue', () => {
-  async function queuedWorker() {
+  async function queuedWorker(pinned = false, realGit = false) {
     const fixture = await gitFixture((root) => { roots.push(root) })
     const { ctx, lead, teamFiber } = await setup([textResponse('ready')], { worktreeProvider: 'git', integrationProvider: 'test', maxIntegrations: 1 }, fixture.repository)
     await ctx.plugin(GitWorktrees, fixture.config)
@@ -2092,12 +2324,85 @@ describe('durable Team integration queue', () => {
       })),
       target: vi.fn(async () => worktree.baseCommit),
       verify: vi.fn(async (_spec: TeamIntegrationSpec, _target: TeamCommitId, _signal: AbortSignal) => worktree.baseCommit),
-      promote: vi.fn(async () => {}),
+      promote: vi.fn(async (_spec: TeamIntegrationSpec, _target: TeamCommitId, _candidate: TeamCommitId, _signal: AbortSignal) => {}),
+    }
+    if (realGit) {
+      await writeFile(join(worktree.cwd, 'worker.txt'), 'submitted')
+      await execa('git', ['-C', worktree.cwd, 'add', 'worker.txt'])
+      await execa('git', ['-C', worktree.cwd, 'commit', '-m', 'worker artifact'])
+      const gitProvider = new GitIntegrationProvider({ providerName: 'test', targetBranch: 'main',
+        verification: [{ command: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('worker.txt','utf8')!=='submitted')process.exit(1)"] }],
+        commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
+      provider.resolve.mockImplementation(async (_workspace, id) => await gitProvider.resolve(worktree, id as TeamIntegrationId, SIGNAL))
+      provider.target.mockImplementation(async () => await gitProvider.target({ ...worktree, sourceBranch: worktree.branch, sourceCommit: worktree.baseCommit, targetBranch: 'main' as typeof worktree.branch, verification: [] }, SIGNAL))
+      provider.verify.mockImplementation(async (spec, target, signal) => await gitProvider.verify(spec, target, signal))
+      provider.promote.mockImplementation(async (spec, target, candidate, signal) => {
+        await gitProvider.promote(spec, target, candidate, signal)
+      })
     }
     ctx.agentTeams.registerIntegrationProvider(provider)
-    const job = await ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)
-    return { ctx, lead, teamFiber, provider, job }
+    const admission = { id: 'submission-job' as TeamIntegrationId, repository: worktree.repository, sourceCommit: worktree.baseCommit, targetBranch: 'main' as typeof worktree.branch, verification: [{ command: 'configured-check', args: [] }] }
+    const job = pinned ? await ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL) : await ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)
+    return { ctx, lead, teamFiber, provider, job, admission, fixture, worktree }
   }
+
+  it('leaves the job queued when another owner holds its canonical repository target', async () => {
+    const { ctx, lead, provider, job } = await queuedWorker()
+    const release = await acquireIntegrationOwnership(job.repository, job.targetBranch, SIGNAL)
+    try {
+      await expect(ctx.agentTeams.runIntegration(lead, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_BUSY' })
+      expect(ctx.agentTeams.listIntegrations(lead)[0]!.phase).toBe('queued')
+      expect(provider.verify).not.toHaveBeenCalled()
+      await release()
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
+      expect(provider.verify).toHaveBeenCalledTimes(1)
+    } finally { await release(); await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('replays one pinned integration through concurrent calls, full capacity, and service reconstruction', async () => {
+    const { ctx, lead, teamFiber, provider, job, admission } = await queuedWorker(true)
+    const duplicates = await Promise.all([1, 2].map(() => ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL)))
+    expect(duplicates).toEqual([job, job])
+    expect(provider.resolve).toHaveBeenCalledTimes(1)
+    expect(ctx.agentTeams.listIntegrations(lead)).toHaveLength(1)
+    await teamFiber.dispose()
+    await ctx.plugin(TeamService, { integrationProvider: 'test', maxIntegrations: 1 })
+    ctx.agentTeams.registerIntegrationProvider(provider)
+    try {
+      expect(await ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL)).toEqual(job)
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
+      expect(await ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL)).toMatchObject({ id: job.id, phase: 'merged' })
+      expect(provider.resolve).toHaveBeenCalledTimes(1)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('does not acknowledge replay of a pinned integration while its durability checkpoint fails', async () => {
+    const { ctx, lead, admission } = await queuedWorker(true)
+    const flush = vi.spyOn(ctx.sessions, 'flush').mockRejectedValueOnce(new Error('checkpoint failed'))
+    try {
+      await expect(ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL)).rejects.toThrow('checkpoint failed')
+      flush.mockRestore()
+      expect(await ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', admission, SIGNAL)).toMatchObject({ id: admission.id })
+      expect(ctx.agentTeams.listIntegrations(lead)).toHaveLength(1)
+    } finally { flush.mockRestore(); await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('rejects reused identity and changed commit or verification policy without queue admission', async () => {
+    const { ctx, lead, provider, admission } = await queuedWorker(true)
+    try {
+      await expect(ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', { ...admission, verification: [{ command: 'different-check', args: [] }] }, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_CONFLICT' })
+      await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      for (const patch of [
+        { sourceCommit: 'a'.repeat(40) as TeamCommitId },
+        { targetBranch: 'other' as typeof admission.targetBranch },
+        { verification: [{ command: 'different-check', args: [] }] },
+        { repository: '/another-repository' },
+      ]) await expect(ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', { ...admission, id: 'new-submission' as TeamIntegrationId, ...patch }, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_CONFLICT' })
+      await expect(ctx.agentTeams.enqueuePinnedIntegration(lead, 'worker', { ...admission, id: '../escape' as TeamIntegrationId }, SIGNAL)).rejects.toThrow()
+      expect(ctx.agentTeams.listIntegrations(lead)).toHaveLength(1)
+      expect(provider.promote).toHaveBeenCalledTimes(1)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
 
   it('aborts in-flight background verification and retains its failed queue record on disposal', async () => {
     const { ctx, lead, provider } = await queuedWorker()
@@ -2193,6 +2498,56 @@ describe('durable Team integration queue', () => {
       expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
       expect(provider.verify).toHaveBeenCalledTimes(1)
       expect(provider.promote).toHaveBeenCalledTimes(2)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('rebuilds against a real moved Git target and preserves old candidate output and source', async () => {
+    const { ctx, lead, provider, job, fixture, worktree } = await queuedWorker(false, true)
+    const verify = provider.verify.getMockImplementation()!
+    provider.verify.mockImplementationOnce(async (spec, target, signal) => {
+      const candidate = await verify(spec, target, signal)
+      await writeFile(join(fixture.repository, 'external.txt'), 'target advanced')
+      await fixture.git('add', 'external.txt')
+      await fixture.git('commit', '-m', 'external target movement')
+      await writeFile(join(spec.cwd, 'retained.txt'), 'untracked evidence')
+      await writeFile(join(spec.cwd, '.gitignore'), 'ignored.txt\n')
+      await writeFile(join(spec.cwd, 'ignored.txt'), 'ignored evidence')
+      return candidate
+    })
+    try {
+      const retry = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      expect(retry).toMatchObject({ phase: 'queued', id: job.id })
+      await writeFile(join(worktree.cwd, 'worker.txt'), 'later source')
+      await execa('git', ['-C', worktree.cwd, 'commit', '-am', 'later source'])
+      const merged = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      expect(merged).toMatchObject({ phase: 'merged', id: job.id, sourceCommit: job.sourceCommit })
+      expect(await readFile(join(fixture.repository, 'worker.txt'), 'utf8')).toBe('submitted')
+      expect(await readFile(join(fixture.repository, 'external.txt'), 'utf8')).toBe('target advanced')
+      expect(await readFile(join(job.cwd, 'retained.txt'), 'utf8')).toBe('untracked evidence')
+      expect(await readFile(join(job.cwd, 'ignored.txt'), 'utf8')).toBe('ignored evidence')
+      expect(provider.verify).toHaveBeenCalledTimes(2)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('reverifies moved targets with bounded durable candidate history and pinned inputs', async () => {
+    const { ctx, lead, provider, job, teamFiber } = await queuedWorker(true)
+    provider.promote.mockRejectedValue(new TeamError('target moved', 'TEAM_INTEGRATION_STALE'))
+    try {
+      const retry = await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      expect(retry).toMatchObject({ id: job.id, phase: 'queued', sourceCommit: job.sourceCommit,
+        previousCandidates: [{ cwd: job.cwd, targetCommit: job.sourceCommit, candidateCommit: job.sourceCommit, error: 'target moved' }] })
+      expect(retry!.cwd).not.toBe(job.cwd)
+      await teamFiber.dispose()
+      await ctx.plugin(TeamService, { integrationProvider: 'test' })
+      ctx.agentTeams.registerIntegrationProvider(provider)
+      for (let round = 0; round < 3; round++) await ctx.agentTeams.runIntegration(lead, SIGNAL)
+      const failed = ctx.agentTeams.listIntegrations(lead)[0]!
+      expect(failed).toMatchObject({ id: job.id, phase: 'failed', sourceCommit: job.sourceCommit })
+      expect(failed.error).toContain('retry limit')
+      expect(provider.verify).toHaveBeenCalledTimes(4)
+      expect(new Set(provider.verify.mock.calls.map(([spec]) => spec.cwd)).size).toBe(4)
+      expect(provider.verify.mock.calls.every(([spec]) => spec.sourceCommit === job.sourceCommit)).toBe(true)
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toBeUndefined()
     } finally { await teamInternals(ctx).disposeRuntime() }
   })
 

@@ -52,6 +52,10 @@
     "./integration-worker": {
       "types": "./lib/types/integration-worker.d.ts",
       "default": "./lib/integration-worker.js"
+    },
+    "./coordinator": {
+      "types": "./lib/types/coordinator.d.ts",
+      "default": "./lib/coordinator.js"
     }
   },
   "files": [
@@ -64,7 +68,8 @@
     "lib/typert.host.js",
     "lib/typert.remote-client.js",
     "lib/git-integration.js",
-    "lib/integration-worker.js"
+    "lib/integration-worker.js",
+    "lib/coordinator.js"
   ],
   "license": "MIT",
   "dependencies": {

@@ -76,7 +76,7 @@ export class GitIntegrationProvider implements TeamIntegrationProvider {
   async promote(spec: TeamIntegrationSpec, target: TeamCommitId, candidate: TeamCommitId, signal: AbortSignal): Promise<void> {
     const current = await this.target(spec, signal)
     if (current === candidate) return
-    if (current !== target) throw new TeamError('integration target moved; enqueue verification against the new target', 'TEAM_INTEGRATION_STALE')
+    if (current !== target) throw new TeamError('integration target moved; candidate requires verification against the new target', 'TEAM_INTEGRATION_STALE')
     if (await this.git(spec.repository, ['symbolic-ref', '--short', 'HEAD'], signal) !== spec.targetBranch) {
       throw new TeamError('Lead checkout must be on the configured integration target', 'TEAM_INTEGRATION_CONFLICT')
     }

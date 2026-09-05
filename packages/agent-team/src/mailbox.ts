@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 /** Durable Team mailbox admission, target-local dispatch, acknowledgement, and recovery. */
 
 import { randomUUID } from 'node:crypto'
@@ -27,6 +28,7 @@ export class TeamMailbox {
   private readonly activeDispatches = new Map<SessionId, TeamMessageSnapshot>()
   private readonly inFlightMessages = new Set<TeamMessageId>()
   private readonly inFlightDispatches = new Set<Promise<unknown>>()
+  private readonly capacityBlockedRoots = new Set<SessionId>()
 
   /**
    * @param ctx - Team service context with Agent, Session, persistence, and subagent services.
@@ -45,18 +47,30 @@ export class TeamMailbox {
     private readonly maxMessageBytes: number,
   ) {}
 
+  /** Retry only capacity-blocked queues after authoritative runtime disposal or admission settlement. */
+  retryCapacity(root: Agent): void {
+    if (this.lifecycle.disposed || !this.capacityBlockedRoots.delete(root.id)) return
+    queueMicrotask(() => {
+      if (this.lifecycle.disposed) return
+      void this.trackDispatch(this.recoverFor(root, this.lifecycle.signal)).catch((error: unknown) => {
+        if (!this.lifecycle.disposed) this.ctx.logger.warn(`Team capacity retry: ${errorMessage(error)}`)
+      })
+    })
+  }
+
   /**
    * Queue one durable peer message, then attempt immediate delivery.
    * @param caller - exact live sending Team member.
    * @param request - target name, content, scheduling mode, and pre-queue cancellation.
    * @returns durable message identity and immediate-delivery observation.
    */
-  async send(caller: Agent, request: SendTeamMessageRequest): Promise<SendTeamMessageResult> {
+  async send(caller: Agent, request: SendTeamMessageRequest, reservedId?: string): Promise<SendTeamMessageResult> {
     if (this.lifecycle.disposed) throw new TeamError('Agent Teams service is disposing', 'TEAM_DISPOSED')
+    if (reservedId !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(reservedId)) throw new TeamError('Invalid reserved message ID', 'TEAM_INVALID_ARGUMENT')
     const operation = this.sendAdmitted(caller, {
       ...request,
       signal: AbortSignal.any([request.signal, this.lifecycle.signal]),
-    })
+    }, reservedId)
     return await this.trackDispatch(operation)
   }
 
@@ -110,6 +124,7 @@ export class TeamMailbox {
   private async sendAdmitted(
     caller: Agent,
     request: SendTeamMessageRequest,
+    reservedId?: string,
   ): Promise<SendTeamMessageResult> {
     const membership = this.roster.membership(caller)
     request.signal.throwIfAborted()
@@ -119,7 +134,14 @@ export class TeamMailbox {
       request.signal.throwIfAborted()
       const state = this.journal.state(root)
       const target = resolveActiveMember(root, state, request.target)
+      if (request.delivery === 'wakeup') this.roster.assertRuntimeAdmission(root, target.id)
       if (target.id === caller.id) throw new TeamError('a Team member cannot message itself', 'TEAM_SELF_MESSAGE')
+      const existing = reservedId === undefined ? undefined : state.messages.find(message => message.id === reservedId)
+      if (existing) {
+        if (existing.senderId !== caller.id || existing.targetId !== target.id || existing.delivery !== request.delivery || !isDeepStrictEqual(existing.content, content)) throw new TeamError('Reserved message identity has different inputs', 'TEAM_MESSAGE_CONFLICT')
+        await this.ctx.sessions.flush(root.session)
+        return { message: existing, dispatch: this.tryDispatch(root, existing, request.signal) }
+      }
       const pendingForTarget = state.messages.filter(candidate =>
         candidate.targetId === target.id && !state.delivered.includes(candidate.id)).length
       if (pendingForTarget >= this.maxPendingMessagesPerMember) {
@@ -129,7 +151,7 @@ export class TeamMailbox {
         )
       }
       const queued: TeamMessageSnapshot = {
-        id: TeamMessageId(`team-message-${randomUUID()}`),
+        id: TeamMessageId(reservedId ?? `team-message-${randomUUID()}`),
         senderId: caller.id,
         senderName: membership.name,
         targetId: target.id,
@@ -261,11 +283,16 @@ export class TeamMailbox {
           return true
         }
       }
-      await queueHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
+      await this.roster.withRuntimeSlot(root, message.targetId,
+        () => queueHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal))
       return target === undefined
         ? true
         : await this.checkpointDelivered(root, target.session, message.id)
     } catch (error: unknown) {
+      if (error instanceof TeamError && error.code === 'TEAM_CONCURRENT_LIMIT') {
+        this.capacityBlockedRoots.add(root.id)
+        return false
+      }
       this.ctx.logger.warn(`team message "${message.id}" remains queued: ${errorMessage(error)}`)
       return false
     }

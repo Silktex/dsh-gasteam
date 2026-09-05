@@ -352,7 +352,8 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
         && worktree.repository === integration.repository && worktree.branch === integration.sourceBranch)) {
         throw new Error('Team integration has no matching worker workspace')
       }
-      if (index < 0 && state.integrations.some(candidate => candidate.cwd === integration.cwd)) {
+      if (state.integrations.some(candidate => candidate.id !== integration.id
+        && [candidate.cwd, ...(candidate.previousCandidates ?? []).map(round => round.cwd)].includes(integration.cwd))) {
         throw new Error('Team integration candidate directory is already owned')
       }
       assertIntegrationTransition(state.integrations[index], integration)

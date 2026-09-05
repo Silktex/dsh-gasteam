@@ -7,6 +7,7 @@ export type {
   TeamBatchId,
   TeamBatchView,
   TeamIntegrationSnapshot,
+  TeamIntegrationCandidate,
   TeamWorktreeSnapshot,
   TeamMemberView,
   TeamTaskAction,
@@ -17,3 +18,5 @@ export type {
   TeamView,
   UpdateTeamTaskRequest,
 } from './types.ts'
+
+export type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'

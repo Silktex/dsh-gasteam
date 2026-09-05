@@ -1,6 +1,7 @@
-/** Host lookup and JSON codecs for the three Team UI operations. */
+/** Host lookup and JSON codecs for Team task and scoped scheduling operations. */
 import type { InvocationDescriptor, InvocationParameterDescriptor, TypertCodec } from '@deepseek-ai/dsh-typert-protocol'
 import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema } from './remote-schemas.ts'
+import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from './scheduling-schemas.ts'
 import type { TeamService } from './index.ts'
 
 export const TEAM_PACKAGE = '@deepseek-ai/dsh-experimental-agent-team'
@@ -20,6 +21,8 @@ function invocation(method: string, implementation: keyof TeamService & string, 
   }
 }
 export const descriptors: readonly InvocationDescriptor[] = [
+  invocation('scheduling', 'remoteScheduling', codec('SchedulingView', schedulingViewSchema), codec('SchedulingQuery', schedulingQuerySchema)),
+  invocation('controlScheduling', 'remoteControlScheduling', codec('SchedulingView', schedulingViewSchema), codec('SchedulingControl', schedulingControlSchema)),
   invocation('createTask', 'remoteCreateTask', codec('TeamTaskMutationResult', taskResultSchema), codec('CreateTeamTaskRequest', createTaskSchema)),
   invocation('updateTask', 'remoteUpdateTask', codec('TeamTaskMutationResult', taskResultSchema), codec('UpdateTeamTaskRequest', updateTaskSchema)),
   invocation('view', 'remoteView', codec('TeamView', teamViewSchema)),
