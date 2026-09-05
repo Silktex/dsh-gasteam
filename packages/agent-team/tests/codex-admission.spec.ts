@@ -84,8 +84,8 @@ it('returns at its timeout when a killed probe leader leaves an inherited pipe o
   }
 })
 
-it('uses read-only installed CLI version and login-status probes without a model call', async () => {
-  const executable = '/home/linuxbrew/.linuxbrew/bin/codex'
+it.runIf(Boolean(process.env.GASTEAM_CODEX_ADMISSION_EXECUTABLE))('uses read-only installed CLI version and login-status probes without a model call', async () => {
+  const executable = process.env.GASTEAM_CODEX_ADMISSION_EXECUTABLE!
   const actual = { ...config, executable }
   const actualPolicy = { ...policy, executable }
   const admission = await admitCodex({ config: actual, policy: actualPolicy, maxOutputBytes: 4_096, timeoutMs: 5_000 })
