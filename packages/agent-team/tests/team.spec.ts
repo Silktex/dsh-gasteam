@@ -1911,6 +1911,173 @@ describe('Team mailbox and waiting', () => {
     expect(ctx.agents.get(started.member.id)).toBeUndefined()
   })
 
+  it('retains an abort-ignoring mailbox owner at the disposal deadline and joins it on a later close', async () => {
+    const { ctx, lead } = await setup(['hang'], { disposalTimeoutMs: 25 })
+    const started = await spawn(ctx, lead, 'deadline-mailbox-worker')
+    await waitRunning(ctx, started.member.id)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    let aborts = 0
+    vi.spyOn(ctx.subagents as unknown as HostPromptQueue, queueSubagentPrompt).mockImplementation(async (_parent, _childId, _content, _source, signal) => {
+      entered.resolve(undefined)
+      await new Promise<void>(resolve => {
+        signal.addEventListener('abort', () => { aborts++; void release.promise.then(resolve) }, { once: true })
+      })
+    })
+    const sending = ctx.agentTeams.sendMessage(lead, {
+      target: 'deadline-mailbox-worker', content: content('wait through deadline'), delivery: 'wakeup', signal: SIGNAL,
+    })
+    await entered.promise
+    const internal = teamInternals(ctx)
+    vi.useFakeTimers()
+    try {
+      const first = internal.disposeRuntime()
+      // The fake deadline fires before the assertion is attached below.
+      void first.catch(() => undefined)
+      await vi.advanceTimersByTimeAsync(25)
+      await expect(first).rejects.toBeInstanceOf(AggregateError)
+      expect(aborts).toBe(1)
+      expect(ctx.agents.get(started.member.id)).toBeDefined()
+    } finally { vi.useRealTimers() }
+    release.resolve(undefined)
+    await expect(sending).resolves.toMatchObject({ status: 'queued' })
+    await internal.disposeRuntime()
+    expect(aborts).toBe(1)
+    expect(ctx.agents.get(started.member.id)).toBeUndefined()
+  })
+
+  it('joins an unresolved child drain on a later close without repeating provider cancellation', async () => {
+    const { ctx, lead } = await setup(['hang', 'hang'], { disposalTimeoutMs: 25 })
+    const started = await spawn(ctx, lead, 'deadline-drain-worker')
+    await waitRunning(ctx, started.member.id)
+    const original = ctx.subagents.drainContinuableChildren.bind(ctx.subagents)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (...args) => {
+      entered.resolve(undefined)
+      await release.promise
+      await original(...args)
+    })
+    const internal = teamInternals(ctx)
+    vi.useFakeTimers()
+    try {
+      const first = internal.disposeRuntime()
+      void first.catch(() => undefined)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(25)
+      await expect(first).rejects.toBeInstanceOf(AggregateError)
+      expect(ctx.agents.get(started.member.id)).toBeDefined()
+    } finally { vi.useRealTimers() }
+    const second = internal.disposeRuntime()
+    release.resolve(undefined)
+    await second
+    expect(drain).toHaveBeenCalledTimes(1)
+    expect(ctx.agents.get(started.member.id)).toBeUndefined()
+    drain.mockRestore()
+  })
+
+  it('joins an overlapping survivor drain after its sibling already stopped', async () => {
+    const { ctx, lead } = await setup([], { disposalTimeoutMs: 25 })
+    const firstId = SessionId('partial-drain-first')
+    const secondId = SessionId('partial-drain-second')
+    const internal = teamInternals(ctx)
+    let observation = 0
+    vi.spyOn(internal.roster, 'liveChildrenByRoot').mockImplementation(() => new Map([[
+      lead,
+      observation++ === 0 ? [firstId, secondId] : [secondId],
+    ]]))
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (_root, ids) => {
+      expect(ids).toEqual([firstId, secondId])
+      entered.resolve(undefined)
+      await release.promise
+    })
+    vi.useFakeTimers()
+    try {
+      const closing = internal.disposeRuntime()
+      void closing.catch(() => undefined)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(25)
+      await expect(closing).rejects.toBeInstanceOf(AggregateError)
+    } finally { vi.useRealTimers() }
+    const retry = internal.disposeRuntime()
+    expect(drain).toHaveBeenCalledTimes(1)
+    release.resolve(undefined)
+    await retry
+    expect(drain).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
+  })
+
+  it('awaits a retained drain even after the next roster observation is empty', async () => {
+    const { ctx, lead } = await setup(['hang'], { disposalTimeoutMs: 25 })
+    const started = await spawn(ctx, lead, 'hidden-drain-worker')
+    await waitRunning(ctx, started.member.id)
+    const internal = teamInternals(ctx)
+    let observation = 0
+    vi.spyOn(internal.roster, 'liveChildrenByRoot').mockImplementation(() => observation++ === 0
+      ? new Map([[lead, [started.member.id]]])
+      : new Map())
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async () => {
+      entered.resolve(undefined)
+      await release.promise
+    })
+    vi.useFakeTimers()
+    try {
+      const first = internal.disposeRuntime()
+      void first.catch(() => undefined)
+      await entered.promise
+      await vi.advanceTimersByTimeAsync(25)
+      await expect(first).rejects.toBeInstanceOf(AggregateError)
+    } finally { vi.useRealTimers() }
+    let finished = false
+    const retry = internal.disposeRuntime().then(() => { finished = true })
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    release.resolve(undefined)
+    await retry
+    expect(drain).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
+  })
+
+  it('awaits a hidden retained drain while another Lead has a visible child', async () => {
+    const { ctx, lead } = await setup(['hang'], { disposalTimeoutMs: 25 })
+    const otherLead = ctx.agentLoop.create(SessionId('other-lead'), { provider: 'mock', model: 'mock' })
+    const internal = teamInternals(ctx)
+    let observation = 0
+    vi.spyOn(internal.roster, 'liveChildrenByRoot').mockImplementation(() => observation++ === 0
+      ? new Map([[lead, [SessionId('hidden-child')]]])
+      : new Map([[otherLead, [SessionId('visible-child')]]]))
+    const hiddenEntered = Promise.withResolvers<undefined>()
+    const visibleEntered = Promise.withResolvers<undefined>()
+    const hiddenRelease = Promise.withResolvers<undefined>()
+    const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (_root, ids) => {
+      if (ids[0] === SessionId('hidden-child')) {
+        hiddenEntered.resolve(undefined)
+        await hiddenRelease.promise
+      } else visibleEntered.resolve(undefined)
+    })
+    vi.useFakeTimers()
+    try {
+      const first = internal.disposeRuntime()
+      void first.catch(() => undefined)
+      await hiddenEntered.promise
+      await vi.advanceTimersByTimeAsync(25)
+      await expect(first).rejects.toBeInstanceOf(AggregateError)
+    } finally { vi.useRealTimers() }
+    let finished = false
+    const retry = internal.disposeRuntime().then(() => { finished = true })
+    await visibleEntered.promise
+    expect(finished).toBe(false)
+    expect(drain).toHaveBeenCalledTimes(2)
+    hiddenRelease.resolve(undefined)
+    await retry
+    expect(drain).toHaveBeenCalledTimes(2)
+    drain.mockRestore()
+  })
+
   it('awaits an admitted asynchronous acknowledgement before disposal completes', async () => {
     const { ctx, lead } = await setup([])
     const message: TeamMessageSnapshot = {

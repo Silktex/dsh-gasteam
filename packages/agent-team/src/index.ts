@@ -127,6 +127,8 @@ export class TeamService extends TypertRemoteService {
   private readonly recovery: TeamRecovery
   private readonly operations = new Set<Promise<unknown>>()
   private readonly executionPolicies = new Set<TeamExecutionPolicy>()
+  /** One shutdown owner; a bounded unresolved close releases this handle for a later rejoin. */
+  private disposal: Promise<void> | undefined
 
   registerExecutionPolicy(policy: TeamExecutionPolicy): () => void {
     this.executionPolicies.add(policy)
@@ -666,20 +668,49 @@ export class TeamService extends TypertRemoteService {
 
   /** Stop Team-owned live branches and release every waiter before service disposal completes. */
   private async disposeRuntime(): Promise<void> {
+    const existing = this.disposal
+    if (existing !== undefined) return await existing
+    const disposal = this.disposeRuntimeOnce()
+    this.disposal = disposal
+    try {
+      await disposal
+    } catch (error) {
+      // The cancellation fact and durable ownership remain. A later close must
+      // join the same admitted operations rather than repeat child teardown.
+      if (this.disposal === disposal) this.disposal = undefined
+      throw error
+    }
+  }
+
+  private async disposeRuntimeOnce(): Promise<void> {
     this.lifecycle.close()
     this.activity.close()
 
     const failures: unknown[] = []
-    await this.lifecycle.settle(this.roster.pendingCreations(), failures)
-    await this.lifecycle.settle(this.mailbox.pendingDispatches(), failures)
-    await this.lifecycle.settle([...this.operations], failures)
+    const creationsSettled = await this.lifecycle.settle(this.roster.pendingCreations(), failures)
+    const mailboxSettled = await this.lifecycle.settle(this.mailbox.pendingDispatches(), failures)
+    const operationsSettled = await this.lifecycle.settle([...this.operations], failures)
+    // An abort-ignoring provider may still own a child. Keep that ownership
+    // fenced and leave the child untouched until a later close observes the
+    // admitted work settle; a deadline is not proof of termination.
+    if (!creationsSettled || !mailboxSettled || !operationsSettled) {
+      throw new AggregateError(failures, 'Agent Teams runtime disposal has unresolved operations')
+    }
+    const alreadyBounded = new Set<Promise<unknown>>()
     for (const [root, childIds] of this.roster.liveChildrenByRoot()) {
       try {
         await this.roster.stopTeammates(root, childIds)
       } catch (error: unknown) {
         failures.push(error)
+        // stopTeammates already applied this close's deadline to these exact
+        // drains. Do not spend a second deadline on them below.
+        for (const drain of this.roster.pendingDrainsFor(root, childIds)) alreadyBounded.add(drain)
       }
     }
+    // A provider can remove its child from the host view before its cancellation
+    // promise settles. Every other retained owner must still fence this close,
+    // even when another root has visible children that did drain successfully.
+    await this.lifecycle.settle(this.roster.pendingDrains().filter(drain => !alreadyBounded.has(drain)), failures)
     if (failures.length > 0) throw new AggregateError(failures, 'Agent Teams runtime disposal failed')
   }
 }

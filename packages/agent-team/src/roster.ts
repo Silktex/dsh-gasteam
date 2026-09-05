@@ -64,6 +64,8 @@ export class TeamRoster {
   private readonly inFlightCreations = new Set<Promise<unknown>>()
   private readonly waking = new Set<SessionId>()
   private readonly provisioningIds = new Set<SessionId>()
+  /** Timed-out provider drains remain owned per Lead until every covered child settles. */
+  private readonly draining = new Map<SessionId, { readonly ids: readonly SessionId[]; readonly operation: Promise<void> }[]>()
 
   /**
    * @param ctx - Team service context with Agent, Session, persistence, and subagent services.
@@ -283,13 +285,45 @@ export class TeamRoster {
     return teams
   }
 
+  /** Return every provider drain retained after an earlier timeout. */
+  pendingDrains(): readonly Promise<unknown>[] {
+    return [...this.draining.values()].flatMap(entries => entries.map(entry => entry.operation))
+  }
+
+  /** Return retained drains that cover one exact observed child set. */
+  pendingDrainsFor(root: Agent, childIds: readonly SessionId[]): readonly Promise<unknown>[] {
+    const ids = new Set(childIds)
+    return (this.draining.get(root.id) ?? [])
+      .filter(entry => entry.ids.some(id => ids.has(id)))
+      .map(entry => entry.operation)
+  }
+
   /**
    * Release exact teammate Activations through the continuation lifecycle owner.
    * @param root - exact live Team Lead authorizing release.
    * @param childIds - selected roster child ids.
    */
   async stopTeammates(root: Agent, childIds: readonly SessionId[]): Promise<void> {
-    await this.lifecycle.withTimeout(this.ctx.subagents.drainContinuableChildren(root, childIds))
+    const ids = [...new Set(childIds)].sort()
+    const current = this.draining.get(root.id) ?? []
+    const overlapping = current.filter(entry => entry.ids.some(id => ids.includes(id)))
+    const covered = new Set(overlapping.flatMap(entry => entry.ids))
+    const missing = ids.filter(id => !covered.has(id))
+    if (missing.length) {
+      const entry = { ids: missing, operation: Promise.resolve().then(async () => { await this.ctx.subagents.drainContinuableChildren(root, missing) }) }
+      const next = [...current, entry]
+      this.draining.set(root.id, next)
+      const forget = (): void => {
+        const active = this.draining.get(root.id)
+        if (active === undefined) return
+        const remaining = active.filter(candidate => candidate !== entry)
+        if (remaining.length) this.draining.set(root.id, remaining)
+        else this.draining.delete(root.id)
+      }
+      void entry.operation.then(forget, forget)
+      overlapping.push(entry)
+    }
+    await this.lifecycle.withTimeout(Promise.all(overlapping.map(entry => entry.operation)))
   }
 
   /** Perform one creation admitted before the Team runtime disposal cutoff. */
