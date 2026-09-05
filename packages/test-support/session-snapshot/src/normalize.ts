@@ -93,6 +93,8 @@ export interface NormalizeContext {
   cwd: string
   /** Other filesystem spellings of the same cwd (for example Windows short and long paths). */
   cwdAliases?: readonly string[]
+  /** Explicit test-owned external roots and distinct stable tokens; never cwd aliases. */
+  externalRoots?: readonly { readonly path: string; readonly token: string }[]
 }
 
 /** How cwd-rooted path separators are represented after the cwd is tokenized. */
@@ -155,6 +157,11 @@ function replaceCwdSpelling(value: string, spelling: string, replacement: string
 /** Replace every known cwd spelling with one stable token. */
 function replaceCwd(value: string, ctx: NormalizeContext, replacement: string): string {
   let out = value
+  for (const root of [...ctx.externalRoots ?? []].sort((left, right) => right.path.length - left.path.length)) {
+    for (const spelling of cwdSpellings({ sessionIds: [], cwd: root.path })) {
+      out = replaceCwdSpelling(out, spelling, root.token)
+    }
+  }
   for (const spelling of cwdSpellings(ctx)) out = replaceCwdSpelling(out, spelling, replacement)
   return out
 }
@@ -266,19 +273,20 @@ function tokenizeFixtureValue(
  * path.
  *
  * @param rawLog The raw or refresh-stabilized session JSONL fixture.
+ * @param context - shared run roots when child Sessions use distinct workspace directories.
  * @returns Compact JSONL whose known cwd spellings become `{{cwd}}`.
  * @throws If a non-empty line is invalid JSON or the session cwd has no basename.
  */
-export function tokenizeSessionFixtureCwd(rawLog: string): string {
+export function tokenizeSessionFixtureCwd(rawLog: string, context?: NormalizeContext): string {
   const lines = rawLog.split('\n')
   const firstLine = lines.find(line => line.trim().length > 0)
   const header = firstLine === undefined ? undefined : JSON.parse(firstLine) as { cwd?: unknown }
-  const cwd = typeof header?.cwd === 'string' ? header.cwd : ''
+  const cwd = context?.cwd ?? (typeof header?.cwd === 'string' ? header.cwd : '')
   const basename = cwd.split(/[\\/]/).at(-1)
   if (basename === undefined || basename.length === 0) {
     throw new Error('acp-snapshot: cannot tokenize a cwd without a basename')
   }
-  const ctx: NormalizeContext = { sessionIds: [], cwd }
+  const ctx: NormalizeContext = context ?? { sessionIds: [], cwd }
   return lines.map((line) => {
     if (line.trim().length === 0) return line
     return JSON.stringify(tokenizeFixtureValue(JSON.parse(line), ctx, basename))

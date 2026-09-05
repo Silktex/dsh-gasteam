@@ -112,6 +112,19 @@ describe('normalizeStdout', () => {
     })
   })
 
+  it('preserves separate external workspaces and leaves undeclared sibling prefixes intact', () => {
+    const roots: NormalizeContext = {
+      sessionIds: [], cwd: '/tmp/run',
+      externalRoots: [{ path: '/tmp/run-workers', token: '{{worktrees}}' }],
+    }
+    const raw = JSON.stringify({ cwd: '/tmp/run', worker: '/tmp/run-workers/worker-a', unrelated: '/tmp/run-workers-backup/file' })
+    expect(JSON.parse(normalizeStdout(raw, roots))).toEqual({
+      cwd: '{{cwd}}', worker: '{{worktrees}}/worker-a', unrelated: '/tmp/run-workers-backup/file',
+    })
+    const child = JSON.stringify({ type: 'session', cwd: '/tmp/run-workers/worker-a' }) + '\n'
+    expect(JSON.parse(tokenizeSessionFixtureCwd(child, roots))).toMatchObject({ cwd: '{{worktrees}}/worker-a' })
+  })
+
   it('scrubs every filesystem spelling of the cwd longest-first', () => {
     const longCwd = String.raw`C:\Users\runneradmin\AppData\Local\Temp\acp-snapshot`
     const aliasedCtx: NormalizeContext = {

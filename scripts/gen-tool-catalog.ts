@@ -534,7 +534,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     dir: 'tool-agent-team',
     source: 'packages/experimental/tool-agent-team/src/index.ts',
     requires: ['ctx.tools', 'ctx.systemPrompt', 'ctx.agentTeams', 'an exact live Team member Agent'],
-    writes: ['tool/call', 'team/member', 'team/message/queued', 'team/message/delivered', 'team/task', 'tool/result'],
+    writes: ['tool/call', 'team/member', 'team/worktree', 'team/integration', 'team/batch', 'team/message/queued', 'team/message/delivered', 'team/task', 'tool/result'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
       await ctx.plugin(SessionStore)
@@ -547,6 +547,8 @@ const TOOL_PACKAGES: ToolPackage[] = [
         name: 'lead',
       }
       ctx.provide('agentTeams', {
+        workspaceMode: 'worktree',
+        integrationEnabled: true,
         tryMembership: (candidate: Agent) => candidate === agent ? membership : undefined,
         membership: () => membership,
       } as unknown as TeamService)
@@ -565,7 +567,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     scope: ctx => catalogChildScopes.get(ctx) as Agent,
     note:
-      'All ten tools are scoped to implicit Team Leads and durable teammates. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names.',
+      'Tools are scoped to implicit Team Leads and durable teammates. This catalog includes the optional worktree-release and integration tools; deployments enable them with the corresponding Team provider configuration. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-todo',

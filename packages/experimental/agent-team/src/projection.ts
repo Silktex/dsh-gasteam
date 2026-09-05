@@ -1,6 +1,8 @@
 /** Host-only Team state projected incrementally from committed Session events. */
 
 import { z } from 'zod'
+import { isAbsolute } from 'node:path'
+import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionEventMap, SessionId } from '@deepseek-ai/dsh-session'
@@ -11,12 +13,20 @@ import type {
   TeamMessageId,
   TeamMessageSnapshot,
   TeamTaskSnapshot,
+  TeamWorktreeSnapshot,
+  TeamBatchSnapshot,
+  TeamRecoverySnapshot,
+  TeamIntegrationSnapshot,
+  TeamBatchId,
+  TeamBranchName,
+  TeamCommitId,
 } from './types.ts'
 import {
   TeamId as toTeamId,
   TeamMessageId as toTeamMessageId,
   TeamTaskId as toTeamTaskId,
 } from './types.ts'
+import { integrationSchema, assertIntegrationTransition } from './integration-projection.ts'
 import { assertTaskGraphCandidate } from './task-graph.ts'
 
 const nonNegativeSafeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
@@ -83,7 +93,52 @@ const teamTaskSnapshotSchema = z.object({
   ownerId: sessionIdSchema.optional(),
   blockedBy: z.array(teamTaskIdSchema),
   writeScopes: z.array(z.string()),
+  result: z.string().min(1).refine(value => value.trim().length > 0).optional(),
 }).strict() as z.ZodType<TeamTaskSnapshot>
+
+const teamRecoverySnapshotSchema = z.object({
+  memberId: sessionIdSchema,
+  attempt: positiveSafeInteger,
+  observedEventCount: z.number().int().min(-1).max(Number.MAX_SAFE_INTEGER),
+  reason: z.string().min(1),
+}).strict() as z.ZodType<TeamRecoverySnapshot>
+
+const teamIntegrationEventSchema = z.object({
+  version: z.literal(1), teamId: teamIdSchema, integration: integrationSchema,
+}).strict() as z.ZodType<SessionEventMap['team/integration']>
+
+const teamRecoveryEventSchema = z.object({
+  version: z.literal(1), teamId: teamIdSchema, recovery: teamRecoverySnapshotSchema,
+}).strict() as z.ZodType<SessionEventMap['team/recovery']>
+
+const teamBatchSnapshotSchema = z.object({
+  id: z.string().min(1).transform(value => brandString<TeamBatchId>(value)),
+  revision: positiveSafeInteger,
+  name: z.string().min(1),
+  description: z.string().min(1),
+  taskIds: z.array(teamTaskIdSchema),
+  archived: z.boolean(),
+}).strict() as z.ZodType<TeamBatchSnapshot>
+
+const teamBatchEventSchema = z.object({
+  version: z.literal(1), teamId: teamIdSchema, batch: teamBatchSnapshotSchema,
+}).strict() as z.ZodType<SessionEventMap['team/batch']>
+
+const teamWorktreeSnapshotSchema = z.object({
+  memberId: sessionIdSchema,
+  provider: z.string().min(1),
+  repository: z.string().refine(isAbsolute),
+  cwd: z.string().refine(isAbsolute),
+  branch: z.string().min(1).transform(value => brandString<TeamBranchName>(value)),
+  baseCommit: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u).transform(value => brandString<TeamCommitId>(value)),
+  phase: z.enum(['reserved', 'ready', 'released']),
+}).strict() as z.ZodType<TeamWorktreeSnapshot>
+
+const teamWorktreeEventSchema = z.object({
+  version: z.literal(1),
+  teamId: teamIdSchema,
+  worktree: teamWorktreeSnapshotSchema,
+}).strict() as z.ZodType<SessionEventMap['team/worktree']>
 
 const teamMessageSnapshotSchema = z.object({
   id: teamMessageIdSchema,
@@ -129,6 +184,11 @@ export interface TeamState {
   readonly id: TeamId
   readonly members: TeamMemberSnapshot[]
   readonly tasks: TeamTaskSnapshot[]
+  readonly worktrees: TeamWorktreeSnapshot[]
+  readonly batches: TeamBatchSnapshot[]
+  readonly integrations: TeamIntegrationSnapshot[]
+  readonly recoveries: TeamRecoverySnapshot[]
+  nextBatchNumber: number
   readonly messages: TeamMessageSnapshot[]
   readonly delivered: TeamMessageId[]
   nextTaskNumber: number
@@ -144,6 +204,11 @@ export function emptyTeamState(rootId: SessionId): TeamProjectionState {
     id: toTeamId(rootId),
     members: [],
     tasks: [],
+    worktrees: [],
+    batches: [],
+    recoveries: [],
+    integrations: [],
+    nextBatchNumber: 1,
     messages: [],
     delivered: [],
     nextTaskNumber: 1,
@@ -165,6 +230,11 @@ const teamProjectionEntrySchema = z.object({
   id: teamIdSchema,
   members: z.array(teamMemberSnapshotSchema),
   tasks: z.array(teamTaskSnapshotSchema),
+  worktrees: z.array(teamWorktreeSnapshotSchema),
+  batches: z.array(teamBatchSnapshotSchema),
+  integrations: z.array(integrationSchema),
+  recoveries: z.array(teamRecoverySnapshotSchema),
+  nextBatchNumber: positiveSafeInteger,
   messages: z.array(teamMessageSnapshotSchema),
   delivered: z.array(teamMessageIdSchema),
   nextTaskNumber: positiveSafeInteger,
@@ -175,6 +245,10 @@ const teamProjectionEntrySchema = z.object({
 export type TeamEventType =
   | 'team/member'
   | 'team/task'
+  | 'team/worktree'
+  | 'team/batch'
+  | 'team/recovery'
+  | 'team/integration'
   | 'team/message/queued'
   | 'team/message/delivered'
 
@@ -189,6 +263,10 @@ type TeamSessionEvent = SessionEvent<TeamEventType>
 export function isTeamEvent(event: SessionEvent): event is TeamSessionEvent {
   return event.type === 'team/member'
     || event.type === 'team/task'
+    || event.type === 'team/worktree'
+    || event.type === 'team/batch'
+    || event.type === 'team/recovery'
+    || event.type === 'team/integration'
     || event.type === 'team/message/queued'
     || event.type === 'team/message/delivered'
 }
@@ -207,6 +285,14 @@ function parseCurrentTeamEvent(event: TeamSessionEvent): TeamSessionEvent {
   switch (event.type) {
     case 'team/member':
       return { ...event, data: parsePersisted(event.type, teamMemberEventSchema, event.data) }
+    case 'team/integration':
+      return { ...event, data: parsePersisted(event.type, teamIntegrationEventSchema, event.data) }
+    case 'team/recovery':
+      return { ...event, data: parsePersisted(event.type, teamRecoveryEventSchema, event.data) }
+    case 'team/batch':
+      return { ...event, data: parsePersisted(event.type, teamBatchEventSchema, event.data) }
+    case 'team/worktree':
+      return { ...event, data: parsePersisted(event.type, teamWorktreeEventSchema, event.data) }
     case 'team/task':
       return { ...event, data: parsePersisted(event.type, teamTaskEventSchema, event.data) }
     case 'team/message/queued':
@@ -215,7 +301,7 @@ function parseCurrentTeamEvent(event: TeamSessionEvent): TeamSessionEvent {
       return { ...event, data: parsePersisted(event.type, teamMessageDeliveredEventSchema, event.data) }
     /* v8 ignore next 2 -- TeamEventType is closed and every member is handled above. */
     default:
-      return event
+      return assertNever(event)
   }
 }
 
@@ -259,6 +345,78 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       else state.members[index] = member
       break
     }
+    case 'team/integration': {
+      const integration = event.data.integration
+      const index = state.integrations.findIndex(candidate => candidate.id === integration.id)
+      if (!state.worktrees.some(worktree => worktree.memberId === integration.memberId
+        && worktree.repository === integration.repository && worktree.branch === integration.sourceBranch)) {
+        throw new Error('Team integration has no matching worker workspace')
+      }
+      if (index < 0 && state.integrations.some(candidate => candidate.cwd === integration.cwd)) {
+        throw new Error('Team integration candidate directory is already owned')
+      }
+      assertIntegrationTransition(state.integrations[index], integration)
+      if (index < 0) state.integrations.push(integration)
+      else state.integrations[index] = integration
+      break
+    }
+    case 'team/recovery': {
+      const recovery = event.data.recovery
+      const index = state.recoveries.findIndex(candidate => candidate.memberId === recovery.memberId)
+      if (!state.members.some(member => member.id === recovery.memberId && member.phase === 'active')
+        || recovery.attempt !== (state.recoveries[index]?.attempt ?? 0) + 1) {
+        throw new Error('invalid Team recovery owner or attempt sequence')
+      }
+      if (index < 0) state.recoveries.push(recovery)
+      else state.recoveries[index] = recovery
+      break
+    }
+    case 'team/batch': {
+      const batch = event.data.batch
+      const index = state.batches.findIndex(candidate => candidate.id === batch.id)
+      const prior = state.batches[index]
+      if (prior === undefined ? batch.revision !== 1 || batch.archived : prior.archived || batch.revision !== prior.revision + 1) {
+        throw new Error('invalid Team batch revision or archive transition')
+      }
+      if (new Set(batch.taskIds).size !== batch.taskIds.length
+        || batch.taskIds.some(id => !state.tasks.some(task => task.id === id && task.status !== 'deleted'))) {
+        throw new Error('Team batch contains duplicate, missing, or deleted tasks')
+      }
+      const match = /^batch-(\d+)$/u.exec(batch.id)
+      if (match !== null) {
+        const number = Number(match[1])
+        if (!Number.isSafeInteger(number)) throw new Error('Team batch id exceeds safe integer range')
+        state.nextBatchNumber = Math.max(state.nextBatchNumber, Math.min(number + 1, Number.MAX_SAFE_INTEGER))
+      }
+      if (index < 0) state.batches.push(batch)
+      else state.batches[index] = batch
+      break
+    }
+    case 'team/worktree': {
+      const worktree = event.data.worktree
+      const index = state.worktrees.findIndex(candidate => candidate.memberId === worktree.memberId)
+      const prior = state.worktrees[index]
+      if (!state.members.some(member => member.id === worktree.memberId)) {
+        throw new Error(`worktree owner "${worktree.memberId}" is not a Team member`)
+      }
+      if (prior === undefined) {
+        if (worktree.phase !== 'reserved') throw new Error('Team worktree must begin reserved')
+        if (state.worktrees.some(candidate => candidate.cwd === worktree.cwd
+          || candidate.repository === worktree.repository && candidate.branch === worktree.branch)) {
+          throw new Error('Team worktree path or branch is already owned')
+        }
+      } else {
+        if (prior.provider !== worktree.provider || prior.repository !== worktree.repository
+          || prior.cwd !== worktree.cwd || prior.branch !== worktree.branch || prior.baseCommit !== worktree.baseCommit) {
+          throw new Error('Team worktree changed immutable creation inputs')
+        }
+        if (prior.phase === 'released' || worktree.phase === 'reserved'
+          || prior.phase === worktree.phase) throw new Error('invalid Team worktree transition')
+      }
+      if (index < 0) state.worktrees.push(worktree)
+      else state.worktrees[index] = worktree
+      break
+    }
     case 'team/task': {
       const task = event.data.task
       const index = state.tasks.findIndex(candidate => candidate.id === task.id)
@@ -268,6 +426,15 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       }
       if (prior !== undefined && task.revision !== prior.revision + 1) {
         throw new Error(`team task "${task.id}" revision is not contiguous`)
+      }
+      if (task.status === 'completed' && task.result === undefined) {
+        throw new Error(`completed team task "${task.id}" has no result evidence`)
+      }
+      if (task.status !== 'completed' && task.result !== undefined) {
+        throw new Error(`non-completed team task "${task.id}" retains result evidence`)
+      }
+      if (task.status === 'deleted' && state.batches.some(batch => !batch.archived && batch.taskIds.includes(task.id))) {
+        throw new Error('deleted task belongs to an active Team batch')
       }
       assertTaskGraphCandidate(state.tasks, task)
       const match = numericTaskIdPattern.exec(task.id)
@@ -300,14 +467,14 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
     }
     /* v8 ignore next 2 -- TeamEventType is closed and every member is handled above. */
     default:
-      return
+      assertNever(event)
   }
 }
 
 /** Host-only Team projection selected by the projected Session identity. */
 export const teamProjectionDefinition = {
   key: 'agentTeam',
-  stateVersion: 2,
+  stateVersion: 3,
   stateSchema: teamProjectionEntrySchema,
   init: header => emptyTeamState(header.id),
   apply: (state, event) => {

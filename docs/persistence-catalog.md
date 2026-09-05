@@ -770,6 +770,32 @@ Source: [`packages/subagent/tool-subagent/src/model-selection-state.ts:17`](../p
 
 ### `team/*`
 
+<a id="teambatch--log-only"></a>
+
+#### `team/batch` — log-only
+
+```ts persistence-catalog
+/** Whole task-batch membership and archive state, retained across Lead restarts. */
+'team/batch': { version: 1; teamId: TeamId; batch: TeamBatchSnapshot }
+```
+
+Types: [TeamBatchSnapshot](subsystems/agent-team.md) · [TeamId](subsystems/agent-team.md)
+
+Source: [`packages/experimental/agent-team/src/types.ts:425`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamintegration--log-only"></a>
+
+#### `team/integration` — log-only
+
+```ts persistence-catalog
+/** Whole pinned integration request and its durable execution phase. */
+'team/integration': { version: 1; teamId: TeamId; integration: TeamIntegrationSnapshot }
+```
+
+Types: [TeamId](subsystems/agent-team.md) · [TeamIntegrationSnapshot](subsystems/agent-team.md)
+
+Source: [`packages/experimental/agent-team/src/types.ts:419`](../packages/experimental/agent-team/src/types.ts)
+
 <a id="teammember--log-only"></a>
 
 #### `team/member` — log-only
@@ -781,7 +807,7 @@ Source: [`packages/subagent/tool-subagent/src/model-selection-state.ts:17`](../p
 
 Types: [TeamId](subsystems/agent-team.md) · [TeamMemberSnapshot](subsystems/agent-team.md)
 
-Source: [`packages/experimental/agent-team/src/types.ts:223`](../packages/experimental/agent-team/src/types.ts)
+Source: [`packages/experimental/agent-team/src/types.ts:421`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagedelivered--log-only"></a>
 
@@ -799,7 +825,7 @@ Source: [`packages/experimental/agent-team/src/types.ts:223`](../packages/experi
 
 Types: [TeamId](subsystems/agent-team.md) · [TeamMessageId](subsystems/agent-team.md)
 
-Source: [`packages/experimental/agent-team/src/types.ts:229`](../packages/experimental/agent-team/src/types.ts)
+Source: [`packages/experimental/agent-team/src/types.ts:433`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagequeued--log-only"></a>
 
@@ -812,7 +838,20 @@ Source: [`packages/experimental/agent-team/src/types.ts:229`](../packages/experi
 
 Types: [TeamId](subsystems/agent-team.md) · [TeamMessageSnapshot](subsystems/agent-team.md)
 
-Source: [`packages/experimental/agent-team/src/types.ts:227`](../packages/experimental/agent-team/src/types.ts)
+Source: [`packages/experimental/agent-team/src/types.ts:431`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamrecovery--log-only"></a>
+
+#### `team/recovery` — log-only
+
+```ts persistence-catalog
+/** Recovery admission recorded before interrupting or waking a worker. */
+'team/recovery': { version: 1; teamId: TeamId; recovery: TeamRecoverySnapshot }
+```
+
+Types: [TeamId](subsystems/agent-team.md) · [TeamRecoverySnapshot](subsystems/agent-team.md)
+
+Source: [`packages/experimental/agent-team/src/types.ts:423`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teamtask--log-only"></a>
 
@@ -825,7 +864,20 @@ Source: [`packages/experimental/agent-team/src/types.ts:227`](../packages/experi
 
 Types: [TeamId](subsystems/agent-team.md) · [TeamTaskSnapshot](subsystems/agent-team.md)
 
-Source: [`packages/experimental/agent-team/src/types.ts:225`](../packages/experimental/agent-team/src/types.ts)
+Source: [`packages/experimental/agent-team/src/types.ts:429`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamworktree--log-only"></a>
+
+#### `team/worktree` — log-only
+
+```ts persistence-catalog
+/** Whole worker-worktree ownership value, recorded before Git mutations. */
+'team/worktree': { version: 1; teamId: TeamId; worktree: TeamWorktreeSnapshot }
+```
+
+Types: [TeamId](subsystems/agent-team.md) · [TeamWorktreeSnapshot](subsystems/agent-team.md)
+
+Source: [`packages/experimental/agent-team/src/types.ts:427`](../packages/experimental/agent-team/src/types.ts)
 
 ### `todo/*`
 

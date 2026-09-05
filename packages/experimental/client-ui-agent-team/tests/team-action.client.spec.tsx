@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
   TeamTaskId, TeamTaskView as TeamTask, TeamView,
@@ -32,6 +32,7 @@ const task: TeamTask = {
   writeScopeWarnings: ['write scopes overlap with task-2'],
 }
 const view: TeamView = {
+  batches: [], integrations: [],
   members: [
     { id: SESSION, name: 'lead', role: 'lead', status: 'idle', model: 'model-a', diagnostics: [] },
     {
@@ -89,6 +90,14 @@ function actions(overrides: Partial<TeamActionInjected> = {}): TeamActionInjecte
   }
 }
 
+function completeTask(evidence = 'Changed runtime; focused tests passed.', index = 0): void {
+  const buttons = screen.getAllByRole('button', { name: /完成/u })
+  fireEvent.click(buttons[index]!)
+  fireEvent.change(screen.getByRole('textbox', { name: /完成依据/u }), { target: { value: evidence } })
+  const completionDialog = screen.getByRole('dialog', { name: /完成依据/u })
+  fireEvent.click(within(completionDialog).getByRole('button', { name: zh.complete }))
+}
+
 describe('TeamAction', () => {
   it('ignores a stale Team load after the conversation switches sessions', async () => {
     const nextSession = 'next-lead' as SessionId
@@ -116,6 +125,19 @@ describe('TeamAction', () => {
       expect(screen.getByText('Next session task')).toBeTruthy()
       expect(screen.queryByText('Implement runtime')).toBeNull()
     })
+  })
+
+  it('shows persisted batch progress and recovery attempts in the Team panel', async () => {
+    const loaded: TeamView = {
+      ...view,
+      members: view.members.map(member => ({ ...member, recoveryAttempts: 2 })),
+      batches: [{ id: 'batch-1' as TeamView['batches'][number]['id'], revision: 1, name: 'Delivery batch', description: 'Ship the change', taskIds: [task.id], archived: false, completedTasks: 0, status: 'active' }],
+    }
+    render(<TeamAction {...props(actions({ load: vi.fn().mockResolvedValue({ ok: true, value: loaded }) }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    expect(await screen.findByText('Delivery batch')).toBeTruthy()
+    expect(screen.getByText(`${zh['batch.active']} · 0/1`)).toBeTruthy()
+    expect(screen.getAllByText(`${zh.recoveries}: 2`)).toHaveLength(view.members.length)
   })
 
   it('loads roster/task diagnostics on open and navigates a healthy teammate', async () => {
@@ -170,7 +192,7 @@ describe('TeamAction', () => {
     await screen.findByText('Implement runtime')
 
     fireEvent.click(screen.getByRole('button', { name: zh.refresh }))
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     expect(await screen.findByRole('button', { name: /重开/u })).toBeTruthy()
 
     stale.resolve({ ok: true, value: view })
@@ -217,7 +239,7 @@ describe('TeamAction', () => {
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
     fireEvent.click(screen.getByRole('button', { name: zh.refresh }))
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     expect(await screen.findByText('task rejected (team-rejected)')).toBeTruthy()
     staleTask.resolve({ ok: true, value: view })
     await Promise.resolve()
@@ -266,7 +288,7 @@ describe('TeamAction', () => {
 
     const complete = screen.getByRole<HTMLButtonElement>('button', { name: /完成/u })
     expect(complete.disabled).toBe(false)
-    fireEvent.click(complete)
+    completeTask('Done')
     expect(await screen.findByRole('button', { name: /重开/u })).toBeTruthy()
     expect(save.disabled).toBe(true)
     fireEvent.click(save)
@@ -298,7 +320,7 @@ describe('TeamAction', () => {
     }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('old warning')
-    fireEvent.click(screen.getAllByRole('button', { name: /完成/u })[0]!)
+    completeTask('Done')
 
     expect(await screen.findByText('derived warning refreshed')).toBeTruthy()
     expect(screen.queryByText('old warning')).toBeNull()
@@ -348,17 +370,22 @@ describe('TeamAction', () => {
             revision,
             subject: input.subject ?? current.subject,
             description: input.description ?? current.description,
-            writeScopes: input.writeScopes ?? current.writeScopes,
+            writeScopes: [...input.writeScopes ?? current.writeScopes],
           }
           break
         case 'set_dependencies':
-          current = { ...current, revision, blockedBy: input.blockedBy ?? [] }
+          current = { ...current, revision, blockedBy: [...input.blockedBy ?? []] }
           break
         case 'complete':
-          current = { ...current, revision, status: 'completed' }
+          current = {
+            ...current,
+            revision,
+            status: 'completed',
+            ...input.result === undefined ? {} : { result: input.result },
+          }
           break
         case 'reopen': {
-          const { ownerName: _ownerName, ...unowned } = current
+          const { ownerName: _ownerName, result: _result, ...unowned } = current
           current = { ...unowned, revision, status: 'pending', ready: true }
           break
         }
@@ -398,7 +425,8 @@ describe('TeamAction', () => {
       writeScopes: ['src/runtime'],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Changed runtime; focused tests passed.')
+    expect(await screen.findByText(/Changed runtime; focused tests passed./u)).toBeTruthy()
     fireEvent.click(await screen.findByRole('button', { name: /重开/u }))
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /重开/u })).toBeNull()
@@ -421,15 +449,44 @@ describe('TeamAction', () => {
   it('reloads and warns instead of retrying a stale task mutation', async () => {
     const load = vi.fn()
       .mockResolvedValueOnce({ ok: true, value: view })
-      .mockResolvedValueOnce({ ok: true, value: { ...view, tasks: [{ ...task, revision: 2 }] } })
+      .mockResolvedValue({ ok: true, value: { ...view, tasks: [{ ...task, revision: 2 }] } })
     const updateTask = vi.fn(() => Promise.resolve(taskConflict('stale')))
     render(<TeamAction {...props(actions({ load, updateTask }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     expect(await screen.findByText(zh.conflict)).toBeTruthy()
     expect(load).toHaveBeenCalledTimes(2)
     expect(updateTask).toHaveBeenCalledTimes(1)
+    const dialog = screen.getByRole('dialog', { name: zh.completionEvidence })
+    expect(within(dialog).getByRole('textbox')).toHaveProperty('value', 'Done')
+    fireEvent.click(within(dialog).getByRole('button', { name: zh.complete }))
+    await waitFor(() => { expect(updateTask).toHaveBeenCalledTimes(2) })
+    expect(updateTask).toHaveBeenLastCalledWith(SESSION, {
+      taskId: TASK_1, expectedRevision: 2, action: 'complete', result: 'Done',
+    })
+    await waitFor(() => {
+      expect(within(dialog).getByRole('button', { name: zh.complete })).toHaveProperty('disabled', false)
+    })
+  })
+
+  it('preserves a newer completion draft when an earlier completion settles', async () => {
+    const pending = Promise.withResolvers<TeamTaskActionResult>()
+    const tasks = [task, { ...task, id: TASK_2, subject: 'Second task' }]
+    const load = () => Promise.resolve({ ok: true as const, value: { ...view, tasks } })
+    render(<TeamAction {...props(actions({ load, updateTask: () => pending.promise }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    await screen.findByText('Implement runtime')
+    completeTask('First result')
+    fireEvent.click(screen.getAllByRole('button', { name: /完成/u })[1]!)
+    fireEvent.change(screen.getByRole('textbox', { name: zh.completionEvidence }), {
+      target: { value: 'Second result' },
+    })
+    pending.resolve(taskSuccess({ ...task, revision: 2, status: 'completed', result: 'First result' }))
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /完成/u })[0]).toHaveProperty('disabled', false)
+    })
+    expect(screen.getByRole('textbox', { name: zh.completionEvidence })).toHaveProperty('value', 'Second result')
   })
 
   it('keeps reload failures visible after task and dependency conflicts', async () => {
@@ -442,7 +499,7 @@ describe('TeamAction', () => {
     }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     expect(await screen.findByText('task reload failed (gateway/internal)')).toBeTruthy()
     expect(screen.queryByText(zh.conflict)).toBeNull()
     first.unmount()
@@ -554,7 +611,7 @@ describe('TeamAction', () => {
     const rendered = render(<TeamAction {...props(actions({ updateTask: () => pending.promise }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     rendered.rerender(<TeamAction {...props(actions(), 'next-session' as SessionId)} />)
     pending.resolve(taskSuccess({ ...task, revision: 2, status: 'completed' }))
     await Promise.resolve()
@@ -566,7 +623,7 @@ describe('TeamAction', () => {
     }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     expect(await screen.findByText('update failed (team-rejected)')).toBeTruthy()
   })
 
@@ -581,7 +638,7 @@ describe('TeamAction', () => {
     }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     await waitFor(() => { expect(load).toHaveBeenCalledTimes(2) })
 
     rendered.rerender(<TeamAction {...props(actions(), 'next-session' as SessionId)} />)
@@ -602,7 +659,7 @@ describe('TeamAction', () => {
     }))} />)
     fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
     await screen.findByText('Implement runtime')
-    fireEvent.click(screen.getByRole('button', { name: /完成/u }))
+    completeTask('Done')
     await waitFor(() => { expect(load).toHaveBeenCalledTimes(2) })
 
     rendered.rerender(<TeamAction {...props(actions(), 'next-session' as SessionId)} />)

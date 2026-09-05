@@ -121,6 +121,8 @@ export interface ContinuableStartSpec {
    * before child materialization without a second identity handshake.
    */
   readonly childId?: SessionId
+  /** Absolute workspace directory persisted at creation; omission inherits the parent's cwd. */
+  readonly cwd?: string
   /**
    * The delegation request. The manager reserves the stable child id, resolves
    * the durable descriptor, and composes the child itself.
@@ -463,7 +465,14 @@ export class SubagentContinuationManager {
         childId,
         provider: spec.provider,
         parent,
-        create: { seed, meta: childSessionMeta(parent, childDepth, lineageSeedLength), delegatedPolicies },
+        create: {
+          seed,
+          meta: {
+            ...childSessionMeta(parent, childDepth, lineageSeedLength),
+            ...spec.cwd === undefined ? {} : { cwd: spec.cwd },
+          },
+          delegatedPolicies,
+        },
         agentOptions,
         composition: { persona: request.persona, toolFilter: request.toolFilter },
         signal: spec.signal,

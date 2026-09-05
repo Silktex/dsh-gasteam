@@ -14,6 +14,10 @@ import { teamProjectionDefinition } from './projection.ts'
 import { TeamRoster } from './roster.ts'
 import type { TeamMembership } from './roster.ts'
 import { TeamTaskBoard } from './task-board.ts'
+import { TeamWorktrees } from './worktrees.ts'
+import { TeamBatches } from './batches.ts'
+import { TeamIntegrations } from './integrations.ts'
+import { TeamRecovery } from './recovery.ts'
 import { TeamId, TeamTaskId } from './types.ts'
 import type {
   Config,
@@ -23,6 +27,15 @@ import type {
   SpawnTeammateRequest,
   SpawnTeammateResult,
   TeamMemberView,
+  TeamWorktreeProvider,
+  TeamBatchView,
+  TeamIntegrationId,
+  TeamIntegrationProvider,
+  TeamIntegrationSnapshot,
+  TeamRecoverySnapshot,
+  RecoverTeammateRequest,
+  CreateTeamBatchRequest,
+  UpdateTeamBatchRequest,
   TeamTaskMutationResult,
   TeamTaskView,
   TeamView,
@@ -32,7 +45,7 @@ import type {
 
 export type * from './types.ts'
 export type { TeamMembership } from './roster.ts'
-export { TeamId, TeamMessageId, TeamTaskId } from './types.ts'
+export { TeamId, TeamMessageId, TeamTaskId, TeamBatchId } from './types.ts'
 export { TeamError } from './error.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -43,6 +56,10 @@ declare module '@deepseek-ai/cordis' {
 
 const DEFAULT_MAX_MEMBERS = 8
 const DEFAULT_MAX_TASKS = 256
+const DEFAULT_MAX_BATCHES = 128
+const DEFAULT_MAX_RECOVERY_ATTEMPTS = 3
+const DEFAULT_MAX_BATCH_TEXT_LENGTH = 16_384
+const DEFAULT_MAX_TASK_RESULT_LENGTH = 16_384
 const DEFAULT_MAX_PENDING_MESSAGES = 64
 const DEFAULT_MAX_MESSAGE_BYTES = 65_536
 const DEFAULT_DISPOSAL_TIMEOUT_MS = 5_000
@@ -60,15 +77,22 @@ export class TeamService extends TypertRemoteService {
   static inject = ['agents', 'sessions', 'sessionPersistence', 'sessionProjections', 'subagents']
 
   static Config: z<Config> = z.object({
+    worktreeProvider: z.string(),
+    integrationProvider: z.string(),
+    maxIntegrations: z.number().step(1).min(1).default(32),
     maxMembers: z.number().step(1).min(1).default(DEFAULT_MAX_MEMBERS),
     maxTasks: z.number().step(1).min(1).default(DEFAULT_MAX_TASKS),
+    maxBatches: z.number().step(1).min(1).default(DEFAULT_MAX_BATCHES),
+    maxRecoveryAttempts: z.number().step(1).min(1).default(DEFAULT_MAX_RECOVERY_ATTEMPTS),
+    maxBatchTextLength: z.number().step(1).min(1).default(DEFAULT_MAX_BATCH_TEXT_LENGTH),
+    maxTaskResultLength: z.number().step(1).min(1).default(DEFAULT_MAX_TASK_RESULT_LENGTH),
     maxPendingMessagesPerMember: z.number().step(1).min(1).default(DEFAULT_MAX_PENDING_MESSAGES),
     maxMessageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_MESSAGE_BYTES),
     disposalTimeoutMs: z.number().step(1).min(1).default(DEFAULT_DISPOSAL_TIMEOUT_MS),
   })
 
   /** Validated deployment limits used by every Team operation. */
-  private readonly config: Required<Config>
+  private readonly config: Required<Omit<Config, 'worktreeProvider' | 'integrationProvider'>> & Pick<Config, 'worktreeProvider' | 'integrationProvider'>
 
   private readonly activity: TeamActivity
   private readonly lifecycle: TeamRuntimeLifecycle
@@ -76,12 +100,28 @@ export class TeamService extends TypertRemoteService {
   private readonly roster: TeamRoster
   private readonly mailbox: TeamMailbox
   private readonly tasks: TeamTaskBoard
+  private readonly worktrees: TeamWorktrees
+  private readonly batches: TeamBatches
+  private readonly integrations: TeamIntegrations
+  private readonly recovery: TeamRecovery
+  private readonly operations = new Set<Promise<unknown>>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'agentTeams')
     this.config = {
+      ...config.integrationProvider === undefined ? {} : { integrationProvider: config.integrationProvider.trim() },
+      maxIntegrations: positiveLimit('maxIntegrations', config.maxIntegrations ?? 32),
+      ...config.worktreeProvider === undefined ? {} : {
+        worktreeProvider: config.worktreeProvider.trim(),
+      },
       maxMembers: positiveLimit('maxMembers', config.maxMembers ?? DEFAULT_MAX_MEMBERS),
       maxTasks: positiveLimit('maxTasks', config.maxTasks ?? DEFAULT_MAX_TASKS),
+      maxBatches: positiveLimit('maxBatches', config.maxBatches ?? DEFAULT_MAX_BATCHES),
+      maxRecoveryAttempts: positiveLimit('maxRecoveryAttempts', config.maxRecoveryAttempts ?? DEFAULT_MAX_RECOVERY_ATTEMPTS),
+      maxBatchTextLength: positiveLimit('maxBatchTextLength', config.maxBatchTextLength ?? DEFAULT_MAX_BATCH_TEXT_LENGTH),
+      maxTaskResultLength: positiveLimit(
+        'maxTaskResultLength', config.maxTaskResultLength ?? DEFAULT_MAX_TASK_RESULT_LENGTH,
+      ),
       maxPendingMessagesPerMember: positiveLimit(
         'maxPendingMessagesPerMember',
         config.maxPendingMessagesPerMember ?? DEFAULT_MAX_PENDING_MESSAGES,
@@ -93,10 +133,16 @@ export class TeamService extends TypertRemoteService {
       ),
     }
 
+    if (this.config.integrationProvider === '') throw new TeamError('integrationProvider must be non-empty', 'TEAM_INVALID_CONFIG')
+    if (this.config.worktreeProvider === '') throw new TeamError('worktreeProvider must be non-empty', 'TEAM_INVALID_CONFIG')
     this.activity = new TeamActivity()
     this.lifecycle = new TeamRuntimeLifecycle(this.config.disposalTimeoutMs)
     this.journal = new TeamJournal(ctx, (root) => { this.activity.notify(TeamId(root.id)) })
-    this.roster = new TeamRoster(ctx, this.journal, this.lifecycle, this.config.maxMembers)
+    this.integrations = new TeamIntegrations(ctx, this.journal, this.config.integrationProvider, this.config.maxIntegrations)
+    this.worktrees = new TeamWorktrees(ctx, this.journal, this.config.worktreeProvider)
+    this.roster = new TeamRoster(
+      ctx, this.journal, this.lifecycle, this.config.maxMembers, this.worktrees, this.config.disposalTimeoutMs,
+    )
     this.mailbox = new TeamMailbox(
       ctx,
       this.journal,
@@ -105,7 +151,9 @@ export class TeamService extends TypertRemoteService {
       this.config.maxPendingMessagesPerMember,
       this.config.maxMessageBytes,
     )
-    this.tasks = new TeamTaskBoard(this.journal, this.config.maxTasks)
+    this.tasks = new TeamTaskBoard(this.journal, this.config.maxTasks, this.config.maxTaskResultLength)
+    this.batches = new TeamBatches(this.journal, this.config.maxBatches, this.config.maxBatchTextLength)
+    this.recovery = new TeamRecovery(ctx, this.journal, this.roster, this.mailbox, this.config.maxRecoveryAttempts)
 
     ctx.on('session/event', (session, event) => { this.mailbox.observeSessionEvent(session, event) })
     ctx.on('agent/session-start', ({ agent }) => { this.scheduleRecovery(agent) })
@@ -152,6 +200,36 @@ export class TeamService extends TypertRemoteService {
    */
   async spawnTeammate(caller: Agent, request: SpawnTeammateRequest): Promise<SpawnTeammateResult> {
     return await this.roster.spawn(caller, request)
+  }
+
+  /** Workspace policy selected for newly created teammates. */
+  get workspaceMode(): 'shared' | 'worktree' {
+    return this.config.worktreeProvider === undefined ? 'shared' : 'worktree'
+  }
+
+  /**
+   * Register a Git-worktree provider in the calling plugin's effect scope.
+   * @param provider - provider for explicitly configured worker isolation.
+   * @returns registration disposer; removal prevents subsequent provider lookups.
+   */
+  registerWorktreeProvider(provider: TeamWorktreeProvider): () => Promise<void> {
+    return this.ctx.effect(() => this.worktrees.register(provider), 'agentTeams.registerWorktreeProvider()')
+  }
+
+  /**
+   * Release a quiescent worker checkout after its commits reach the Lead branch.
+   * @param caller - exact live Lead authorizing removal.
+   * @param target - immutable teammate name, including a failed provision.
+   * @param signal - caller cancellation through safe cleanup.
+   */
+  async releaseWorktree(caller: Agent, target: string, signal: AbortSignal): Promise<void> {
+    const membership = this.roster.membership(caller)
+    if (membership.role !== 'lead') throw new TeamError('only the Team Lead can release worktrees', 'TEAM_LEAD_REQUIRED')
+    const member = this.journal.state(membership.root).members.find(candidate => candidate.name === target)
+    if (member === undefined) throw new TeamError(`teammate "${target}" not found`, 'TEAM_MEMBER_NOT_FOUND')
+    await this.runOperation(signal, async (cancellation) => {
+      await this.worktrees.release(membership.root, member.id, cancellation)
+    })
   }
 
   /**
@@ -203,6 +281,104 @@ export class TeamService extends TypertRemoteService {
     return await this.tasks.update(caller, this.roster.membership(caller), request)
   }
 
+  /** Whether integration tools are enabled by deployment configuration. */
+  get integrationEnabled(): boolean { return this.config.integrationProvider !== undefined }
+
+  /**
+   * Register one integration provider under the mounting plugin effect scope.
+   * @param provider - integration implementation.
+   * @returns scoped registration disposer.
+   */
+  registerIntegrationProvider(provider: TeamIntegrationProvider): () => Promise<void> {
+    return this.ctx.effect(() => this.integrations.register(provider))
+  }
+
+  /**
+   * Queue committed output from a quiescent worker.
+   * @param caller - exact live Lead.
+   * @param target - durable teammate name.
+   * @param signal - caller cancellation.
+   * @returns pinned integration request.
+   */
+  async enqueueIntegration(caller: Agent, target: string, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+    return await this.runOperation(signal, async cancellation =>
+      await this.integrations.enqueue(this.roster.membership(caller), target, cancellation))
+  }
+
+  /**
+   * Run or recover the oldest pending integration.
+   * @param caller - exact live Lead.
+   * @param signal - caller cancellation.
+   * @returns resulting integration record, or undefined for an empty queue.
+   */
+  async runIntegration(caller: Agent, signal: AbortSignal): Promise<TeamIntegrationSnapshot | undefined> {
+    return await this.runOperation(signal, async cancellation => await this.integrations.run(this.roster.membership(caller), cancellation))
+  }
+
+  /**
+   * Abandon a blocked integration while retaining its candidate checkout.
+   * @param caller - exact live Lead.
+   * @param id - unfinished integration identity.
+   * @param reason - durable abandonment explanation.
+   * @param signal - caller cancellation.
+   * @returns failed terminal record.
+   */
+  async abandonIntegration(caller: Agent, id: TeamIntegrationId, reason: string, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+    return await this.runOperation(signal, async (cancellation) => {
+      cancellation.throwIfAborted()
+      return await this.integrations.abandon(this.roster.membership(caller), id, reason)
+    })
+  }
+
+  /**
+   * Read durable integration history.
+   * @param caller - exact live Team member.
+   * @returns detached queue and terminal records.
+   */
+  listIntegrations(caller: Agent): TeamIntegrationSnapshot[] {
+    return this.integrations.list(this.roster.membership(caller))
+  }
+
+  /**
+   * Restart an unchanged worker that still owns unfinished tasks.
+   * @param caller - exact live Lead.
+   * @param request - observed progress and durable recovery instruction.
+   * @param signal - cancellation through interruption and follow-up admission.
+   * @returns admitted attempt, counted even if subsequent delivery fails.
+   */
+  async recoverTeammate(caller: Agent, request: RecoverTeammateRequest, signal: AbortSignal): Promise<TeamRecoverySnapshot> {
+    return await this.runOperation(signal, async cancellation => await this.recovery.recover(caller, request, cancellation))
+  }
+
+  /**
+   * Create a named durable task batch.
+   * @param caller - exact live Lead.
+   * @param request - batch metadata and current task ids.
+   * @returns committed batch with derived progress.
+   */
+  async createBatch(caller: Agent, request: CreateTeamBatchRequest): Promise<TeamBatchView> {
+    return await this.batches.create(this.roster.membership(caller), request)
+  }
+
+  /**
+   * Update or archive a batch using its current revision.
+   * @param caller - exact live Lead.
+   * @param request - compare-and-set mutation.
+   * @returns committed batch with derived progress.
+   */
+  async updateBatch(caller: Agent, request: UpdateTeamBatchRequest): Promise<TeamBatchView> {
+    return await this.batches.update(this.roster.membership(caller), request)
+  }
+
+  /**
+   * Read active and archived durable batches.
+   * @param caller - exact live Team member.
+   * @returns batches with progress derived from the current task board.
+   */
+  listBatches(caller: Agent): TeamBatchView[] {
+    return this.batches.list(this.roster.membership(caller))
+  }
+
   /**
    * Wait for the next Team-domain or member-status change.
    * @param caller - exact live Team member waiting for activity.
@@ -244,6 +420,8 @@ export class TeamService extends TypertRemoteService {
     return {
       members: this.listMembers(agent),
       tasks: this.listTasks(agent),
+      batches: this.listBatches(agent),
+      integrations: this.listIntegrations(agent),
     }
   }
 
@@ -285,6 +463,18 @@ export class TeamService extends TypertRemoteService {
     }
   }
 
+  /** Track external mutations until they settle, including cancellation cleanup. */
+  private async runOperation<T>(signal: AbortSignal, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.lifecycle.disposed) throw new TeamError('Agent Teams service is disposing', 'TEAM_DISPOSED')
+    const pending = operation(AbortSignal.any([signal, this.lifecycle.signal]))
+    this.operations.add(pending)
+    try {
+      return await pending
+    } finally {
+      this.operations.delete(pending)
+    }
+  }
+
   /** Queue one contained recovery pass after publication has unwound. */
   private scheduleRecovery(agent: Agent): void {
     queueMicrotask(() => {
@@ -310,6 +500,7 @@ export class TeamService extends TypertRemoteService {
     const failures: unknown[] = []
     await this.lifecycle.settle(this.roster.pendingCreations(), failures)
     await this.lifecycle.settle(this.mailbox.pendingDispatches(), failures)
+    await this.lifecycle.settle([...this.operations], failures)
     for (const [root, childIds] of this.roster.liveChildrenByRoot()) {
       try {
         await this.roster.stopTeammates(root, childIds)

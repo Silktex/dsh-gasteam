@@ -8,7 +8,7 @@ English | [中文](2026-08-05-agent-teams.zh.md)
 
 The subagent seam supplies fresh/fork providers, durable child Sessions, FIFO follow-ups, and cold-resumable Activations. Its direct-parent controls do not provide peer communication, a stable named roster, or shared task ownership. A coordinator can create several workers, but workers cannot address one another, durable follow-up intent lives only in target inboxes, and no common compare-and-set board prevents stale assignment updates.
 
-All same-process Agents also share one checkout. Filesystem edit tools can reject an observed stale version, but Bash, formatters, generators, and external writers bypass that fence. Treating a teammate name or task owner as a file lock would hide rather than solve this concurrency boundary.
+By default, same-process Agents share one checkout. Filesystem edit tools can reject an observed stale version, but Bash, formatters, generators, and external writers bypass that fence. Treating a teammate name or task owner as a file lock would hide rather than solve this concurrency boundary.
 
 Agent Teams needs an explicit source-checkout composition before its public contracts are stable enough for released CLI or Web bundles. The default tool catalog and simple-task behavior must remain unchanged, while an explicitly requested Team must survive child Activation settlement and mailbox delivery races long enough for the Lead to aggregate the result before process teardown.
 
@@ -34,15 +34,15 @@ Peer communication is a Lead-log mailbox. `team/message/queued` is appended and 
 
 Quiet `send_message` injects, flushes, and acknowledges immediately for a live target without waking it; an inactive target remains queued until another event materializes that teammate. Waking `followup_task` becomes the target's next FIFO turn and may cold-resume it. Success means the message is already durable even when immediate delivery is deferred. The mechanism provides process-local retry and target-Session de-duplication, not a cross-process exactly-once claim.
 
-Shared tasks are complete snapshots with Team-local ids and monotonic revisions. Every mutation carries `expectedRevision`. Any member creates, reads, or claims a ready unowned task; the owner or Lead edits and transitions it, while only the Lead assigns another member. Numeric task ids remain within the safe-integer allocation range, and exhaustion fails without reusing an id. Dependencies must name non-deleted tasks and form a complete DAG. Deleted tasks are retained tombstones. `writeScopes` are normalized path prefixes that produce overlap diagnostics but never block claim or authorize a write.
+Shared tasks are complete snapshots with Team-local ids and monotonic revisions. Every mutation carries `expectedRevision`. Any member creates, reads, or claims a ready unowned task; the owner or Lead edits and transitions it, while only the Lead assigns another member. Completion requires non-empty result evidence bounded by `maxTaskResultLength` that states the outcome, changed artifacts, and verification; reopening or deleting removes that evidence. Numeric task ids remain within the safe-integer allocation range, and exhaustion fails without reusing an id. Dependencies must name non-deleted tasks and form a complete DAG. Deleted tasks are retained tombstones. `writeScopes` are normalized path prefixes that produce overlap diagnostics but never block claim or authorize a write.
 
 `wait_agent` blocks on one roster, mailbox, task, or live-status edge registered after the call starts instead of encouraging model polling. It does not replay an earlier edge, so callers re-read authoritative state after wakeup or timeout. Lead-only interruption cancels the current turn with inbox preservation and does not alter mailbox or task ownership.
 
 ## Shared checkout boundary
 
-All members use the same cwd and observe writes immediately. The policy tells members to partition tasks, record advisory write scopes, order dependent work, and let the Lead inspect the final diff and run tests. A filesystem stale-version rejection requires rereading and rebasing the intended change. No equivalent guarantee is claimed for Bash, formatters, code generation, or direct external writes.
+In shared-checkout mode, all members use the same cwd and observe writes immediately. The policy tells members to partition tasks, record advisory write scopes, order dependent work, and let the Lead inspect the final diff and run tests. A filesystem stale-version rejection requires rereading and rebasing the intended change. No equivalent guarantee is claimed for Bash, formatters, code generation, or direct external writes.
 
-Worktree isolation is not a harness runtime behavior. A deployment or prompt may arrange separate worktrees, but the Team domain does not infer branches, merge changes, or silently change cwd. This preserves the existing same-world subagent and sandbox contracts.
+The optional worktree and integration providers are governed by [Recoverable Team workspaces and work ledgers](2026-09-04-agent-team-workspaces-and-ledgers.md). Shared checkout remains the default; enabling a provider is an explicit deployment choice.
 
 ## Alternatives considered
 
@@ -52,7 +52,7 @@ Worktree isolation is not a harness runtime behavior. A deployment or prompt may
 
 **Treat task ownership or write scopes as locks.** Rejected because external writers bypass them, crashed owners remain durable, and path-prefix overlap cannot prove semantic independence. False mutual exclusion is more dangerous than an explicit warning.
 
-**Create isolated worktrees automatically.** Rejected because worktree creation, branch naming, merge policy, ignored files, build artifacts, and cleanup are deployment choices. It also changes the same-world behavior existing subagents and sandboxes expose.
+**Create isolated worktrees implicitly for every subagent.** Rejected because worktree creation, branch naming, merge policy, ignored files, build artifacts, and cleanup are deployment choices. It also changes the same-world behavior existing subagents and sandboxes expose.
 
 **Enable Teams in the default catalog.** Rejected because scoped Team controls would shadow same-named legacy globals and unsolicited delegation would add latency and token cost to simple tasks. A private profile bundle inserts Team and disables the legacy controls without adding Team packages to shipped dependency graphs.
 
@@ -71,3 +71,5 @@ The Lead Session grows with whole task/member snapshots and mailbox acknowledgem
 An active roster member can be non-resident, so `inactive` is not failure and a wakeup can incur cold-resume latency. A quiet message for an inactive target can remain pending indefinitely until the target is otherwise materialized. A failed member permanently consumes its name and member slot, making provisioning failures visible instead of silently recycling identity.
 
 Coordination reduces likely checkout conflicts but cannot eliminate writes outside filesystem compare-and-set tools. The final diff and tests remain the Lead's integration boundary.
+
+The [completion-evidence recording](../../../../snapshots/session/team-task-evidence/session.jsonl) pins missing-evidence rejection, result visibility, reopening, and completed-task deletion through the headless profile. Task limits reject oversized evidence without advancing the revision; browser tests cover explicit retry after a conflict and preservation of a newer completion draft.

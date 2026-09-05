@@ -1,0 +1,34 @@
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  disabled: true
+- insert:
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+              - id: deepseek-v4-pro
+- insert:
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+      config:
+        worktreeProvider: git
+        integrationProvider: git
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
+    - id: team-worktrees
+      name: '@deepseek-ai/dsh-experimental-agent-team/git-worktrees'
+      config:
+        directory: !!js "process.cwd() + '-workers'"
+    - id: team-integration
+      name: '@deepseek-ai/dsh-experimental-agent-team/git-integration'
+      config:
+        targetBranch: main
+        verification:
+          - command: node
+            args: ['-e', "if(require('node:fs').readFileSync('shared.txt','utf8')!=='worker\\n')process.exit(1)"]
+    - id: team-barrier
+      name: './barrier.ts'

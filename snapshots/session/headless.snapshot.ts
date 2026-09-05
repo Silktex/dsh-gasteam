@@ -2,7 +2,8 @@
 
 import { cp, copyFile, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
+import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -147,11 +148,12 @@ function headerOf(log: string): JsonObject {
   return records(log)[0] ?? {}
 }
 
-function contextOf(logs: readonly string[]): NormalizeContext {
+function contextOf(logs: readonly string[], externalWorktrees = false): NormalizeContext {
   const headers = logs.map(headerOf)
   return {
     sessionIds: headers.flatMap(header => typeof header.id === 'string' ? [header.id] : []),
     cwd: typeof headers[0]?.cwd === 'string' ? headers[0].cwd : '\0missing-cwd\0',
+    ...externalWorktrees ? { externalRoots: [{ path: `${String(headers[0]?.cwd)}-workers`, token: '{{worktrees}}' }] } : {},
   }
 }
 
@@ -194,6 +196,7 @@ async function writeSessionFixtures(
     mode === 'refresh'
       ? stabilizeRefreshLog(log.content, prior[index] as string, replacements, ctx)
       : log.content,
+    scenario.manifest.workspace?.setup === 'team-git' ? ctx : undefined,
   )))
   const output = redactSessionSnapshotIds(stabilizeFixtureMessageIds(fresh, prior))
   await Promise.all(output.map((content, index) => writeFile(join(scenario.dir, names[index] as string), content)))
@@ -402,6 +405,18 @@ async function seedWorkspace(scenario: HeadlessScenario, cwd: string): Promise<v
 }
 
 const workspaceSetups: Record<string, (cwd: string) => Promise<void>> = {
+  async 'team-git'(cwd) {
+    const git = async (...args: string[]) => await promisify(execFile)('git', args, {
+      cwd, timeout: 10_000,
+      env: { ...process.env, GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z' },
+    })
+    await git('init', '--initial-branch=main')
+    await git('config', 'user.name', 'Team fixture')
+    await git('config', 'user.email', 'team@example.invalid')
+    await git('config', 'commit.gpgsign', 'false')
+    await git('add', '.gitignore', 'shared.txt')
+    await git('commit', '-m', 'base')
+  },
   async 'editing-cordis-skill'(cwd) {
     const target = join(cwd, '.dsh', 'skills', 'editing-cordis-compositions', 'SKILL.md')
     await mkdir(dirname(target), { recursive: true })
@@ -674,6 +689,9 @@ describe('headless recorded-session snapshots', () => {
         ? join(patchRoot, `${String(index)}-${basename(source)}`)
         : source)
 
+      let worktreeRoot: string | undefined
+      const workspaceEntries = scenario.manifest.workspace?.setup === 'team-git'
+        ? [...RUNTIME_WORKSPACE_ENTRIES, '.git'] : RUNTIME_WORKSPACE_ENTRIES
       let actualLogs: SessionLog[] = []
       let initialWorkspace: WorkspaceSnapshotEntry[] | undefined
       let finalWorkspace: WorkspaceSnapshotEntry[] | undefined
@@ -717,6 +735,7 @@ describe('headless recorded-session snapshots', () => {
             DSH_TELEMETRY_DISABLED: '1',
           },
           prepare: async (cwd) => {
+            if (scenario.manifest.workspace?.setup === 'team-git') worktreeRoot = `${cwd}-workers`
             await mkdir(join(cwd, patchRoot), { recursive: true })
             patchSources.forEach((source, index) => {
               if (source.endsWith('.snapshot.yml')) {
@@ -725,17 +744,18 @@ describe('headless recorded-session snapshots', () => {
             })
             await seedWorkspace(scenario, cwd)
             initialWorkspace = await captureWorkspaceSnapshot(cwd, {
-              ignoredRootEntries: RUNTIME_WORKSPACE_ENTRIES,
+              ignoredRootEntries: workspaceEntries,
             })
           },
           inspect: async (cwd) => {
             actualLogs = await persistedSessions(cwd)
             finalWorkspace = await captureWorkspaceSnapshot(cwd, {
-              ignoredRootEntries: RUNTIME_WORKSPACE_ENTRIES,
+              ignoredRootEntries: workspaceEntries,
             })
           },
         })
       } finally {
+        if (worktreeRoot !== undefined) await rm(worktreeRoot, { recursive: true, force: true })
         await rm(spillRoot, { recursive: true, force: true })
       }
 
@@ -744,14 +764,14 @@ describe('headless recorded-session snapshots', () => {
       const expectedStderr = stderrFromSession(stderrLog)
 
       if (mode !== 'replay') {
-        fixtures = await writeSessionFixtures(scenario, actualLogs, fixtures, contextOf(actualLogs.map(log => log.content)))
+        fixtures = await writeSessionFixtures(scenario, actualLogs, fixtures, contextOf(actualLogs.map(log => log.content), scenario.manifest.workspace?.setup === 'team-git'))
       }
 
       expect(result.stdout).toBe(`${finalTextFromSession(fixtures[0] as string)}\n`)
       expect(result.stderr).toBe(expectedStderr)
       expect(actualLogs, `${scenario.name}: persisted session count`).toHaveLength(fixtures.length)
-      const actualContext = contextOf(actualLogs.map(log => log.content))
-      const fixtureContext = contextOf(fixtures)
+      const actualContext = contextOf(actualLogs.map(log => log.content), scenario.manifest.workspace?.setup === 'team-git')
+      const fixtureContext = contextOf(fixtures, scenario.manifest.workspace?.setup === 'team-git')
       const actualSnapshots = normalizeSessionSnapshots(actualLogs.map(log => log.content), actualContext)
       const expectedSnapshots = normalizeSessionSnapshots(fixtures, fixtureContext)
       for (const [index, actual] of actualSnapshots.entries()) {

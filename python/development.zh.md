@@ -15,6 +15,8 @@ pnpm exec tsx scripts/build-exe-for-python-sdk.ts
 
 所需 `lib/` 产物已存在时使用 `--skip-build`；如需选择平台，请使用 `--targets=node24-linux-x64,node24-linux-arm64,node24-macos-arm64,node24-win-x64`。每个目标都应在其原生架构上构建。产物写入 `dist-exe/`，脚本会将所选载体同步到 `python/sdk-runtime/`。Windows 会生成 `.exe` 与 `-rg.exe`；macOS 构建还会同步 `node-pty` 所需的配套 spawn 辅助程序。
 
+无需密钥的 Python SDK 测试套件包含通过源码 `dsh --profile sdk` 运行的实验性 Team recorded-session 重放。运行该套件前，请使用 `pnpm install` 安装仓库 Node 依赖；它在 `snapshots/sdk/team-task-evidence/` 中将 Python 结果投影与 TypeScript 记录放在一起比较。
+
 ## 验证 SDK
 
 请将虚拟环境放在 `python/` 之外，安装测试组，然后运行 Python 测试套件：

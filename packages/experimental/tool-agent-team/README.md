@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-experimental-tool-agent-team` gives the model a team toolset on top of the team domain package: create named teammates, send them messages or follow-up work, see who is available, wait for progress, interrupt a stuck teammate, and manage a shared task board — ten tools in total. A short policy section in every member's prompt teaches the model when to form a team (only when you ask for one) and how to coordinate on a shared workspace. Mounting it replaces legacy subagent controls with the same tool names, so a composition that wants both must disable the legacy definitions. It is experimental: excluded from official releases, carries no stability promise, and creates teammates only when you explicitly ask for a team.
+`dsh-experimental-tool-agent-team` gives the model a team toolset on top of the team domain package: create named teammates, send them messages or follow-up work, see who is available, wait for progress, interrupt a stuck teammate, and manage a shared task board and durable task batches. A short policy section in every member's prompt teaches the model when to form a team (only when you ask for one) and how to coordinate on a shared workspace. Mounting it replaces legacy subagent controls with the same tool names, so a composition that wants both must disable the legacy definitions. It is experimental: excluded from official releases, carries no stability promise, and creates teammates only when you explicitly ask for a team.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Add this package on top of `@deepseek-ai/dsh-experimental-agent-team` when the model should run a team through tools. Once mounted, every team member — the Lead and each teammate — gets the same ten tools plus a policy paragraph that states its own role and name.
+Add this package on top of `@deepseek-ai/dsh-experimental-agent-team` when the model should run a team through tools. Once mounted, every team member — the Lead and each teammate — gets the same Team tools plus a policy paragraph that states its own role and name.
 
 ### When to choose it
 
@@ -54,12 +54,12 @@ Try it by asking the Lead model: "create a teammate named reviewer to check the 
 
 ### What the model can do
 
-The ten tools group into four capabilities:
+The tools group into these capabilities:
 
 - **Create a teammate** — `spawn_teammate` takes a name, a description, and the initial task; only the Lead can call it.
 - **Send messages** — `send_message` delivers information without waking an idle teammate; `followup_task` makes the message the recipient's next turn and wakes it when needed.
 - **See and wait** — `list_agents` shows the roster with live status; `wait_agent` waits for the next team change; `interrupt_agent` stops a teammate's current turn (Lead only).
-- **Manage the task board** — `team_task_create`, `team_task_list`, `team_task_get`, and `team_task_update` add, browse, read, and update shared tasks.
+- **Manage the task board** — `team_task_create`, `team_task_list`, `team_task_get`, and `team_task_update` add, browse, read, and update shared tasks; completion records result evidence until the task is reopened.
 
 Any member can message any other member and use the task board; only the Lead creates and interrupts teammates. Task updates keep the domain's owner and revision checks, so an outdated edit is rejected instead of overwriting newer work.
 
@@ -91,12 +91,16 @@ The [Agent Teams Agent Note](../../../.agents/notes/implemented/feature/2026-08-
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin entry: config, the fixed policy text, and the ten scoped tool registrations |
+| [`src/index.ts`](src/index.ts) | Plugin entry: config, the fixed policy text, and scoped tool registrations |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; delegation is observable only through `ctx.agentTeams`) |
+
+### Worktree and integration tools
+
+When the Team service selects a worktree provider, `team_worktree_release` exposes conservative cleanup. Selecting an integration provider enables queue admission, listing, execution, and explicit abandonment. The Lead alone mutates these resources; verification failures retain their candidate checkout. Batch tools create, list, edit, and archive named task groups. The [Team service README](../agent-team/README.md) owns deployment and lifecycle requirements.
 
 ### Policy and tools
 
-One `team:policy` section on the member scope teaches each member its role and the coordination rules; the fixed text and the ten tool registrations are declared in [`src/index.ts`](src/index.ts). The ten tool schemas appear only in Team member scopes, so non-Team subagents keep the default catalog. Scoped registrations with the same names as the legacy global continuable-subagent controls shadow those globals for team members only.
+One `team:policy` section on the member scope teaches each member its role and the coordination rules; the fixed text and the scoped tool registrations are declared in [`src/index.ts`](src/index.ts). The tool schemas appear only in Team member scopes, so non-Team subagents keep the default catalog. Scoped registrations with the same names as the legacy global continuable-subagent controls shadow those globals for team members only.
 
 ### Scoped registration and teardown
 
@@ -125,7 +129,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-One stable policy section states the exact Team role/name/id, the explicit-delegation requirement, shared-cwd behavior, filesystem stale-version recovery, Bash/formatter/codegen risk, task and write-scope coordination, quiet versus waking delivery, the no-retry mailbox rule, and the Lead's duty to wait before answering. The ten Team schemas from `spawn_teammate` through `team_task_update` appear only in Team member scopes.
+One stable policy section states the exact Team role/name/id, the explicit-delegation requirement, configured shared-checkout or worktree behavior, filesystem stale-version recovery, Bash/formatter/codegen risk, task and write-scope coordination, quiet versus waking delivery, the no-retry mailbox rule, and the Lead's duty to wait before answering. `spawn_teammate`, `team_batch_list`, and the other Team schemas appear only in Team member scopes.
 
 #### Token effect
 

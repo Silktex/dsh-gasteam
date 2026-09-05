@@ -35,6 +35,8 @@
           - id: agent-team
             name: '@deepseek-ai/dsh-experimental-agent-team'
             config:
+              worktreeProvider: !!js "process.env.DSH_TEAM_WORKTREES === '1' ? 'git' : undefined"
+              integrationProvider: !!js "process.env.DSH_TEAM_WORKTREES === '1' ? 'git' : undefined"
               maxMembers: 8
               maxTasks: 256
               maxPendingMessagesPerMember: 64
@@ -47,3 +49,16 @@
               forkProvider: fork
           - id: team-fixture-llm
             name: './tests/fixtures/team-llm.mjs'
+          - id: team-git-worktrees
+            name: '@deepseek-ai/dsh-experimental-agent-team/git-worktrees'
+            disabled: !!js "process.env.DSH_TEAM_WORKTREES !== '1'"
+            config:
+              directory: !!js "process.cwd() + '-workers'"
+          - id: team-git-integration
+            name: '@deepseek-ai/dsh-experimental-agent-team/git-integration'
+            disabled: !!js "process.env.DSH_TEAM_WORKTREES !== '1'"
+            config:
+              targetBranch: main
+              verification:
+                - command: !!js process.execPath
+                  args: ['-e', "if(require('node:fs').readFileSync('shared.txt','utf8')!=='worker\\n')process.exit(1)"]

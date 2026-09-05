@@ -368,6 +368,17 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the active roster row.',
       },
       {
+        signature: 'registerWorktreeProvider(provider: TeamWorktreeProvider): () => Promise<void>',
+        description: 'Register a Git-worktree provider in the calling plugin\'s effect scope.',
+        parameters: [{ name: 'provider', description: 'provider for explicitly configured worker isolation.' }],
+        returns: 'registration disposer; removal prevents subsequent provider lookups.',
+      },
+      {
+        signature: 'async releaseWorktree(caller: Agent, target: string, signal: AbortSignal): Promise<void>',
+        description: 'Release a quiescent worker checkout after its commits reach the Lead branch.',
+        parameters: [{ name: 'caller', description: 'exact live Lead authorizing removal.' }, { name: 'target', description: 'immutable teammate name, including a failed provision.' }, { name: 'signal', description: 'caller cancellation through safe cleanup.' }],
+      },
+      {
         signature: 'async sendMessage(caller: Agent, request: SendTeamMessageRequest): Promise<SendTeamMessageResult>',
         description: 'Queue one durable peer message, then attempt immediate delivery.',
         parameters: [{ name: 'caller', description: 'exact live sending Team member.' }, { name: 'request', description: 'target name, content, scheduling mode, and pre-queue cancellation.' }],
@@ -396,6 +407,60 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Compare-and-set one authorized task transition.',
         parameters: [{ name: 'caller', description: 'exact live Team member authorizing the mutation.' }, { name: 'request', description: 'task identity, expected revision, action, and action fields.' }],
         returns: 'the committed next task revision.',
+      },
+      {
+        signature: 'registerIntegrationProvider(provider: TeamIntegrationProvider): () => Promise<void>',
+        description: 'Register one integration provider under the mounting plugin effect scope.',
+        parameters: [{ name: 'provider', description: 'integration implementation.' }],
+        returns: 'scoped registration disposer.',
+      },
+      {
+        signature: 'async enqueueIntegration(caller: Agent, target: string, signal: AbortSignal): Promise<TeamIntegrationSnapshot>',
+        description: 'Queue committed output from a quiescent worker.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'target', description: 'durable teammate name.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'pinned integration request.',
+      },
+      {
+        signature: 'async runIntegration(caller: Agent, signal: AbortSignal): Promise<TeamIntegrationSnapshot | undefined>',
+        description: 'Run or recover the oldest pending integration.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'resulting integration record, or undefined for an empty queue.',
+      },
+      {
+        signature: 'async abandonIntegration(caller: Agent, id: TeamIntegrationId, reason: string, signal: AbortSignal): Promise<TeamIntegrationSnapshot>',
+        description: 'Abandon a blocked integration while retaining its candidate checkout.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'id', description: 'unfinished integration identity.' }, { name: 'reason', description: 'durable abandonment explanation.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'failed terminal record.',
+      },
+      {
+        signature: 'listIntegrations(caller: Agent): TeamIntegrationSnapshot[]',
+        description: 'Read durable integration history.',
+        parameters: [{ name: 'caller', description: 'exact live Team member.' }],
+        returns: 'detached queue and terminal records.',
+      },
+      {
+        signature: 'async recoverTeammate(caller: Agent, request: RecoverTeammateRequest, signal: AbortSignal): Promise<TeamRecoverySnapshot>',
+        description: 'Restart an unchanged worker that still owns unfinished tasks.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'request', description: 'observed progress and durable recovery instruction.' }, { name: 'signal', description: 'cancellation through interruption and follow-up admission.' }],
+        returns: 'admitted attempt, counted even if subsequent delivery fails.',
+      },
+      {
+        signature: 'async createBatch(caller: Agent, request: CreateTeamBatchRequest): Promise<TeamBatchView>',
+        description: 'Create a named durable task batch.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'request', description: 'batch metadata and current task ids.' }],
+        returns: 'committed batch with derived progress.',
+      },
+      {
+        signature: 'async updateBatch(caller: Agent, request: UpdateTeamBatchRequest): Promise<TeamBatchView>',
+        description: 'Update or archive a batch using its current revision.',
+        parameters: [{ name: 'caller', description: 'exact live Lead.' }, { name: 'request', description: 'compare-and-set mutation.' }],
+        returns: 'committed batch with derived progress.',
+      },
+      {
+        signature: 'listBatches(caller: Agent): TeamBatchView[]',
+        description: 'Read active and archived durable batches.',
+        parameters: [{ name: 'caller', description: 'exact live Team member.' }],
+        returns: 'batches with progress derived from the current task board.',
       },
       {
         signature: 'async waitForChange(caller: Agent, timeoutMs: number, signal: AbortSignal): Promise<TeamWaitResult>',
@@ -3757,7 +3822,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContinuableStartSpec',
-    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n}',
+    declaration: 'export interface ContinuableStartSpec {\n    readonly provider: string;\n    readonly label: string;\n    readonly childId?: SessionId;\n    readonly cwd?: string;\n    readonly request: Omit<SubagentStartRequest, \'label\' | \'signal\' | \'outputSchema\'>;\n    readonly signal: AbortSignal;\n}',
   },
   {
     name: 'ContinuableSubagentDescriptorData',
@@ -3846,6 +3911,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CreateSessionOptions',
     declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n}',
+  },
+  {
+    name: 'CreateTeamBatchRequest',
+    declaration: 'export interface CreateTeamBatchRequest {\n    readonly name: string;\n    readonly description: string;\n    readonly taskIds: readonly TeamTaskId[];\n}',
   },
   {
     name: 'CreateTeamTaskRequest',
@@ -4654,6 +4723,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ReasoningEffortId',
     declaration: 'export type ReasoningEffortId = Branded<\'ReasoningEffortId\'>;',
+  },
+  {
+    name: 'RecoverTeammateRequest',
+    declaration: 'export interface RecoverTeammateRequest {\n    readonly target: string;\n    readonly observedEventCount: number;\n    readonly reason: string;\n}',
   },
   {
     name: 'RedactedSecret',
@@ -5588,8 +5661,44 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type TableValueOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<string, infer V> ? V : never;',
   },
   {
+    name: 'TeamBatchId',
+    declaration: 'export type TeamBatchId = Branded<\'TeamBatchId\'>;',
+  },
+  {
+    name: 'TeamBatchSnapshot',
+    declaration: 'export interface TeamBatchSnapshot {\n    readonly id: TeamBatchId;\n    readonly revision: number;\n    readonly name: string;\n    readonly description: string;\n    readonly taskIds: TeamTaskId[];\n    readonly archived: boolean;\n}',
+  },
+  {
+    name: 'TeamBatchView',
+    declaration: 'export interface TeamBatchView extends TeamBatchSnapshot {\n    readonly completedTasks: number;\n    readonly status: \'active\' | \'completed\' | \'archived\';\n}',
+  },
+  {
+    name: 'TeamBranchName',
+    declaration: 'export type TeamBranchName = Branded<\'TeamBranchName\'>;',
+  },
+  {
+    name: 'TeamCommitId',
+    declaration: 'export type TeamCommitId = Branded<\'TeamCommitId\'>;',
+  },
+  {
     name: 'TeamId',
     declaration: 'export type TeamId = Branded<\'TeamId\'>;',
+  },
+  {
+    name: 'TeamIntegrationId',
+    declaration: 'export type TeamIntegrationId = Branded<\'TeamIntegrationId\'>;',
+  },
+  {
+    name: 'TeamIntegrationProvider',
+    declaration: 'export interface TeamIntegrationProvider {\n    readonly name: string;\n    resolve(worktree: TeamWorktreeSnapshot, id: TeamIntegrationId, signal: AbortSignal): Promise<TeamIntegrationSpec>;\n    target(spec: TeamIntegrationSpec, signal: AbortSignal): Promise<TeamCommitId>;\n    verify(spec: TeamIntegrationSpec, target: TeamCommitId, signal: AbortSignal): Promise<TeamCommitId>;\n    promote(spec: TeamIntegrationSpec, target: TeamCommitId, candidate: TeamCommitId, signal: AbortSignal): Promise<void>;\n}',
+  },
+  {
+    name: 'TeamIntegrationSnapshot',
+    declaration: 'export interface TeamIntegrationSnapshot extends TeamIntegrationSpec {\n    readonly id: TeamIntegrationId;\n    readonly memberId: SessionId;\n    readonly provider: string;\n    readonly phase: \'queued\' | \'running\' | \'verified\' | \'merged\' | \'failed\';\n    readonly targetCommit?: TeamCommitId;\n    readonly candidateCommit?: TeamCommitId;\n    readonly error?: string;\n}',
+  },
+  {
+    name: 'TeamIntegrationSpec',
+    declaration: 'export interface TeamIntegrationSpec {\n    readonly repository: string;\n    readonly cwd: string;\n    readonly sourceBranch: TeamBranchName;\n    readonly sourceCommit: TeamCommitId;\n    readonly targetBranch: TeamBranchName;\n    readonly verification: TeamVerificationCommand[];\n}',
   },
   {
     name: 'TeamMembership',
@@ -5597,11 +5706,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'TeamMemberView',
-    declaration: 'export interface TeamMemberView {\n    readonly id: SessionId;\n    readonly name: string;\n    readonly role: \'lead\' | \'teammate\';\n    readonly status: \'running\' | \'idle\' | \'inactive\' | \'provisioning\' | \'failed\';\n    readonly description?: string;\n    readonly provider?: string;\n    readonly context?: \'fresh\' | \'fork\';\n    readonly model?: string;\n    readonly diagnostics: string[];\n}',
+    declaration: 'export interface TeamMemberView {\n    readonly id: SessionId;\n    readonly name: string;\n    readonly role: \'lead\' | \'teammate\';\n    readonly status: \'running\' | \'idle\' | \'inactive\' | \'provisioning\' | \'failed\';\n    readonly description?: string;\n    readonly provider?: string;\n    readonly context?: \'fresh\' | \'fork\';\n    readonly model?: string;\n    readonly diagnostics: string[];\n    readonly worktree?: TeamWorktreeSnapshot;\n    readonly recoveryAttempts?: number;\n}',
   },
   {
     name: 'TeamMessageId',
     declaration: 'export type TeamMessageId = Branded<\'TeamMessageId\'>;',
+  },
+  {
+    name: 'TeamRecoverySnapshot',
+    declaration: 'export interface TeamRecoverySnapshot {\n    readonly memberId: SessionId;\n    readonly attempt: number;\n    readonly observedEventCount: number;\n    readonly reason: string;\n}',
   },
   {
     name: 'TeamTaskAction',
@@ -5621,15 +5734,31 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'TeamTaskView',
-    declaration: 'export interface TeamTaskView {\n    readonly id: TeamTaskId;\n    readonly revision: number;\n    readonly subject: string;\n    readonly description: string;\n    readonly status: TeamTaskStatus;\n    readonly blockedBy: TeamTaskId[];\n    readonly writeScopes: string[];\n    readonly ownerName?: string;\n    readonly ready: boolean;\n    readonly writeScopeWarnings: string[];\n}',
+    declaration: 'export interface TeamTaskView {\n    readonly id: TeamTaskId;\n    readonly revision: number;\n    readonly subject: string;\n    readonly description: string;\n    readonly status: TeamTaskStatus;\n    readonly blockedBy: TeamTaskId[];\n    readonly writeScopes: string[];\n    readonly result?: string;\n    readonly ownerName?: string;\n    readonly ready: boolean;\n    readonly writeScopeWarnings: string[];\n}',
+  },
+  {
+    name: 'TeamVerificationCommand',
+    declaration: 'export interface TeamVerificationCommand {\n    readonly command: string;\n    readonly args: string[];\n}',
   },
   {
     name: 'TeamView',
-    declaration: 'export interface TeamView {\n    readonly members: TeamMemberView[];\n    readonly tasks: TeamTaskView[];\n}',
+    declaration: 'export interface TeamView {\n    readonly members: TeamMemberView[];\n    readonly tasks: TeamTaskView[];\n    readonly batches: TeamBatchView[];\n    readonly integrations: TeamIntegrationSnapshot[];\n}',
   },
   {
     name: 'TeamWaitResult',
     declaration: 'export interface TeamWaitResult {\n    readonly timedOut: boolean;\n}',
+  },
+  {
+    name: 'TeamWorktreeProvider',
+    declaration: 'export interface TeamWorktreeProvider {\n    readonly name: string;\n    resolve(repository: string, memberId: SessionId, signal: AbortSignal): Promise<TeamWorktreeSpec>;\n    provision(spec: TeamWorktreeSpec, signal: AbortSignal): Promise<void>;\n    release(spec: TeamWorktreeSpec, signal: AbortSignal): Promise<void>;\n}',
+  },
+  {
+    name: 'TeamWorktreeSnapshot',
+    declaration: 'export interface TeamWorktreeSnapshot extends TeamWorktreeSpec {\n    readonly memberId: SessionId;\n    readonly provider: string;\n    readonly phase: \'reserved\' | \'ready\' | \'released\';\n}',
+  },
+  {
+    name: 'TeamWorktreeSpec',
+    declaration: 'export interface TeamWorktreeSpec {\n    readonly repository: string;\n    readonly cwd: string;\n    readonly branch: TeamBranchName;\n    readonly baseCommit: TeamCommitId;\n}',
   },
   {
     name: 'TerminalBackend',
@@ -5944,8 +6073,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface TypertTypeModel {\n    readonly name: string;\n    readonly declaration: string;\n}',
   },
   {
+    name: 'UpdateTeamBatchRequest',
+    declaration: 'export interface UpdateTeamBatchRequest {\n    readonly batchId: TeamBatchId;\n    readonly expectedRevision: number;\n    readonly name?: string;\n    readonly description?: string;\n    readonly taskIds?: readonly TeamTaskId[];\n    readonly archive?: boolean;\n}',
+  },
+  {
     name: 'UpdateTeamTaskRequest',
-    declaration: 'export interface UpdateTeamTaskRequest {\n    readonly taskId: TeamTaskId;\n    readonly expectedRevision: number;\n    readonly action: TeamTaskAction;\n    readonly subject?: string;\n    readonly description?: string;\n    readonly blockedBy?: readonly TeamTaskId[];\n    readonly writeScopes?: readonly string[];\n    readonly owner?: string;\n}',
+    declaration: 'export interface UpdateTeamTaskRequest {\n    readonly taskId: TeamTaskId;\n    readonly expectedRevision: number;\n    readonly action: TeamTaskAction;\n    readonly subject?: string;\n    readonly description?: string;\n    readonly blockedBy?: readonly TeamTaskId[];\n    readonly writeScopes?: readonly string[];\n    readonly owner?: string;\n    readonly result?: string;\n}',
   },
   {
     name: 'UserMessage',

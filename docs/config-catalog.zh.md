@@ -612,15 +612,29 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-experimental-agent-team`
 
-需要：`agents` · `sessions` · `sessionPersistence` · `sessionProjections` · `subagents`
+需要： `agents` · `sessions` · `sessionPersistence` · `sessionProjections` · `subagents`
 
 ```ts config-catalog
 /** Team-service deployment limits. */
 export interface Config {
+  /** Registered integration provider; omission disables integration tools. */
+  readonly integrationProvider?: string
+  /** Maximum unfinished integration requests per Team. */
+  readonly maxIntegrations?: number
+  /** Registered worktree provider; omission keeps teammates in the Lead checkout. */
+  readonly worktreeProvider?: string
   /** Maximum immutable teammate names retained by one Team. */
   readonly maxMembers?: number
   /** Maximum non-deleted tasks retained by one Team. */
   readonly maxTasks?: number
+  /** Maximum non-archived task batches per Team. */
+  readonly maxBatches?: number
+  /** Maximum admitted automatic recovery attempts over one teammate lifetime. */
+  readonly maxRecoveryAttempts?: number
+  /** Maximum normalized UTF-16 code units in each batch name or description. */
+  readonly maxBatchTextLength?: number
+  /** Maximum normalized UTF-16 code units in task completion evidence. */
+  readonly maxTaskResultLength?: number
   /** Maximum queued-minus-delivered messages for one target member. */
   readonly maxPendingMessagesPerMember?: number
   /** Maximum UTF-8 bytes in one complete sender-framed delivery. */
@@ -630,7 +644,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/experimental/agent-team/src/types.ts:125`](../packages/experimental/agent-team/src/types.ts)
+来源： [`packages/experimental/agent-team/src/types.ts:311`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="deepseek-aidsh-experimental-inspector"></a>
 

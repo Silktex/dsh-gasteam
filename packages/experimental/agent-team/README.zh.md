@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-当多个 agent 必须在同一个共享工作区协作、且 roster、消息与任务状态需要挺过崩溃与重启时，选择它。当 teammate 需要独立工作目录、多个进程需要协调同一支团队、或任务 owner 需要自动释放时，请不要选择——这些都不受支持。团队功能需要持久会话存储才能激活。
+当多个 agent 必须在同一个共享工作区协作、且 roster、消息与任务状态需要挺过崩溃与重启时，选择它。当多个进程需要协调同一支团队，或任务 owner 需要自动释放时，请不要选择；这些行为不受支持。团队功能需要持久会话存储才能激活。
 
 ### 最小工作配置
 
@@ -50,11 +50,48 @@ kind: "package-reference"
 |---|---|---|
 | `maxMembers` | `8` | 一支团队最多可创建的 teammate 数，包括失败的 |
 | `maxTasks` | `256` | 任务板上最多的活动任务数 |
+| `maxBatches` | `128` | 最多的未归档批次数 |
+| `maxBatchTextLength` | `16,384` | 每个批次名称或描述最多的 UTF-16 代码单元数 |
+| `maxRecoveryAttempts` | `3` | 每个 teammate 生命周期最多的恢复接纳次数 |
+| `maxIntegrations` | `32` | 最多的未完成集成请求数 |
+| `maxTaskResultLength` | `16,384` | 去除首尾空白后的完成依据长度上限（UTF-16 code unit） |
 | `maxPendingMessagesPerMember` | `64` | 单个成员最多可排队的消息数 |
 | `maxMessageBytes` | `65,536` | 单条发送消息的最大尺寸 |
 | `disposalTimeoutMs` | `5,000` | 关闭清理允许的时间 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-experimental-agent-team)是每个受支持字段及其 JSDoc 的穷尽式真源。
+
+### 可选 worktree、集成与恢复
+
+省略 `worktreeProvider` 时保留共享 checkout。将这些子路径与 Team 工具一起挂载，可为每个 worker 提供 Git worktree、验证已提交产物并恢复静默 worker。Worker 目录必须是仓库外的绝对路径，其父目录必须存在。请将目标 branch 和验证命令替换为部署实际使用的检查。
+
+```yaml
+- name: '@deepseek-ai/dsh-experimental-agent-team'
+  config:
+    worktreeProvider: git
+    integrationProvider: git
+- name: '@deepseek-ai/dsh-experimental-agent-team/git-worktrees'
+  config:
+    directory: /absolute/path/outside/repository/team-workers
+- name: '@deepseek-ai/dsh-experimental-agent-team/git-integration'
+  config:
+    targetBranch: main
+    verification:
+      - command: pnpm
+        args: [test]
+- name: '@deepseek-ai/dsh-experimental-agent-team/integration-worker'
+- name: '@deepseek-ai/dsh-experimental-agent-team/supervisor'
+```
+
+Worker worktree 从 Lead 已提交的 HEAD 开始；不会复制 Lead 的未提交修改。选定 cwd 持久化到 child header，并保留供冷启动 follow-up 使用。在 `workspace-write` 下，执行限制的能力使用该 child 工作区；Git commit 还需要写入仓库共享 Git 元数据的权限。请据此配置部署，因为 teammate 无法扩大委派权限。`team_worktree_release` 要求 worker 静止、没有未完成的所属任务或排队邮件，并保留脏文件、被忽略的文件或未合并产物。
+
+`team_integration_enqueue` 固定静止 worker 的已提交产物。`team_integration_run` 在独立候选 checkout 中验证最早请求，并将配置目标 branch 上干净的 Lead checkout fast-forward。可选 integration worker 在后台运行该队列。验证失败会保留 checkout；中断的已验证推进可重试。若目标发生移动，请注明原因放弃阻塞请求并重新排队验证。候选 checkout 保留供检查和人工清理。
+
+可选 supervisor 将 child Session 事件数量不变视为静默，仅恢复仍拥有未完成任务的 worker。`scanIntervalMs`、`staleAfterMs` 和 `recoveryMessage` 配置巡查。`maxRecoveryAttempts` 限制持久生命周期尝试次数；reload 不重置预算，也不释放任务所有权。
+
+### 持久任务批次
+
+Lead 使用任务 id 创建具名批次，基于当前 revision 编辑，并永久归档。完成数量从当前任务状态派生；重开任务会改变批次进度。活动批次阻止任务删除。归档批次保留 tombstone 引用，并通过同一 Session 日志在 Lead 恢复后保留。`maxBatches` 和 `maxBatchTextLength` 限制活动批次数量及其文本；`maxIntegrations` 限制未完成集成请求数量。
 
 ### Teammate
 
@@ -74,7 +111,7 @@ roster 显示每个成员的职责（`lead` 或 `teammate`）与当前状态：`
 
 任何成员都可以添加任务，包含标题、详情、对其他任务的可选依赖，以及可选的文件触及提示。只有其全部依赖完成后，任务才可 claim。
 
-任务有 owner：成员 claim 任务开始工作，完成后标记完成、释放回板或重新打开；Lead 可以把任务分配给任意成员。每次变更都是 compare-and-set：基于过期副本的更新会被拒绝，因此两个成员不会悄悄覆盖彼此的成果。
+任务有 owner：成员 claim 任务开始工作，完成时提交描述结果、变更产物和验证情况的简要依据，也可以释放回板或重新打开；reopen 或 delete 会移除原有完成依据。Lead 可以把任务分配给任意成员。每次变更都是 compare-and-set：基于过期副本的更新会被拒绝，因此两个成员不会悄悄覆盖彼此的成果。
 
 当两个 in-progress 任务计划触及重叠路径时，文件提示会产生警告——它们绝不阻止任何操作。已删除任务保留在历史中，但从活动列表中消失。
 
@@ -193,7 +230,7 @@ Peer 消息追加在 target 可复用历史前缀之后。冷恢复会先复用�
 这些限制说明一支团队目前不能做什么、或何时需要特别运维。它们是当前包约束，不是与其他协作机制的对比。
 
 - **实验原型，无稳定性承诺**——本包为私有、不进入正式发布，孵化期间约定可自由变更。
-- **单进程、共享 checkout**——成员共享 cwd，修改立即可见；本包不提供 worktree、远端成员、merge 或文件锁。
+- **单进程**——Team 事务不协调多个 harness 进程。Worktree 分离 checkout，但不限制文件系统权限或外部 Git 写入者。
 - **write scope 仅作提示**——Bash、formatter、代码生成器与直接外部写入可以绕过文件版本检查；Lead 必须协调 owner 并检查最终 diff。
 - **扁平且不可变的 roster**——只有 Lead 可以创建直接 teammate；不支持嵌套 Team、重命名、删除或名字复用。
 - **不会自动释放 owner**——idle、interrupt、进程退出与工作失败都不会释放任务 owner。
@@ -213,6 +250,6 @@ promotion 到产品角色组需要按[实验子树规则](../AGENTS.md)审查公
 
 #### 未来方向
 
-尚未决定的探索方向包括嵌套 Team、自动释放 owner 的策略、跨进程 mailbox 事务，以及通过 worktree 实现文件系统隔离；这些都没有承诺。
+尚未决定的探索方向包括嵌套 Team、自动释放 owner 的策略、跨进程 mailbox 事务；这些都没有承诺。
 
 </details>

@@ -11,6 +11,8 @@ English | [中文](README.zh.md)
 
 `dsh-session-snapshot` provides the shared support behind keyless recorded-session tests (`pnpm run test:snapshot`): closed manifests, typed identity redaction, normalization, workspace comparison, fixture guards, and protocol adapters for headless, SDK, ACP, and Web owners. The ACP adapter launches the tested profile as a real subprocess, drives a deterministic input script, and registers the complete record, replay, and refresh suite. Every scenario owns enough committed evidence to prove model-visible output and filesystem effects without trusting the agent's report. The package entry imports vitest and is therefore available only inside a vitest run.
 
+Recorded Teams may use multiple checkouts. Snapshot adapters declare test-owned external directories through `NormalizeContext.externalRoots`, assigning each a distinct stable token. These roots are not cwd aliases; undeclared sibling paths remain literal. Passing the shared run context to `tokenizeSessionFixtureCwd` preserves each child header’s workspace identity.
+
 ## Table of Contents
 
 - [Use this package](#use-this-package)

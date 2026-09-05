@@ -1,0 +1,17 @@
+version: 1
+scenario: team-worktree-integration
+profile: headless
+composition: team-worktree-integration
+recording: authored
+platform: posix
+header:
+  class: team-worktree-integration
+  pin: true
+  childSystemPrompts: [1]
+  childToolSchemas: [1]
+workspace:
+  setup: team-git
+  final: true
+environment:
+  GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z"
+  GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z"

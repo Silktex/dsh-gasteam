@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'reac
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
   TeamMemberView as TeamRosterMember,
-  TeamTaskAction,
+  CreateTeamTaskRequest,
+  UpdateTeamTaskRequest,
   TeamTaskId,
   TeamTaskMutationResult,
   TeamTaskView as TeamTask,
@@ -27,22 +28,8 @@ export type TeamTaskActionResult = RemoteResult<TeamTaskMutationResult>
 /** Business actions injected by the browser plugin. */
 export interface TeamActionInjected {
   load: (sessionId: SessionId) => Promise<TeamActionResult<TeamView>>
-  createTask: (sessionId: SessionId, input: {
-    subject: string
-    description: string
-    blockedBy: TeamTaskId[]
-    writeScopes: string[]
-  }) => Promise<TeamTaskActionResult>
-  updateTask: (sessionId: SessionId, input: {
-    taskId: TeamTaskId
-    expectedRevision: number
-    action: TeamTaskAction
-    subject?: string
-    description?: string
-    blockedBy?: TeamTaskId[]
-    writeScopes?: string[]
-    owner?: string
-  }) => Promise<TeamTaskActionResult>
+  createTask: (sessionId: SessionId, input: CreateTeamTaskRequest) => Promise<TeamTaskActionResult>
+  updateTask: (sessionId: SessionId, input: UpdateTeamTaskRequest) => Promise<TeamTaskActionResult>
   openTeammate: (sessionId: SessionId, member: TeamRosterMember) => Promise<void>
 }
 
@@ -108,6 +95,8 @@ export function TeamAction({
   const [editing, setEditing] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState<Draft>(EMPTY_DRAFT)
   const [pendingTasks, setPendingTasks] = useState<ReadonlySet<string>>(() => new Set())
+  const [completion, setCompletion] = useState<{ taskId: TeamTaskId; result: string } | null>(null)
+  const completionTask = view?.tasks.find(task => task.id === completion?.taskId && task.status === 'in_progress')
   const sessionRef = useRef(sessionId)
   const refreshGeneration = useRef(0)
   sessionRef.current = sessionId
@@ -123,6 +112,7 @@ export function TeamAction({
     setEditing(null)
     setEditDraft(EMPTY_DRAFT)
     setPendingTasks(new Set())
+    setCompletion(null)
   }, [sessionId])
 
   const refresh = useCallback(async (): Promise<boolean> => {
@@ -293,6 +283,8 @@ export function TeamAction({
                       <span className={css.memberText}>
                         <span>{member.name}</span>
                         <small>{t(memberStatusKey(member.status))}{member.model === undefined ? '' : ` · ${t('model')}: ${member.model}`}</small>
+                        {member.worktree !== undefined && <small>{t('worktree')}: {member.worktree.branch} · {t(`worktree.${member.worktree.phase}`)}</small>}
+                        {member.recoveryAttempts !== undefined && <small>{t('recoveries')}: {member.recoveryAttempts}</small>}
                         {member.diagnostics.map(diagnostic => <small key={diagnostic} className={css.diagnostic}>{diagnostic}</small>)}
                       </span>
                     </button>
@@ -337,6 +329,7 @@ export function TeamAction({
                           <span>{t(statusKey(task.status))}</span>
                         </div>
                         <p>{task.description}</p>
+                        {task.result !== undefined && <p><strong>{t('result')}:</strong> {task.result}</p>}
                         <div className={css.meta}>
                           <span>{task.id}</span>
                           {task.status === 'pending' && <span>{task.ready ? t('ready') : t('blocked')}</span>}
@@ -369,9 +362,7 @@ export function TeamAction({
                           </button>
                           {task.status === 'in_progress' && (
                             <button type="button" disabled={pendingTasks.has(task.id)} onClick={() => {
-                              void settleTask(task.id, () => updateTask(sessionId, {
-                                taskId: task.id, expectedRevision: task.revision, action: 'complete',
-                              }))
+                              setCompletion({ taskId: task.id, result: '' })
                             }}><IconCheckOutline14 /> {t('complete')}</button>
                           )}
                           {task.status === 'completed' && (
@@ -391,6 +382,48 @@ export function TeamAction({
                     ))}
                 </div>
               </section>
+              {view.batches.length > 0 && <section>
+                <h3>{t('batches')}</h3>
+                {view.batches.map(batch => <article key={batch.id} className={css.task}>
+                  <strong>{batch.name}</strong>
+                  <p>{batch.description}</p>
+                  <div className={css.meta}>{t(`batch.${batch.status}`)} · {batch.completedTasks}/{batch.taskIds.length}</div>
+                  <div className={css.meta}>{batch.taskIds.join(', ')}</div>
+                </article>)}
+              </section>}
+              {view.integrations.length > 0 && <section>
+                <h3>{t('integrations')}</h3>
+                {view.integrations.map(job => <article key={job.id} className={css.task}>
+                  <strong>{job.sourceBranch} → {job.targetBranch}</strong>
+                  <p>{t(`integration.${job.phase}`)}</p>
+                  <div className={css.meta}>{job.sourceCommit}</div>
+                  {job.error !== undefined && <p className={css.warning}>{job.error}</p>}
+                </article>)}
+              </section>}
+              {completion !== null && completionTask !== undefined && (
+                <div className={css.taskForm} role="dialog" aria-label={t('completionEvidence')}>
+                  <label>
+                    <span>{t('completionEvidence')}</span>
+                    <textarea
+                      value={completion.result}
+                      onChange={(event) => { setCompletion({ ...completion, result: event.target.value }) }}
+                    />
+                  </label>
+                  <div className={css.taskActions}>
+                    <button type="button" disabled={completion.result.trim() === '' || pendingTasks.has(completionTask.id)} onClick={() => {
+                      const task = completionTask
+                      void settleTask(task.id, () => updateTask(sessionId, {
+                        taskId: task.id, expectedRevision: task.revision, action: 'complete', result: completion.result.trim(),
+                      })).then((completed) => {
+                        if (completed !== undefined) {
+                          setCompletion(current => current === completion ? null : current)
+                        }
+                      })
+                    }}>{t('complete')}</button>
+                    <button type="button" onClick={() => { setCompletion(null) }}>{t('cancel')}</button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>

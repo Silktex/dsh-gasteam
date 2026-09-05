@@ -55,6 +55,7 @@ async function bench(options: {
     error: new RemoteError('gateway/internal', 'offline', {}),
   }
   const view = {
+    batches: [], integrations: [],
     members: [{
       id: SESSION, name: 'lead', role: 'lead' as const, status: 'idle' as const, diagnostics: [],
     }], tasks: [task],
@@ -157,7 +158,7 @@ describe('ui-team browser plugin', () => {
       subject: 'Task', description: 'Description', blockedBy: [], writeScopes: [],
     })).ok).toBe(true)
     expect((await actions.updateTask(SESSION, {
-      taskId: TASK_ID, expectedRevision: 1, action: 'complete',
+      taskId: TASK_ID, expectedRevision: 1, action: 'complete', result: 'Verified from browser RPC test.',
     })).ok).toBe(true)
     expect((await actions.updateTask(SESSION, {
       taskId: TASK_ID, expectedRevision: 2, action: 'reassign', owner: 'worker',

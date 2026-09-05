@@ -33,10 +33,12 @@ export class TeamTaskBoard {
   /**
    * @param journal - authoritative Lead-log transaction owner.
    * @param maxTasks - maximum non-deleted tasks retained by one Team.
+   * @param maxResultLength - maximum normalized completion evidence length.
    */
   constructor(
     private readonly journal: TeamJournal,
     private readonly maxTasks: number,
+    private readonly maxResultLength: number,
   ) {}
 
   /**
@@ -166,12 +168,19 @@ export class TeamTaskBoard {
         case 'complete':
           authorizeOwner()
           if (current.status !== 'in_progress') throw new TeamError('only an in-progress task can complete', 'TEAM_TASK_INVALID_TRANSITION')
-          next = { ...current, status: 'completed' }
+          if (request.result === undefined) {
+            throw new TeamError('complete requires result', 'TEAM_INVALID_ARGUMENT')
+          }
+          next = {
+            ...current,
+            status: 'completed',
+            result: requiredText(request.result, 'result', this.maxResultLength),
+          }
           break
         case 'reopen':
           authorizeOwner()
           if (current.status !== 'completed') throw new TeamError('only a completed task can reopen', 'TEAM_TASK_INVALID_TRANSITION')
-          next = this.withoutOwner({ ...current, status: 'pending' })
+          next = this.withoutResult(this.withoutOwner({ ...current, status: 'pending' }))
           break
         case 'reassign': {
           if (!lead) throw new TeamError('only the Team Lead can reassign tasks', 'TEAM_LEAD_REQUIRED')
@@ -192,12 +201,15 @@ export class TeamTaskBoard {
         }
         case 'delete': {
           authorizeOwner()
+          if (state.batches.some(batch => !batch.archived && batch.taskIds.includes(current.id))) {
+            throw new TeamError('task belongs to an active Team batch; archive or edit the batch first', 'TEAM_TASK_IN_BATCH')
+          }
           const dependent = state.tasks.find(task =>
             task.status !== 'deleted' && task.id !== current.id && task.blockedBy.includes(current.id))
           if (dependent !== undefined) {
             throw new TeamError(`team task "${current.id}" still blocks "${dependent.id}"`, 'TEAM_TASK_HAS_DEPENDENTS')
           }
-          next = { ...current, status: 'deleted' }
+          next = this.withoutResult({ ...current, status: 'deleted' })
           break
         }
         /* v8 ignore next 2 -- TeamTaskAction is closed and every member is handled above. */
@@ -262,6 +274,12 @@ export class TeamTaskBoard {
     return without
   }
 
+  /** Completion evidence belongs only to completed tasks. */
+  private withoutResult(task: TeamTaskSnapshot): TeamTaskSnapshot {
+    const { result: _result, ...without } = task
+    return without
+  }
+
   /**
    * Build one task view with owner name, readiness, and advisory write overlaps.
    * A committing caller may pass its pre-append state because `task` supplies the
@@ -289,6 +307,7 @@ export class TeamTaskBoard {
       status: task.status,
       blockedBy: structuredClone(task.blockedBy),
       writeScopes: structuredClone(task.writeScopes),
+      ...task.result === undefined ? {} : { result: task.result },
       ...ownerName === undefined ? {} : { ownerName },
       ready: task.status === 'pending' && this.taskReady(state, task),
       writeScopeWarnings: [...warnings],

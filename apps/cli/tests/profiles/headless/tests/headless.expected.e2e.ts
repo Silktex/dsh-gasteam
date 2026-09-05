@@ -1,4 +1,6 @@
-import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { readFile, readdir, writeFile, rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
@@ -523,6 +525,51 @@ describe('headless stream-json snapshots', () => {
       await server.close()
     }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('integrates a keyless Agent Team worker commit from an isolated worktree', async () => {
+    let workers: string | undefined
+    let phases: string[] = []
+    try {
+      const result = await runLoaderSmoke({
+        label: 'Agent Team Git integration', tempDirPrefix: 'headless-team-git-',
+        binScript, libBinScript: binScript, configPath: teamConfigPath,
+        binArgs: [teamConfigPath, 'Use Agent Teams to commit isolated worker output and verify its integration.'],
+        tsconfigPath, processTimeoutMs: 60_000,
+        env: { DSH_SNAPSHOT: 'team', DSH_TEAM_WORKTREES: '1' },
+        prepare: async (cwd) => {
+          workers = `${cwd}-workers`
+          const git = async (...args: string[]) => await promisify(execFile)('git', args, { cwd, timeout: 10_000 })
+          await git('init', '--initial-branch=main')
+          await git('config', 'user.name', 'Team fixture')
+          await git('config', 'user.email', 'team@example.invalid')
+          await git('config', 'commit.gpgsign', 'false')
+          await writeFile(join(cwd, '.gitignore'), '.dsh\n.agents\n.sessions\n')
+          await writeFile(join(cwd, 'shared.txt'), 'base\n')
+          await git('add', '.gitignore', 'shared.txt')
+          await git('commit', '-m', 'base')
+        },
+        inspect: async (cwd) => {
+          const logs = await persistedLogs(cwd)
+          expect(await readFile(join(cwd, 'shared.txt'), 'utf8'), JSON.stringify(logs.map(log =>
+            parseJsonl(log.content).filter(row => row.type === 'tool/result' || row.type === 'turn/end')))).toBe('worker\n')
+          const lead = logs.find(log => typeof log.header.parentSession !== 'string')
+          if (lead === undefined) throw new Error('Team integration has no persisted Lead')
+          const rows = parseJsonl(lead.content)
+          phases = rows.filter(row => row.type === 'team/integration')
+            .map(row => String(((row.data as JsonObject).integration as JsonObject).phase))
+          expect(rows.filter(row => row.type === 'team/worktree').map(row =>
+            ((row.data as JsonObject).worktree as JsonObject).phase)).toEqual(['reserved', 'ready', 'released'])
+          expect(logs).toHaveLength(2)
+          expect(logs.find(log => typeof log.header.parentSession === 'string')?.header.cwd).not.toBe(cwd)
+        },
+      })
+      expect(result.stderr).toBe('')
+      expect(parseJsonl(result.stdout).at(-1)).toMatchObject({ type: 'result', output: 'TEAM_WORKTREE_OK: verified worker commit integrated.' })
+      expect(phases).toEqual(['queued', 'running', 'verified', 'merged'])
+    } finally {
+      if (workers !== undefined) await rm(workers, { recursive: true, force: true })
+    }
+  })
 
   it('runs a keyless Agent Team with peer mail, dependent tasks, waiting, and Lead aggregation', async () => {
     let projection: unknown

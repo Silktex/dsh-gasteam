@@ -1,0 +1,8 @@
+version: 1
+scenario: team-task-evidence
+profile: sdk
+composition: team-task-evidence
+recording: authored
+header:
+  class: team-evidence-sdk
+  pin: true

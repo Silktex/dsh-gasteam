@@ -11,6 +11,8 @@ kind: "package-library"
 
 `dsh-session-snapshot` 提供无密钥已记录会话测试（`pnpm run test:snapshot`）背后的共享支持：封闭 manifest、类型化身份脱敏、规范化、workspace 比较、fixture 保护，以及 headless、SDK、ACP 与 Web owner 使用的协议适配器。ACP 适配器以真实子进程启动被测 profile，驱动确定性输入脚本，并注册完整的录制、回放与刷新套件。每个场景都提交足够证据来证明模型可见输出与文件系统效果，不依赖 agent 自述。包入口会导入 vitest，因此只能在 vitest 运行中使用。
 
+Recorded Team 可以使用多个 checkout。Snapshot adapter 通过 `NormalizeContext.externalRoots` 声明测试拥有的外部目录，并为每个目录指定不同的稳定 token。这些根目录不是 cwd 别名；未声明的同级路径保持字面值。将共享运行 context 传给 `tokenizeSessionFixtureCwd` 可保留每个 child header 的工作区身份。
+
 ## 目录
 
 - [使用本包](#use-this-package)

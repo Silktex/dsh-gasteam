@@ -17,8 +17,12 @@ import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-a
 import TeamService, { TeamError, TeamId, TeamMessageId, TeamTaskId } from '../src/index.ts'
 import { TeamRuntimeLifecycle } from '../src/lifecycle.ts'
 import { teamProjectionDefinition } from '../src/projection.ts'
-import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot } from '../src/index.ts'
+import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot, TeamIntegrationSpec, TeamCommitId } from '../src/index.ts'
 import { TestSessionQuery } from './test-session-query.ts'
+import { gitFixture } from './git-fixture.ts'
+import * as GitWorktrees from '../src/git-worktrees.ts'
+import * as IntegrationWorker from '../src/integration-worker.ts'
+import * as Supervisor from '../src/supervisor.ts'
 
 const SIGNAL = new AbortController().signal
 const roots: string[] = []
@@ -48,6 +52,7 @@ function durable(agent: Agent): {
 async function setup(
   script: ConstructorParameters<typeof MockAdapter>[0],
   config: ConstructorParameters<typeof TeamService>[1] = {},
+  cwd?: string,
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
@@ -63,7 +68,7 @@ async function setup(
   const teamFiber = await ctx.plugin(TeamService, config)
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
-  const lead = ctx.agentLoop.create(SessionId('lead'), { provider: 'mock', model: 'mock' })
+  const lead = ctx.agentLoop.create(SessionId('lead'), { provider: 'mock', model: 'mock' }, cwd === undefined ? {} : { cwd })
   return { ctx, lead, adapter, storageRoot, teamFiber }
 }
 
@@ -145,6 +150,10 @@ describe('Team identity and provisioning', () => {
     const fields = [
       'maxMembers',
       'maxTasks',
+      'maxBatches',
+      'maxRecoveryAttempts',
+      'maxBatchTextLength',
+      'maxTaskResultLength',
       'maxPendingMessagesPerMember',
       'maxMessageBytes',
       'disposalTimeoutMs',
@@ -631,8 +640,12 @@ describe('Team shared task DAG', () => {
       taskId: first.id,
       expectedRevision: claimed.revision,
       action: 'complete',
+      result: 'Implemented first task; verified focused tests.',
     })
-    expect(completed.status).toBe('completed')
+    expect(completed).toMatchObject({
+      status: 'completed',
+      result: 'Implemented first task; verified focused tests.',
+    })
     expect(ctx.agentTeams.getTask(beta, second.id).ready).toBe(true)
     const secondClaim = await ctx.agentTeams.updateTask(beta, {
       taskId: second.id,
@@ -724,6 +737,21 @@ describe('Team shared task DAG', () => {
     })).rejects.toMatchObject({ code: 'TEAM_TASK_HAS_DEPENDENTS' })
   })
 
+  it('bounds normalized completion evidence without advancing rejected revisions', async () => {
+    const { ctx, lead } = await setup([], { maxTaskResultLength: 2 })
+    const created = await ctx.agentTeams.createTask(lead, { subject: 'bounded', description: 'evidence' })
+    const claimed = await ctx.agentTeams.updateTask(lead, {
+      taskId: created.id, expectedRevision: 1, action: 'claim',
+    })
+    await expect(ctx.agentTeams.updateTask(lead, {
+      taskId: created.id, expectedRevision: claimed.revision, action: 'complete', result: 'abc',
+    })).rejects.toMatchObject({ code: 'TEAM_INVALID_ARGUMENT' })
+    expect(ctx.agentTeams.getTask(lead, created.id).revision).toBe(claimed.revision)
+    expect(await ctx.agentTeams.updateTask(lead, {
+      taskId: created.id, expectedRevision: claimed.revision, action: 'complete', result: ' 😀 ',
+    })).toMatchObject({ status: 'completed', result: '😀' })
+  })
+
   it('supports Lead reassignment, completion, reopen, and deletion permissions', async () => {
     const { ctx, lead } = await setup(['hang'])
     const started = await spawn(ctx, lead, 'owner')
@@ -741,11 +769,24 @@ describe('Team shared task DAG', () => {
       action: 'reassign',
       owner: 'lead',
     })).rejects.toMatchObject({ code: 'TEAM_LEAD_REQUIRED' })
+    await expect(ctx.agentTeams.updateTask(owner, {
+      taskId: task.id,
+      expectedRevision: assigned.revision,
+      action: 'complete',
+    })).rejects.toMatchObject({ code: 'TEAM_INVALID_ARGUMENT' })
+    await expect(ctx.agentTeams.updateTask(owner, {
+      taskId: task.id,
+      expectedRevision: assigned.revision,
+      action: 'complete',
+      result: ' ',
+    })).rejects.toMatchObject({ code: 'TEAM_INVALID_ARGUMENT' })
     const complete = await ctx.agentTeams.updateTask(owner, {
       taskId: task.id,
       expectedRevision: assigned.revision,
       action: 'complete',
+      result: 'Lifecycle work completed and verified.',
     })
+    expect(complete.result).toBe('Lifecycle work completed and verified.')
     await expect(ctx.agentTeams.updateTask(lead, {
       taskId: task.id,
       expectedRevision: complete.revision,
@@ -757,17 +798,26 @@ describe('Team shared task DAG', () => {
       expectedRevision: complete.revision,
       action: 'reopen',
     })
+    expect('result' in reopened).toBe(false)
     const claimed = await ctx.agentTeams.updateTask(owner, {
       taskId: task.id,
       expectedRevision: reopened.revision,
       action: 'claim',
     })
-    const deleted = await ctx.agentTeams.updateTask(owner, {
+    const recompleted = await ctx.agentTeams.updateTask(owner, {
       taskId: task.id,
       expectedRevision: claimed.revision,
+      action: 'complete',
+      result: 'Verified the reopened work.',
+    })
+    const deleted = await ctx.agentTeams.updateTask(owner, {
+      taskId: task.id,
+      expectedRevision: recompleted.revision,
       action: 'delete',
     })
     expect(deleted.status).toBe('deleted')
+    expect(deleted).not.toHaveProperty('result')
+    expect(ctx.agentTeams.getTask(lead, task.id)).not.toHaveProperty('result')
     expect(ctx.agentTeams.listTasks(lead)).toEqual([])
     await expect(ctx.agentTeams.updateTask(owner, {
       taskId: task.id,
@@ -802,6 +852,7 @@ describe('Team shared task DAG', () => {
     expect(leadClaim.ownerName).toBe('lead')
     const completedBlocker = await ctx.agentTeams.updateTask(lead, {
       taskId: blocker.id, expectedRevision: leadClaim.revision, action: 'complete',
+      result: 'Blocker completed.',
     })
     expect(completedBlocker.status).toBe('completed')
     const assigned = await ctx.agentTeams.updateTask(lead, {
@@ -866,6 +917,8 @@ describe('Team Remote API', () => {
     expect(ctx.agentTeams.remoteView(lead)).toEqual({
       members: [expect.objectContaining({ name: 'lead', role: 'lead', status: 'idle' })],
       tasks: [],
+      batches: [],
+      integrations: [],
     })
 
     const createdResult = await ctx.agentTeams.remoteCreateTask(lead, {
@@ -1796,5 +1849,360 @@ describe('Team mailbox and waiting', () => {
     expect(durable(second.lead).members[0]).toMatchObject({
       phase: 'failed', error: 'settled elsewhere',
     })
+  })
+})
+
+
+describe('Team worktree ownership', () => {
+  it('persists worker cwd across cold follow-up and refuses messages after release', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setup([textResponse('first'), textResponse('second')], {
+      worktreeProvider: 'git',
+    }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    const started = await spawn(ctx, lead, 'worker')
+    const worktree = started.member.worktree!
+    expect(worktree.phase).toBe('ready')
+    expect(worktree.cwd).not.toBe(fixture.repository)
+    await waitNoAgent(ctx, started.member.id)
+    expect((await ctx.sessionPersistence.inspect(started.member.id, SIGNAL)).meta.cwd).toBe(worktree.cwd)
+    await ctx.agentTeams.sendMessage(lead, {
+      target: 'worker', content: content('follow-up'), delivery: 'wakeup', signal: SIGNAL,
+    })
+    await waitNoAgent(ctx, started.member.id)
+    expect((await ctx.sessionPersistence.inspect(started.member.id, SIGNAL)).meta.cwd).toBe(worktree.cwd)
+    await ctx.agentTeams.releaseWorktree(lead, 'worker', SIGNAL)
+    expect(ctx.agentTeams.listMembers(lead).find(member => member.name === 'worker')?.worktree?.phase).toBe('released')
+    expect((await fixture.git('branch', '--list', worktree.branch)).stdout).toBe('')
+    await expect(ctx.agentTeams.sendMessage(lead, {
+      target: 'worker', content: content('late'), delivery: 'wakeup', signal: SIGNAL,
+    })).rejects.toMatchObject({ code: 'TEAM_WORKTREE_UNAVAILABLE' })
+  })
+
+  it('records ownership before provisioning and rolls back a cancelled initial spawn', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setup([], { worktreeProvider: 'git' }, fixture.repository)
+    const created = Promise.withResolvers<undefined>()
+    const resume = Promise.withResolvers<undefined>()
+    ctx.agentTeams.registerWorktreeProvider({
+      name: 'git',
+      resolve: (...args) => fixture.provider.resolve(...args),
+      release: (...args) => fixture.provider.release(...args),
+      async provision(spec, signal) {
+        const event = lead.session.events.find(event => event.type === 'team/worktree')
+        expect(event?.data).toMatchObject({ worktree: { phase: 'reserved', cwd: spec.cwd } })
+        await fixture.provider.provision(spec, signal)
+        created.resolve(undefined)
+        await resume.promise
+      },
+    })
+    const abort = new AbortController()
+    const spawning = ctx.agentTeams.spawnTeammate(lead, {
+      name: 'worker', description: 'worker', prompt: content('work'), context: 'fresh', provider: 'spawn', signal: abort.signal,
+    })
+    const rejected = expect(spawning).rejects.toThrow('cancelled')
+    await created.promise
+    abort.abort(new Error('cancelled'))
+    resume.resolve(undefined)
+    await rejected
+    expect(ctx.agentTeams.listMembers(lead).find(member => member.name === 'worker')).toMatchObject({
+      status: 'failed', worktree: { phase: 'released' },
+    })
+    expect(ctx.agents.list()).toHaveLength(1)
+  })
+
+  it('removes a provider with its plugin and rejects subsequent worktree creation', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setup([], { worktreeProvider: 'git' }, fixture.repository)
+    const fiber = await ctx.plugin(GitWorktrees, fixture.config)
+    await fiber.dispose()
+    await expect(spawn(ctx, lead, 'worker')).rejects.toMatchObject({ code: 'TEAM_WORKTREE_UNAVAILABLE' })
+  })
+})
+
+
+describe('Team durable task batches', () => {
+  it('restores a batch after disposing and resuming its Lead Session', async () => {
+    const { ctx } = await setup([])
+    const first = await ctx.agents.create({
+      sessionId: SessionId('durable-batch-lead'), agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const task = await ctx.agentTeams.createTask(first.agent, { subject: 'Persistent work', description: 'Survive Lead restoration' })
+    const batch = await ctx.agentTeams.createBatch(first.agent, { name: 'Delivery', description: 'Persistent ledger', taskIds: [task.id] })
+    await first.dispose()
+    const restored = await ctx.agents.resume({
+      resumeSessionId: first.agent.id, agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    try {
+      expect(restored.agent).not.toBe(first.agent)
+      expect(ctx.agentTeams.listBatches(restored.agent)).toEqual([batch])
+      expect(ctx.agentTeams.listTasks(restored.agent)).toMatchObject([{ id: task.id, status: 'pending' }])
+    } finally { await restored.dispose() }
+  })
+
+  it('retains task membership across service reload and derives completion after reopen', async () => {
+    const { ctx, lead, teamFiber } = await setup([])
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'work', description: 'work' })
+    const batch = await ctx.agentTeams.createBatch(lead, { name: 'delivery', description: 'delivery scope', taskIds: [task.id] })
+    await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 1, action: 'claim' })
+    await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 2, action: 'complete', result: 'verified' })
+    expect(ctx.agentTeams.listBatches(lead)).toMatchObject([{ status: 'completed', completedTasks: 1 }])
+    await teamFiber.dispose()
+    await ctx.plugin(TeamService)
+    expect(ctx.agentTeams.listBatches(lead)).toMatchObject([{ id: batch.id, taskIds: [task.id], status: 'completed' }])
+    await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 3, action: 'reopen' })
+    expect(ctx.agentTeams.listBatches(lead)).toMatchObject([{ status: 'active', completedTasks: 0 }])
+    await expect(ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 4, action: 'delete' }))
+      .rejects.toMatchObject({ code: 'TEAM_TASK_IN_BATCH' })
+    const archived = await ctx.agentTeams.updateBatch(lead, { batchId: batch.id, expectedRevision: 1, archive: true })
+    expect(archived.status).toBe('archived')
+    await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 4, action: 'delete' })
+    expect(ctx.agentTeams.listBatches(lead)[0]?.taskIds).toEqual([task.id])
+  })
+
+  it('rejects stale and invalid batch mutations without consuming revisions', async () => {
+    const { ctx, lead } = await setup([], { maxBatches: 1, maxBatchTextLength: 8 })
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'work', description: 'work' })
+    for (const taskIds of [[task.id, task.id], [TeamTaskId('missing')]]) {
+      await expect(ctx.agentTeams.createBatch(lead, { name: 'batch', description: 'scope', taskIds })).rejects.toThrow()
+    }
+    await expect(ctx.agentTeams.createBatch(lead, { name: 'too long a name', description: 'scope', taskIds: [] })).rejects.toThrow()
+    const batch = await ctx.agentTeams.createBatch(lead, { name: 'batch', description: 'scope', taskIds: [] })
+    expect(batch.status).toBe('active')
+    await expect(ctx.agentTeams.createBatch(lead, { name: 'other', description: 'scope', taskIds: [] }))
+      .rejects.toMatchObject({ code: 'TEAM_BATCH_LIMIT' })
+    await expect(ctx.agentTeams.updateBatch(lead, { batchId: batch.id, expectedRevision: 2, name: 'stale' }))
+      .rejects.toMatchObject({ code: 'TEAM_BATCH_STALE_REVISION' })
+    const updated = await ctx.agentTeams.updateBatch(lead, { batchId: batch.id, expectedRevision: 1, taskIds: [task.id] })
+    expect(updated).toMatchObject({ revision: 2, taskIds: [task.id] })
+    const archived = await ctx.agentTeams.updateBatch(lead, { batchId: batch.id, expectedRevision: 2, archive: true })
+    await expect(ctx.agentTeams.updateBatch(lead, { batchId: batch.id, expectedRevision: archived.revision, name: 'changed' }))
+      .rejects.toMatchObject({ code: 'TEAM_BATCH_ARCHIVED' })
+    expect((await ctx.agentTeams.createBatch(lead, { name: 'next', description: 'scope', taskIds: [] })).id).not.toBe(batch.id)
+  })
+})
+
+
+describe('Team supervisor recovery', () => {
+  async function stalledWorker(maxRecoveryAttempts = 1) {
+    const harness = await setup([textResponse('initial'), textResponse('recovered')], { maxRecoveryAttempts })
+    const started = await spawn(harness.ctx, harness.lead, 'worker')
+    await waitNoAgent(harness.ctx, started.member.id)
+    const task = await harness.ctx.agentTeams.createTask(harness.lead, { subject: 'unfinished', description: 'unfinished' })
+    await harness.ctx.agentTeams.updateTask(harness.lead, {
+      taskId: task.id, expectedRevision: 1, action: 'reassign', owner: 'worker',
+    })
+    return { ...harness, started, task }
+  }
+
+  it('coalesces simultaneous recovery and retains its lifetime budget across reload', async () => {
+    const { ctx, lead, teamFiber, started, task } = await stalledWorker()
+    const request = { target: 'worker', observedEventCount: -1, reason: 'Continue unfinished work.' }
+    const outcomes = await Promise.allSettled([
+      ctx.agentTeams.recoverTeammate(lead, request, SIGNAL),
+      ctx.agentTeams.recoverTeammate(lead, request, SIGNAL),
+    ])
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1)
+    expect(outcomes.filter(outcome => outcome.status === 'rejected')).toHaveLength(1)
+    await waitNoAgent(ctx, started.member.id)
+    expect(ctx.agentTeams.getTask(lead, task.id)).toMatchObject({ status: 'in_progress', ownerName: 'worker' })
+    await teamFiber.dispose()
+    await ctx.plugin(TeamService, { maxRecoveryAttempts: 1 })
+    await expect(ctx.agentTeams.recoverTeammate(lead, request, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_RECOVERY_LIMIT' })
+    expect(ctx.agentTeams.listMembers(lead).find(member => member.name === 'worker')?.recoveryAttempts).toBe(1)
+  })
+
+  it('rejects a stale heartbeat observation and skips workers without unfinished tasks', async () => {
+    const { ctx, lead, started, task } = await stalledWorker()
+    await expect(ctx.agentTeams.recoverTeammate(lead, {
+      target: 'worker', observedEventCount: 1, reason: 'Recover',
+    }, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_RECOVERY_STALE' })
+    await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 2, action: 'complete', result: 'verified' })
+    await expect(ctx.agentTeams.recoverTeammate(lead, {
+      target: 'worker', observedEventCount: -1, reason: 'Recover',
+    }, SIGNAL)).rejects.toMatchObject({ code: 'TEAM_RECOVERY_NOT_NEEDED' })
+    expect(ctx.agentTeams.listMembers(lead).find(member => member.id === started.member.id)?.recoveryAttempts).toBeUndefined()
+  })
+
+  it('patrols after the inactivity threshold and stops scheduling on disposal', async () => {
+    const { ctx, lead, started } = await stalledWorker()
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const fiber = await ctx.plugin(Supervisor, {
+      scanIntervalMs: 100, staleAfterMs: 1_000, recoveryMessage: 'Resume unfinished work.',
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(lead.session.events.filter(event => event.type === 'team/recovery')).toHaveLength(0)
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.waitFor(() => { expect(lead.session.events.filter(event => event.type === 'team/recovery')).toHaveLength(1) })
+      await waitNoAgent(ctx, started.member.id)
+    } finally {
+      await fiber.dispose()
+    }
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(lead.session.events.filter(event => event.type === 'team/recovery')).toHaveLength(1)
+  })
+
+  it('awaits an in-flight patrol and prevents wakeup after disposal', async () => {
+    const { ctx, lead } = await stalledWorker()
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const flush = ctx.sessions.flush.bind(ctx.sessions)
+    vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
+      if (session === lead.session && session.events.at(-1)?.type === 'team/recovery') {
+        entered.resolve(undefined)
+        await release.promise
+      }
+      return flush(session)
+    })
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    const fiber = await ctx.plugin(Supervisor, {
+      scanIntervalMs: 100, staleAfterMs: 100, recoveryMessage: 'Resume unfinished work.',
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(200)
+      await entered.promise
+      const disposing = fiber.dispose()
+      release.resolve(undefined)
+      await disposing
+      expect(lead.session.events.filter(event => event.type === 'team/message/queued')).toHaveLength(0)
+    } finally {
+      release.resolve(undefined)
+      await fiber.dispose()
+    }
+  })
+})
+
+describe('durable Team integration queue', () => {
+  async function queuedWorker() {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead, teamFiber } = await setup([textResponse('ready')], { worktreeProvider: 'git', integrationProvider: 'test', maxIntegrations: 1 }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    const { member } = await spawn(ctx, lead, 'worker')
+    await waitNoAgent(ctx, member.id)
+    const worktree = ctx.agentTeams.listMembers(lead).find(row => row.id === member.id)!.worktree!
+    const provider = {
+      name: 'test',
+      resolve: vi.fn(async (_worktree: unknown, id: string) => ({
+        repository: worktree.repository, cwd: join(fixture.root, id), sourceBranch: worktree.branch,
+        sourceCommit: worktree.baseCommit, targetBranch: 'main' as typeof worktree.branch,
+        verification: [{ command: 'configured-check', args: [] }],
+      })),
+      target: vi.fn(async () => worktree.baseCommit),
+      verify: vi.fn(async (_spec: TeamIntegrationSpec, _target: TeamCommitId, _signal: AbortSignal) => worktree.baseCommit),
+      promote: vi.fn(async () => {}),
+    }
+    ctx.agentTeams.registerIntegrationProvider(provider)
+    const job = await ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)
+    return { ctx, lead, teamFiber, provider, job }
+  }
+
+  it('aborts in-flight background verification and retains its failed queue record on disposal', async () => {
+    const { ctx, lead, provider } = await queuedWorker()
+    const entered = Promise.withResolvers<undefined>()
+    provider.verify.mockImplementationOnce(async (_spec, _target, signal) => {
+      entered.resolve(undefined)
+      return await new Promise<TeamCommitId>((_resolve, reject) => {
+        signal.addEventListener('abort', () => { reject(new Error('verification cancelled', { cause: signal.reason })) }, { once: true })
+      })
+    })
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const fiber = await ctx.plugin(IntegrationWorker, { scanIntervalMs: 100 })
+    try {
+      await vi.advanceTimersByTimeAsync(100)
+      await entered.promise
+      await fiber.dispose()
+      expect(ctx.agentTeams.listIntegrations(lead)[0]?.phase).toBe('failed')
+      expect(provider.promote).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(provider.verify).toHaveBeenCalledTimes(1)
+    } finally {
+      await fiber.dispose()
+      await teamInternals(ctx).disposeRuntime()
+    }
+  })
+
+  it('persists each verification phase and enforces queue capacity', async () => {
+    const { ctx, lead, provider } = await queuedWorker()
+    try {
+      await expect(ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)).rejects.toMatchObject({ code: 'TEAM_INTEGRATION_LIMIT' })
+      provider.verify.mockImplementationOnce(async () => {
+        expect(ctx.agentTeams.listIntegrations(lead)[0]?.phase).toBe('running')
+        return await provider.target()
+      })
+      provider.promote.mockImplementationOnce(async () => {
+        expect(ctx.agentTeams.listIntegrations(lead)[0]?.phase).toBe('verified')
+      })
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toBeUndefined()
+      expect(lead.session.events.filter(event => event.type === 'team/integration').map(event => event.data.integration.phase))
+        .toEqual(['queued', 'running', 'verified', 'merged'])
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('refuses promotion until an appended verified candidate is flushed successfully', async () => {
+    const { ctx, lead, provider } = await queuedWorker()
+    const flush = ctx.sessions.flush.bind(ctx.sessions)
+    let failures = 2
+    const spy = vi.spyOn(ctx.sessions, 'flush').mockImplementation(async (session) => {
+      if (session === lead.session && ctx.agentTeams.listIntegrations(lead)[0]?.phase === 'verified' && failures-- > 0) {
+        throw new Error('verified checkpoint unavailable')
+      }
+      return await flush(session)
+    })
+    try {
+      await expect(ctx.agentTeams.runIntegration(lead, SIGNAL)).rejects.toThrow('checkpoint unavailable')
+      await expect(ctx.agentTeams.runIntegration(lead, SIGNAL)).rejects.toThrow('checkpoint unavailable')
+      expect(provider.promote).not.toHaveBeenCalled()
+      spy.mockRestore()
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
+      expect(provider.verify).toHaveBeenCalledTimes(1)
+    } finally {
+      spy.mockRestore()
+      await teamInternals(ctx).disposeRuntime()
+    }
+  })
+
+  it('marks interrupted verification failed without rerunning the retained candidate checkout', async () => {
+    const { ctx, lead, provider, job, teamFiber } = await queuedWorker()
+    lead.session.append('team/integration', {
+      version: 1, teamId: TeamId(lead.id), integration: { ...job, phase: 'running', targetCommit: job.sourceCommit },
+    })
+    await ctx.sessions.flush(lead.session)
+    await teamFiber.dispose()
+    await ctx.plugin(TeamService, { integrationProvider: 'test' })
+    ctx.agentTeams.registerIntegrationProvider(provider)
+    try {
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'failed', cwd: job.cwd })
+      expect(provider.verify).not.toHaveBeenCalled()
+      expect(provider.promote).not.toHaveBeenCalled()
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('recovers a verified promotion after service reload without repeating verification', async () => {
+    const { ctx, lead, provider, teamFiber } = await queuedWorker()
+    try {
+      provider.promote.mockRejectedValueOnce(new Error('promotion acknowledgement lost'))
+      await expect(ctx.agentTeams.runIntegration(lead, SIGNAL)).rejects.toThrow('acknowledgement lost')
+      expect(ctx.agentTeams.listIntegrations(lead)[0]?.phase).toBe('verified')
+      await teamFiber.dispose()
+      await ctx.plugin(TeamService, { integrationProvider: 'test' })
+      ctx.agentTeams.registerIntegrationProvider(provider)
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'merged' })
+      expect(provider.verify).toHaveBeenCalledTimes(1)
+      expect(provider.promote).toHaveBeenCalledTimes(2)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('retains failed verification and allows explicit abandonment of blocked promotion', async () => {
+    const { ctx, lead, provider, job } = await queuedWorker()
+    try {
+      provider.promote.mockRejectedValueOnce(new Error('target moved'))
+      await expect(ctx.agentTeams.runIntegration(lead, SIGNAL)).rejects.toThrow('target moved')
+      expect(await ctx.agentTeams.abandonIntegration(lead, job.id, 'Reverify the new target', SIGNAL)).toMatchObject({ phase: 'failed', candidateCommit: job.sourceCommit })
+      await ctx.agentTeams.enqueueIntegration(lead, 'worker', SIGNAL)
+      provider.verify.mockRejectedValueOnce(new Error('verification failed'))
+      expect(await ctx.agentTeams.runIntegration(lead, SIGNAL)).toMatchObject({ phase: 'failed', error: 'verification failed' })
+    } finally { await teamInternals(ctx).disposeRuntime() }
   })
 })

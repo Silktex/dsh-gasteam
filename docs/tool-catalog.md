@@ -37,7 +37,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`, `list_agents`, `send_message` | `ctx.tools`, `ctx.subagents`, `ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`, `tool/result`, `child session events through ctx.subagents` | - | The globally named control tools over continuable background subagents: provider-bound `tool-subagent` instances register distinct delegation tools, while this package registers `send_message` and `interrupt_agent` once, plus `list_agents` from its separately loaded `/list-agents` plugin (whose catalog rows use the sessionProjections and live Agent registries). |
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`, `ctx.systemPrompt`, `a live continuable in-process child Agent` | `tool/call`, `tool/result`, `a user-role message in the direct parent session` | - | Registered per continuable in-process child rather than globally, so this schema is visible only inside such a child and survives its global `toolFilter`. The same contribution installs the child-scoped `tool:report` prompt section, which this catalog does not render. The parent-facing `send_message` tool is installed independently. |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`, `job_list`, `job_output` | `ctx.tools`, `ctx.jobs`, `ctx.systemPrompt` | `tool/call`, `tool/result`, `user/message via agent.inject() for background completion notices` | - | The kind-agnostic background-job controller: background bash commands, PTY sends, and subagents are read, listed, and killed through the same three tools. Loading the plugin attaches the controller that arms producers' `ctx.jobs.start()`. |
-| `@deepseek-ai/dsh-experimental-tool-agent-team` | `followup_task`, `interrupt_agent`, `list_agents`, `send_message`, `spawn_teammate`, `team_task_create`, `team_task_get`, `team_task_list`, `team_task_update`, `wait_agent` | `ctx.tools`, `ctx.systemPrompt`, `ctx.agentTeams`, `an exact live Team member Agent` | `tool/call`, `team/member`, `team/message/queued`, `team/message/delivered`, `team/task`, `tool/result` | - | All ten tools are scoped to implicit Team Leads and durable teammates. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names. |
+| `@deepseek-ai/dsh-experimental-tool-agent-team` | `followup_task`, `interrupt_agent`, `list_agents`, `send_message`, `spawn_teammate`, `team_batch_create`, `team_batch_list`, `team_batch_update`, `team_integration_abandon`, `team_integration_enqueue`, `team_integration_list`, `team_integration_run`, `team_task_create`, `team_task_get`, `team_task_list`, `team_task_update`, `team_worktree_release`, `wait_agent` | `ctx.tools`, `ctx.systemPrompt`, `ctx.agentTeams`, `an exact live Team member Agent` | `tool/call`, `team/member`, `team/worktree`, `team/integration`, `team/batch`, `team/message/queued`, `team/message/delivered`, `team/task`, `tool/result` | - | Tools are scoped to implicit Team Leads and durable teammates. This catalog includes the optional worktree-release and integration tools; deployments enable them with the corresponding Team provider configuration. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names. |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`, `owning Agent session` | `tool/call`, `todo/write`, `tool/result` | - | todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
@@ -1895,6 +1895,189 @@ Create one named, durable teammate. Only the Team Lead may call this tool.
 
 Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
 
+### `team_batch_create`
+
+Create a durable named batch of shared tasks whose progress survives Lead restarts. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Batch name."
+    },
+    "description": {
+      "type": "string",
+      "description": "Batch outcome and scope."
+    },
+    "task_ids": {
+      "type": "array",
+      "description": "Current task ids, without duplicates.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "name",
+    "description",
+    "task_ids"
+  ]
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_batch_list`
+
+Read durable task batches, including archived entries and current completion counts.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "type": "integer",
+      "description": "Zero-based result offset. Defaults to 0."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Number of rows, 1 through 100. Defaults to 50."
+    }
+  }
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_batch_update`
+
+Edit or permanently archive a durable task batch using its current revision. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "batch_id": {
+      "type": "string",
+      "description": "Batch id from team_batch_list."
+    },
+    "expected_revision": {
+      "type": "integer",
+      "description": "Current batch revision."
+    },
+    "name": {
+      "type": "string",
+      "description": "Replacement name."
+    },
+    "description": {
+      "type": "string",
+      "description": "Replacement outcome and scope."
+    },
+    "task_ids": {
+      "type": "array",
+      "description": "Complete replacement task list.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "archive": {
+      "type": "boolean",
+      "description": "True permanently archives the batch and releases its task references."
+    }
+  },
+  "required": [
+    "batch_id",
+    "expected_revision"
+  ]
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_integration_abandon`
+
+Stop retrying a blocked integration and retain its candidate checkout for inspection. A new request pins new inputs. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Integration id."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why this request is being abandoned."
+    }
+  },
+  "required": [
+    "id",
+    "reason"
+  ]
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_integration_enqueue`
+
+Queue a quiescent worker’s committed output for isolated verification and integration into the configured target branch. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "target": {
+      "type": "string",
+      "description": "Teammate name."
+    }
+  },
+  "required": [
+    "target"
+  ]
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_integration_list`
+
+Read pinned integration requests and durable verification or promotion outcomes.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "type": "integer",
+      "description": "Zero-based result offset. Defaults to 0."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Number of rows, 1 through 100. Defaults to 50."
+    }
+  }
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_integration_run`
+
+Verify and promote the oldest queued integration, or recover its verified promotion. Failed verification retains the candidate checkout. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
 ### `team_task_create`
 
 Create one unowned pending task on the shared Team task board.
@@ -2050,12 +2233,37 @@ Compare-and-set a shared task action using the latest revision from team_task_ge
     "owner": {
       "type": "string",
       "description": "Member name for Lead-only reassign; omit to unassign."
+    },
+    "result": {
+      "type": "string",
+      "description": "Required completion evidence: outcome, changed artifacts, and verification."
     }
   },
   "required": [
     "task_id",
     "expected_revision",
     "action"
+  ]
+}
+```
+
+Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
+
+### `team_worktree_release`
+
+Release a quiescent teammate worktree after its commits are merged. Dirty or unmerged work is preserved. Team Lead only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "target": {
+      "type": "string",
+      "description": "Teammate name."
+    }
+  },
+  "required": [
+    "target"
   ]
 }
 ```
@@ -2080,7 +2288,7 @@ Wait for the next teammate status, mailbox, or shared-task change after this cal
 
 Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/experimental/tool-agent-team/src/index.ts)
 
-All ten tools are scoped to implicit Team Leads and durable teammates. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names.
+Tools are scoped to implicit Team Leads and durable teammates. This catalog includes the optional worktree-release and integration tools; deployments enable them with the corresponding Team provider configuration. The shipped dsh-base bundle keeps the package disabled; the documented Agent Teams profile patch enables it while disabling the legacy continuable-child control names.
 
 <a id="deepseek-aidsh-tool-todo"></a>
 

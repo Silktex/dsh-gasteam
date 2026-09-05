@@ -2,6 +2,12 @@
 
 export type {
   CreateTeamTaskRequest,
+  CreateTeamBatchRequest,
+  UpdateTeamBatchRequest,
+  TeamBatchId,
+  TeamBatchView,
+  TeamIntegrationSnapshot,
+  TeamWorktreeSnapshot,
   TeamMemberView,
   TeamTaskAction,
   TeamTaskId,

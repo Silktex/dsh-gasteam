@@ -772,6 +772,32 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 ### `team/*`
 
+<a id="teambatch--log-only"></a>
+
+#### `team/batch` — log-only
+
+```ts persistence-catalog
+/** Whole task-batch membership and archive state, retained across Lead restarts. */
+'team/batch': { version: 1; teamId: TeamId; batch: TeamBatchSnapshot }
+```
+
+类型： [TeamBatchSnapshot](subsystems/agent-team.zh.md) · [TeamId](subsystems/agent-team.zh.md)
+
+来源： [`packages/experimental/agent-team/src/types.ts:425`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamintegration--log-only"></a>
+
+#### `team/integration` — log-only
+
+```ts persistence-catalog
+/** Whole pinned integration request and its durable execution phase. */
+'team/integration': { version: 1; teamId: TeamId; integration: TeamIntegrationSnapshot }
+```
+
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamIntegrationSnapshot](subsystems/agent-team.zh.md)
+
+来源： [`packages/experimental/agent-team/src/types.ts:419`](../packages/experimental/agent-team/src/types.ts)
+
 <a id="teammember--log-only"></a>
 
 #### `team/member` — log-only
@@ -781,9 +807,9 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'team/member': { version: 1; teamId: TeamId; member: TeamMemberSnapshot }
 ```
 
-类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMemberSnapshot](subsystems/agent-team.zh.md)
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamMemberSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:206`](../packages/experimental/agent-team/src/types.ts)
+来源： [`packages/experimental/agent-team/src/types.ts:421`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagedelivered--log-only"></a>
 
@@ -799,9 +825,9 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }
 ```
 
-类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMessageId](subsystems/agent-team.zh.md)
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamMessageId](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:212`](../packages/experimental/agent-team/src/types.ts)
+来源： [`packages/experimental/agent-team/src/types.ts:433`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagequeued--log-only"></a>
 
@@ -812,9 +838,22 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'team/message/queued': { version: 1; teamId: TeamId; message: TeamMessageSnapshot }
 ```
 
-类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMessageSnapshot](subsystems/agent-team.zh.md)
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamMessageSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:210`](../packages/experimental/agent-team/src/types.ts)
+来源： [`packages/experimental/agent-team/src/types.ts:431`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamrecovery--log-only"></a>
+
+#### `team/recovery` — log-only
+
+```ts persistence-catalog
+/** Recovery admission recorded before interrupting or waking a worker. */
+'team/recovery': { version: 1; teamId: TeamId; recovery: TeamRecoverySnapshot }
+```
+
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamRecoverySnapshot](subsystems/agent-team.zh.md)
+
+来源： [`packages/experimental/agent-team/src/types.ts:423`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teamtask--log-only"></a>
 
@@ -825,9 +864,22 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'team/task': { version: 1; teamId: TeamId; task: TeamTaskSnapshot }
 ```
 
-类型：[TeamId](subsystems/agent-team.zh.md) · [TeamTaskSnapshot](subsystems/agent-team.zh.md)
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamTaskSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:208`](../packages/experimental/agent-team/src/types.ts)
+来源： [`packages/experimental/agent-team/src/types.ts:429`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="teamworktree--log-only"></a>
+
+#### `team/worktree` — log-only
+
+```ts persistence-catalog
+/** Whole worker-worktree ownership value, recorded before Git mutations. */
+'team/worktree': { version: 1; teamId: TeamId; worktree: TeamWorktreeSnapshot }
+```
+
+类型： [TeamId](subsystems/agent-team.zh.md) · [TeamWorktreeSnapshot](subsystems/agent-team.zh.md)
+
+来源： [`packages/experimental/agent-team/src/types.ts:427`](../packages/experimental/agent-team/src/types.ts)
 
 ### `todo/*`
 

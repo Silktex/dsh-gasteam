@@ -29,7 +29,7 @@ Add this package to a composition when one agent should run a small team of name
 
 ### When to choose it
 
-Choose it when several agents must cooperate on one shared workspace and their roster, messages, and task state must survive crashes and restarts. Avoid it when teammates need separate working directories, when several processes must coordinate over one team, or when a task owner should be released automatically — none of those are supported. The team features need durable session storage to activate.
+Choose it when several agents must cooperate on one shared workspace and their roster, messages, and task state must survive crashes and restarts. Avoid it when several processes must coordinate over one team or when task owners should be released automatically; those behaviors are unsupported. The team features need durable session storage to activate.
 
 ### Smallest working setup
 
@@ -50,11 +50,48 @@ With the tools installed, the model does the rest on request — for example, "c
 |---|---|---|
 | `maxMembers` | `8` | Maximum teammates a team may ever create, including failed ones |
 | `maxTasks` | `256` | Maximum active tasks on the board |
+| `maxBatches` | `128` | Maximum non-archived batches |
+| `maxBatchTextLength` | `16,384` | Maximum UTF-16 code units in each batch name or description |
+| `maxRecoveryAttempts` | `3` | Maximum recovery admissions per teammate lifetime |
+| `maxIntegrations` | `32` | Maximum unfinished integration requests |
+| `maxTaskResultLength` | `16,384` | Maximum UTF-16 code units in trimmed completion evidence |
 | `maxPendingMessagesPerMember` | `64` | Maximum queued messages for one member |
 | `maxMessageBytes` | `65,536` | Maximum size of one sent message |
 | `disposalTimeoutMs` | `5,000` | Time allowed for shutdown cleanup |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-experimental-agent-team) is the exhaustive source for every accepted field and its JSDoc.
+
+### Optional worktrees, integration, and recovery
+
+Omitting `worktreeProvider` keeps the shared checkout. Mount these subpaths alongside the Team tools to give each worker a Git worktree, verify committed output, and recover silent workers. The worker directory must be absolute and outside the repository; its parent must exist. Replace the target branch and verification commands with the deployment's actual checks.
+
+```yaml
+- name: '@deepseek-ai/dsh-experimental-agent-team'
+  config:
+    worktreeProvider: git
+    integrationProvider: git
+- name: '@deepseek-ai/dsh-experimental-agent-team/git-worktrees'
+  config:
+    directory: /absolute/path/outside/repository/team-workers
+- name: '@deepseek-ai/dsh-experimental-agent-team/git-integration'
+  config:
+    targetBranch: main
+    verification:
+      - command: pnpm
+        args: [test]
+- name: '@deepseek-ai/dsh-experimental-agent-team/integration-worker'
+- name: '@deepseek-ai/dsh-experimental-agent-team/supervisor'
+```
+
+Worker worktrees start from committed Lead HEAD; uncommitted Lead edits are not copied. The selected cwd is persisted in the child header and retained for cold follow-ups. Enforcing capabilities use that child workspace under `workspace-write`; Git commits also need permission to write the repository’s shared Git metadata. Configure the deployment accordingly, because teammates cannot widen delegated permissions. `team_worktree_release` requires a quiescent worker with no unfinished owned tasks or queued mail, and preserves dirty, ignored, or unmerged output.
+
+`team_integration_enqueue` pins committed output from a quiescent worker. `team_integration_run` verifies the oldest request in a separate candidate checkout and fast-forwards the clean Lead checkout on the configured target branch. The optional integration worker runs that queue in the background. Failed verification retains its checkout; an interrupted verified promotion can be retried. If the target moved, abandon the blocked request with a reason and enqueue a new verification. Candidate checkouts are retained for inspection and manual cleanup.
+
+The optional supervisor treats unchanged child Session event counts as silence and recovers only workers with unfinished owned tasks. `scanIntervalMs`, `staleAfterMs`, and `recoveryMessage` configure its patrol. `maxRecoveryAttempts` bounds durable lifetime attempts; reload does not reset this budget or release task ownership.
+
+### Durable task batches
+
+The Lead creates named batches with task ids, edits them using their current revision, and archives them permanently. Completion counts derive from current task state; reopening a task changes its batch progress. Active batches prevent task deletion. Archived batches retain tombstone references and survive Lead restoration through the same Session log. `maxBatches` and `maxBatchTextLength` bound active batches and their text; `maxIntegrations` bounds unfinished integration requests.
 
 ### Teammates
 
@@ -74,7 +111,7 @@ Two delivery modes cover the two common intents: a quiet message delivers inform
 
 Any member can add a task with a title, details, optional dependencies on other tasks, and optional hints about which files it will touch. A task is claimable only when everything it depends on is complete.
 
-Tasks have an owner: a member claims a task to start work, completes it when done, releases it back, or reopens it; the Lead can assign a task to any member. Every change is compare-and-set: an update based on an outdated copy is rejected, so two members cannot silently overwrite each other's work.
+Tasks have an owner: a member claims a task to start work, completes it with concise evidence of the outcome, changed artifacts, and verification, releases it back, or reopens it; reopening or deleting removes earlier completion evidence. The Lead can assign a task to any member. Every change is compare-and-set: an update based on an outdated copy is rejected, so two members cannot silently overwrite each other's work.
 
 File hints produce warnings when two in-progress tasks plan to touch overlapping paths — they never block anything. Deleted tasks remain in history but disappear from the active list.
 
@@ -193,7 +230,7 @@ Peer messages append after the target's reusable history prefix. Cold resume reu
 These limits describe what a team cannot do yet or what needs special operational care. They are current package constraints, not a comparison with other coordination mechanisms.
 
 - **Experimental prototype with no stability promise** — the package is private, excluded from official releases, and its contracts change freely while it incubates.
-- **One process and one shared checkout** — members share cwd and observe edits immediately; this package provides no worktree, remote member, merge, or filesystem lock.
+- **One process** — Team transactions do not coordinate multiple harness processes. Worktrees separate checkouts, not filesystem permissions or external Git writers.
 - **Advisory write scopes** — Bash, formatters, code generators, and direct external writers can bypass filesystem version checks; Leads must coordinate ownership and review the final diff.
 - **Flat immutable roster** — only the Lead creates direct teammates; there is no nested Team, rename, deletion, or name reuse.
 - **No automatic ownership release** — idle, interruption, process exit, and failed work do not release a task owner.
@@ -213,6 +250,6 @@ Promotion to a product-role group requires reviewing the public contract, limita
 
 #### Future directions
 
-Undecided directions include nested Teams, automatic ownership release policies, cross-process mailbox transactions, and filesystem isolation via worktrees; none of these are committed.
+Undecided directions include nested Teams, automatic ownership release policies, cross-process mailbox transactions; none of these are committed.
 
 </details>

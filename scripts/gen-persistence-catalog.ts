@@ -57,6 +57,11 @@ const LINK_MAP: Record<string, string> = {
   TeamMessageId: 'subsystems/agent-team.md',
   TeamMessageSnapshot: 'subsystems/agent-team.md',
   TeamTaskSnapshot: 'subsystems/agent-team.md',
+  TeamWorktreeSnapshot: 'subsystems/agent-team.md',
+  TeamIntegrationSnapshot: 'subsystems/agent-team.md',
+  TeamBatchSnapshot: 'subsystems/agent-team.md',
+  TeamRecoverySnapshot: 'subsystems/agent-team.md',
+
 }
 
 /** One log event, extracted from a `SessionEventMap` declaration. */

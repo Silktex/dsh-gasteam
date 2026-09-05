@@ -1,0 +1,8 @@
+version: 1
+scenario: team-task-evidence
+profile: headless
+composition: team-task-evidence
+recording: authored
+header:
+  class: team-task-evidence
+  pin: true

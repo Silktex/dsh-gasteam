@@ -5,6 +5,22 @@ export const NS = 'agent-team'
 
 /** Simplified Chinese dictionary and key source. */
 export const zh = {
+  'worktree': '工作树',
+  'recoveries': '恢复尝试次数',
+  'batches': '任务批次',
+  'integrations': '集成队列',
+  'worktree.reserved': '已预留',
+  'worktree.ready': '就绪',
+  'worktree.released': '已释放',
+  'batch.active': '进行中',
+  'batch.completed': '已完成',
+  'batch.archived': '已归档',
+  'integration.queued': '排队中',
+  'integration.running': '验证中',
+  'integration.verified': '已验证，等待合并',
+  'integration.merged': '已合并',
+  'integration.failed': '失败，已保留工作树',
+
   trigger: 'Agent Team',
   refresh: '刷新 Team',
   close: '关闭',
@@ -23,6 +39,8 @@ export const zh = {
   cancel: '取消',
   edit: '编辑',
   complete: '完成',
+  completionEvidence: '完成依据',
+  result: '结果',
   reopen: '重开',
   delete: '删除',
   owner: 'Owner',
@@ -47,6 +65,22 @@ export type TeamKey = keyof typeof zh
 
 /** English dictionary checked against the Chinese key set. */
 export const en = {
+  'worktree': 'Worktree',
+  'recoveries': 'Recovery attempts',
+  'batches': 'Task batches',
+  'integrations': 'Integration queue',
+  'worktree.reserved': 'Reserved',
+  'worktree.ready': 'Ready',
+  'worktree.released': 'Released',
+  'batch.active': 'Active',
+  'batch.completed': 'Completed',
+  'batch.archived': 'Archived',
+  'integration.queued': 'Queued',
+  'integration.running': 'Verifying',
+  'integration.verified': 'Verified; awaiting promotion',
+  'integration.merged': 'Merged',
+  'integration.failed': 'Failed; checkout retained',
+
   trigger: 'Agent Team',
   refresh: 'Refresh Team',
   close: 'Close',
@@ -65,6 +99,8 @@ export const en = {
   cancel: 'Cancel',
   edit: 'Edit',
   complete: 'Complete',
+  completionEvidence: 'Completion evidence',
+  result: 'Result',
   reopen: 'Reopen',
   delete: 'Delete',
   owner: 'Owner',

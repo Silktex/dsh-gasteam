@@ -77,7 +77,7 @@ function researcher(messages) {
   }
   if (!names.includes('send_message')) {
     return toolChunks([
-      { name: 'team_task_update', args: { task_id: 'task-1', expected_revision: 2, action: 'complete' } },
+      { name: 'team_task_update', args: { task_id: 'task-1', expected_revision: 2, action: 'complete', result: 'Research notes recorded and verified.' } },
       { name: 'send_message', args: { target: 'implementer', message: 'Research complete: use the deterministic finding.' } },
     ])
   }
@@ -118,7 +118,7 @@ function implementer(messages) {
   }
   if (!names.includes('send_message')) {
     return toolChunks([
-      { name: 'team_task_update', args: { task_id: 'task-2', expected_revision: 2, action: 'complete' } },
+      { name: 'team_task_update', args: { task_id: 'task-2', expected_revision: 2, action: 'complete', result: 'Implementation completed and focused checks passed.' } },
       { name: 'send_message', args: { target: 'lead', message: 'Implementation complete and verified.' } },
     ])
   }
@@ -166,12 +166,43 @@ function lead(messages) {
   return toolChunks([{ name: 'wait_agent', args: { timeout_ms: 10000 } }])
 }
 
+function worktreeFlow(messages, worker) {
+  const names = calls(messages)
+  const last = latestAssistantCalls(messages)
+  const result = latestToolText(messages)
+  if (worker) {
+    if (!names.includes('bash')) return toolChunks([{ name: 'bash', args: {
+      description: 'Commit isolated worker output',
+      command: "printf 'worker\\n' > shared.txt && git add shared.txt && git -c commit.gpgSign=false commit -m worker",
+    } }])
+    return textChunks('Worker commit ready.')
+  }
+  if (!names.includes('spawn_teammate')) return toolChunks([{ name: 'spawn_teammate', args: {
+    name: 'worker', description: 'Commit isolated output', prompt: 'WORKTREE_WORKER_MARK: commit worker output.',
+  } }])
+  if (!names.includes('team_integration_enqueue')) {
+    if (last.includes('list_agents') && result.includes('"status":"inactive"')) {
+      return toolChunks([{ name: 'team_integration_enqueue', args: { target: 'worker' } }])
+    }
+    return toolChunks([{ name: 'list_agents', args: {} }])
+  }
+  if (!names.includes('team_integration_run')) return toolChunks([{ name: 'team_integration_run', args: {} }])
+  if (!names.includes('team_worktree_release')) {
+    if (!result.includes('"phase":"merged"')) throw new Error(`integration did not merge: ${result}`)
+    return toolChunks([{ name: 'team_worktree_release', args: { target: 'worker' } }])
+  }
+  if (!result.includes('"released":true')) throw new Error(`worktree was not released: ${result}`)
+  return textChunks('TEAM_WORKTREE_OK: verified worker commit integrated.')
+}
+
 class TeamFixtureAdapter extends LlmAdapter {
   async * stream(options) {
     const userText = options.messages.flatMap(message => message.role === 'user'
       ? message.content.filter(block => block.type === 'text').map(block => block.text)
       : []).join('\n')
-    const chunks = userText.includes('RESEARCHER_MARK')
+    const chunks = process.env.DSH_TEAM_WORKTREES === '1'
+      ? worktreeFlow(options.messages, userText.includes('WORKTREE_WORKER_MARK'))
+      : userText.includes('RESEARCHER_MARK')
       ? researcher(options.messages)
       : userText.includes('IMPLEMENTER_MARK')
         ? implementer(options.messages)

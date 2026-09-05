@@ -37,23 +37,45 @@
       "default": "./lib/typert.remote-client.js"
     },
     "./src/*": "./src/*",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./git-worktrees": {
+      "types": "./lib/types/git-worktrees.d.ts",
+      "default": "./lib/git-worktrees.js"
+    },
+    "./supervisor": {
+      "types": "./lib/types/supervisor.d.ts",
+      "default": "./lib/supervisor.js"
+    },
+    "./git-integration": {
+      "types": "./lib/types/git-integration.d.ts",
+      "default": "./lib/git-integration.js"
+    },
+    "./integration-worker": {
+      "types": "./lib/types/integration-worker.d.ts",
+      "default": "./lib/integration-worker.js"
+    }
   },
   "files": [
     "lib/index.js",
     "lib/invariant.js",
+    "lib/supervisor.js",
+    "lib/git-worktrees.js",
     "lib/types/**/*.js",
     "lib/types/**/*.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",
-    "lib/typert.remote-client.d.ts"
+    "lib/typert.remote-client.d.ts",
+    "lib/git-integration.js",
+    "lib/integration-worker.js"
   ],
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh-brand": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "execa": "^10.0.1",
+    "@deepseek-ai/dsh-util-values": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",

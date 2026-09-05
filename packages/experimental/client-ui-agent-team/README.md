@@ -31,9 +31,11 @@ Install the package through [`@deepseek-ai/dsh-experimental-agent-team-web-profi
 
 Opening the panel calls `agentTeams/view`. Roster rows show durable names, runtime status, model, and diagnostics. Selecting a healthy teammate refreshes the existing direct-child catalog and opens the ordinary `{ parentSessionId, childSessionId, mode: 'continuable' }` address. History and later human prompts continue through the stable addressed-subagent conversation path; this package adds no Team-specific address field.
 
+The panel also reads worktree branch and release state, durable recovery-attempt counts, named batch progress, and integration outcomes. These views come from the same Team projection; the model tools own batch and integration mutations.
+
 ### Manage the task board
 
-The task board shows task identity, owner, blockers, readiness, advisory write scopes, and overlap warnings. A user can create, edit, assign or unassign, complete, reopen, and delete tasks through `agentTeams/createTask` and `agentTeams/updateTask`. Every update sends the displayed revision, and create or update rejections remain explicit business results.
+The task board shows task identity, owner, blockers, readiness, advisory write scopes, overlap warnings, and retained completion evidence. A user can create, edit, assign or unassign, complete with evidence, reopen, and delete tasks through `agentTeams/createTask` and `agentTeams/updateTask`. Every update sends the displayed revision, and create or update rejections remain explicit business results.
 
 -----
 

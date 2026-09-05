@@ -15,6 +15,8 @@ pnpm exec tsx scripts/build-exe-for-python-sdk.ts
 
 Use `--skip-build` when the required `lib/` artifacts already exist, or `--targets=node24-linux-x64,node24-linux-arm64,node24-macos-arm64,node24-win-x64` to select platforms. Build each target on its native architecture. Products land in `dist-exe/` and the script syncs the selected carriers into `python/sdk-runtime/`. Windows emits `.exe` and `-rg.exe`; macOS also syncs the matching spawn helper required by `node-pty`.
 
+The keyless Python SDK suite includes the experimental Team recorded-session replay through the source `dsh --profile sdk`. Install the repository Node dependencies with `pnpm install` before running that suite; it compares the Python result projection beside the TypeScript recording in `snapshots/sdk/team-task-evidence/`.
+
 ## Validate the SDK
 
 Keep the virtual environment outside `python/`, install the test group, and run the Python suite:

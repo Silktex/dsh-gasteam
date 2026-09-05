@@ -20,6 +20,9 @@ import * as ToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import TeamService from '../../agent-team/src/index.ts'
+import { gitFixture } from '../../agent-team/tests/git-fixture.ts'
+import * as GitWorktrees from '../../agent-team/src/git-worktrees.ts'
+import * as GitIntegration from '../../agent-team/src/git-integration.ts'
 import * as toolTeam from '../src/index.ts'
 
 const SIGNAL = new AbortController().signal
@@ -34,6 +37,9 @@ const TOOL_NAMES = [
   'team_task_list',
   'team_task_get',
   'team_task_update',
+  'team_batch_create',
+  'team_batch_list',
+  'team_batch_update',
 ].sort()
 
 const roots: string[] = []
@@ -54,7 +60,10 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legacyControl = false) {
+async function setup(
+  script: ConstructorParameters<typeof MockAdapter>[0], legacyControl = false,
+  serviceConfig: ConstructorParameters<typeof TeamService>[1] = {}, cwd?: string,
+) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await ctx.plugin(SessionProjectionRegistry)
@@ -67,11 +76,11 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legac
   if (legacyControl) await ctx.plugin(ToolSubagentControl)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
-  await ctx.plugin(TeamService)
+  await ctx.plugin(TeamService, serviceConfig)
   const fiber = await ctx.plugin(toolTeam)
   const adapter = new MockAdapter(script)
   ctx.llm.registerAdapter(['mock'], adapter)
-  const lead = ctx.agentLoop.create(SessionId('tool-team-lead'), { provider: 'mock', model: 'mock' })
+  const lead = ctx.agentLoop.create(SessionId('tool-team-lead'), { provider: 'mock', model: 'mock' }, cwd === undefined ? {} : { cwd })
   return { ctx, lead, fiber }
 }
 
@@ -126,6 +135,47 @@ async function waitNoAgent(ctx: Context, id: SessionId): Promise<void> {
 }
 
 describe('dsh-tool-team', () => {
+  it('renders batch mutations and pagination through the declared tool schemas', async () => {
+    const { ctx, lead } = await setup([])
+    await execute(ctx, lead, 'team_task_create', { subject: 'work', description: 'verify' })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_batch_create', {
+      name: 'Delivery', description: 'Scope', task_ids: ['task-1'],
+    })))).toMatchObject({ id: 'batch-1', completedTasks: 0, status: 'active' })
+    await execute(ctx, lead, 'team_batch_create', { name: 'Next', description: 'Next scope', task_ids: [] })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_batch_list', { limit: 1 })))).toMatchObject({ nextCursor: 1 })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_batch_update', {
+      batch_id: 'batch-1', expected_revision: 1, name: 'Revised', description: 'Revised scope', task_ids: [], archive: true,
+    })))).toMatchObject({ revision: 2, name: 'Revised', status: 'archived' })
+    expect((await execute(ctx, lead, 'team_batch_update', { batch_id: 'batch-1', expected_revision: 1, archive: true })).isError).toBe(true)
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_batch_list', { cursor: 1 })))).toMatchObject({ batches: [{ id: 'batch-2' }] })
+  })
+
+  it('exposes opt-in worktree and integration operations with complete result schemas', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setup([textResponse('worker ready')], false, {
+      worktreeProvider: 'git', integrationProvider: 'git',
+    }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    await ctx.plugin(GitIntegration, {
+      providerName: 'git', targetBranch: 'main', commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000,
+      verification: [{ command: process.execPath, args: ['-e', "if(require('node:fs').readFileSync('shared.txt','utf8')!=='base\\n')process.exit(1)"] }],
+    })
+    expect(renderPrompt(await assembly(ctx, lead))).toContain('isolated Git worktrees')
+    const child = spawnedChildId(await execute(ctx, lead, 'spawn_teammate', {
+      name: 'worker', description: 'Commit output', prompt: 'finish',
+    }))
+    await waitNoAgent(ctx, child)
+    expect((await execute(ctx, lead, 'team_integration_enqueue', { target: 'worker' })).isError).toBe(false)
+    await execute(ctx, lead, 'team_integration_enqueue', { target: 'worker' })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_integration_list', { limit: 1 })))).toMatchObject({ nextCursor: 1 })
+    const first = ctx.agentTeams.listIntegrations(lead)[0]
+    if (first === undefined) throw new Error('integration tool did not enqueue its request')
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_integration_abandon', { id: first.id, reason: 'duplicate request' })))).toMatchObject({ phase: 'failed' })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_integration_run', {})))).toMatchObject({ integration: { phase: 'merged' } })
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_integration_run', {})))).toEqual({})
+    expect(JSON.parse(text(await execute(ctx, lead, 'team_worktree_release', { target: 'worker' })))).toEqual({ released: true })
+  })
+
   it('installs the complete scoped schema and shared-checkout policy for roots and teammates', async () => {
     const { ctx, lead } = await setup(['hang'])
     const leadAssembly = await assembly(ctx, lead)
@@ -256,6 +306,7 @@ describe('dsh-tool-team', () => {
           task_id: task.id,
           expected_revision: 2,
           action: 'complete',
+          result: 'Completed through tool test.',
         }).then(resolve, reject)
       }, 0)
     })

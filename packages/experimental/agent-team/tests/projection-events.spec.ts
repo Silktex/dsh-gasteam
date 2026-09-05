@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { resolve } from 'node:path'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionEventMap, SessionEventType } from '@deepseek-ai/dsh-session'
 import { teamProjectionDefinition } from '../src/projection.ts'
 import type { TeamProjectionState, TeamState } from '../src/projection.ts'
 import { TeamId, TeamMessageId, TeamTaskId } from '../src/types.ts'
-import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot } from '../src/types.ts'
+import type { TeamMemberSnapshot, TeamMessageSnapshot, TeamTaskSnapshot, TeamWorktreeSnapshot, TeamIntegrationSnapshot, TeamIntegrationId, TeamBranchName, TeamCommitId } from '../src/types.ts'
 
 const ROOT = SessionId('team-root')
 const TEAM = TeamId(ROOT)
@@ -78,6 +79,64 @@ function message(overrides: Partial<TeamMessageSnapshot> = {}): TeamMessageSnaps
 }
 
 describe('Agent Teams projection events', () => {
+  it('rejects integration records without ownership, verification inputs, or contiguous phases', () => {
+    const owner = event('team/member', { version: 1, teamId: TEAM, member: member() }, 0)
+    const worktree: TeamWorktreeSnapshot = {
+      memberId: CHILD, provider: 'git', repository: resolve('repository'), cwd: resolve('worker'),
+      branch: 'team/worker' as TeamBranchName, baseCommit: 'a'.repeat(40) as TeamCommitId, phase: 'reserved',
+    }
+    const reserved = event('team/worktree', { version: 1, teamId: TEAM, worktree }, 1)
+    const job: TeamIntegrationSnapshot = {
+      id: 'integration-1' as TeamIntegrationId, memberId: CHILD, provider: 'git', phase: 'queued',
+      repository: worktree.repository, cwd: resolve('candidate'), sourceBranch: worktree.branch,
+      sourceCommit: worktree.baseCommit, targetBranch: 'main' as TeamBranchName,
+      verification: [{ command: 'check', args: [] }],
+    }
+    const edge = (fields: Partial<TeamIntegrationSnapshot>) => event('team/integration', {
+      version: 1, teamId: TEAM, integration: { ...job, ...fields },
+    }, 2)
+    const queued = edge({})
+    const running = edge({ phase: 'running', targetCommit: worktree.baseCommit })
+    const verified = edge({ phase: 'verified', targetCommit: worktree.baseCommit, candidateCommit: worktree.baseCommit })
+    const merged = edge({ phase: 'merged', targetCommit: worktree.baseCommit, candidateCommit: worktree.baseCommit })
+    expect(projectTeam(ROOT, [owner, reserved, queued, running, verified, merged]).integrations[0]?.phase).toBe('merged')
+    expect(() => projectTeam(ROOT, [queued])).toThrow(/matching worker/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, running])).toThrow(/phase transition/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, queued, verified])).toThrow(/phase transition/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, queued, edge({ phase: 'running' })])).toThrow(/fields are inconsistent/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, queued, edge({ phase: 'failed' })])).toThrow(/fields are inconsistent/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, edge({ verification: [] })])).toThrow(/payload is invalid/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, queued, edge({ phase: 'running', targetCommit: worktree.baseCommit, sourceCommit: 'b'.repeat(40) as TeamCommitId })])).toThrow(/immutable inputs/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, queued, running, verified, merged, verified])).toThrow(/phase transition/u)
+  })
+
+  it('validates durable worktree ownership and terminal release', () => {
+    const owner = event('team/member', { version: 1, teamId: TEAM, member: member() }, 0)
+    const worktree: TeamWorktreeSnapshot = {
+      memberId: CHILD, provider: 'git', repository: resolve('repository'), cwd: resolve('workers/one'),
+      branch: 'team/one' as TeamBranchName, baseCommit: 'a'.repeat(40) as TeamCommitId, phase: 'reserved',
+    }
+    const edge = (overrides: Partial<TeamWorktreeSnapshot>, seq = 1) => event('team/worktree', {
+      version: 1, teamId: TEAM, worktree: { ...worktree, ...overrides },
+    }, seq)
+    const reserved = edge({})
+    const ready = edge({ phase: 'ready' }, 2)
+    const released = edge({ phase: 'released' }, 3)
+    expect(projectTeam(ROOT, [owner, reserved, ready, released]).worktrees).toEqual([{ ...worktree, phase: 'released' }])
+    expect(() => projectTeam(ROOT, [reserved])).toThrow(/not a Team member/u)
+    expect(() => projectTeam(ROOT, [owner, ready])).toThrow(/begin reserved/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, edge({ phase: 'ready', cwd: resolve('different') }, 2)]))
+      .toThrow(/immutable creation inputs/u)
+    expect(() => projectTeam(ROOT, [owner, reserved, ready, released, ready])).toThrow(/invalid Team worktree transition/u)
+    expect(() => projectTeam(ROOT, [owner, edge({ cwd: '../relative' })])).toThrow(/payload is invalid/u)
+    expect(() => projectTeam(ROOT, [owner, edge({ baseCommit: 'HEAD' as TeamCommitId })])).toThrow(/payload is invalid/u)
+    const other = SessionId('child-b')
+    expect(() => projectTeam(ROOT, [owner, reserved,
+      event('team/member', { version: 1, teamId: TEAM, member: member({ id: other, name: 'worker-b' }) }, 2),
+      edge({ memberId: other }, 3),
+    ])).toThrow(/already owned/u)
+  })
+
   it('projects current-team records independently from inherited records', () => {
     const records: SessionEvent[] = [
       event('team/member', { version: 1, teamId: TeamId('ancestor'), member: member() }, 0),
@@ -145,6 +204,12 @@ describe('Agent Teams projection events', () => {
       teamId: TEAM,
       task: task({ revision: 3 }),
     }, 1)])).toThrow(/revision is not contiguous/)
+    const completed = projectTeam(ROOT, [first, event('team/task', {
+      version: 1,
+      teamId: TEAM,
+      task: task({ revision: 2, status: 'completed', result: 'Verified output.' }),
+    }, 1)])
+    expect(completed.tasks[0]?.result).toBe('Verified output.')
   })
 
   it('rejects every invalid persisted task dependency relation', () => {
@@ -240,6 +305,19 @@ describe('Agent Teams projection events', () => {
   })
 
   it('validates every current-version persisted payload before projecting it', () => {
+    expect(() => projectTeam(ROOT, [event('team/task', {
+      version: 1, teamId: TEAM, task: task({ status: 'completed' }),
+    }, 0)])).toThrow(/has no result evidence/)
+    expect(() => projectTeam(ROOT, [event('team/task', {
+      version: 1, teamId: TEAM, task: task({ result: 'invalid' }),
+    }, 0)])).toThrow(/retains result evidence/)
+
+    for (const result of ['', '  ']) {
+      expect(() => projectTeam(ROOT, [event('team/task', {
+        version: 1, teamId: TEAM, task: task({ status: 'completed', result }),
+      }, 0)])).toThrow()
+    }
+
     const malformed = [
       {
         ...event('team/member', { version: 1, teamId: TEAM, member: member() }, 0),

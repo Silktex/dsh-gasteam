@@ -34,15 +34,15 @@ Peer 通讯使用 Lead 日志 mailbox。投递前先追加并 flush `team/messag
 
 对于 live target，quiet `send_message` 会立即注入、flush 并确认，但不会唤醒它；inactive target 会保持 queued，直到其他事件 materialize 该 teammate。waking `followup_task` 成为 target 的下一个 FIFO turn，并可冷恢复。即使即时投递被推迟，成功也表示消息已经持久化。该机制提供进程内重试与 target Session 去重，不宣称跨进程 exactly-once。
 
-共享 task 是带 Team-local id 与单调 revision 的完整快照。每次变更都携带 `expectedRevision`。任意 member 可以创建、读取或 claim ready 且无 owner 的任务；Owner 或 Lead 可以编辑和转换；只有 Lead 可以分配给另一个 member。数字 task id 保持在安全整数分配范围内；该范围耗尽时会失败，不会复用 id。依赖必须指向未删除任务，并形成完整 DAG。删除任务保留为 tombstone。`writeScopes` 是规范化路径前缀，只产生重叠诊断，绝不会阻止 claim 或授予写权限。
+共享 task 是带 Team-local id 与单调 revision 的完整快照。每次变更都携带 `expectedRevision`。任意 member 可以创建、读取或 claim ready 且无 owner 的任务；Owner 或 Lead 可以编辑和转换；只有 Lead 可以分配给另一个 member。complete 必须提交长度受 `maxTaskResultLength` 限制且非空、说明结果、变更产物和验证情况的依据；reopen 或 delete 会移除该依据。数字 task id 保持在安全整数分配范围内；该范围耗尽时会失败，不会复用 id。依赖必须指向未删除任务，并形成完整 DAG。删除任务保留为 tombstone。`writeScopes` 是规范化路径前缀，只产生重叠诊断，绝不会阻止 claim 或授予写权限。
 
 `wait_agent` 等待调用注册后发生的下一条 roster、mailbox、task 或实时 status 边，避免模型轮询。它不会回放更早的边，因此调用方需要在唤醒或超时后重新读取权威状态。仅限 Lead 的 interrupt 使用 inbox preservation 取消当前 turn，不改变 mailbox 或 task owner。
 
 ## Shared checkout boundary
 
-所有 member 使用相同 cwd，并立即观察写入。策略要求 member 切分任务、记录提示性 write scope、为有序工作添加依赖，并由 Lead 检查最终 diff 和运行测试。文件系统 stale-version 拒绝后必须重新读取并 rebase 修改意图。Bash、formatter、codegen 与直接外部写入不具备等价保证。
+在共享 checkout 模式下，所有 member 使用相同 cwd，并立即观察写入。策略要求 member 切分任务、记录提示性 write scope、为有序工作添加依赖，并由 Lead 检查最终 diff 和运行测试。文件系统 stale-version 拒绝后必须重新读取并 rebase 修改意图。Bash、formatter、codegen 与直接外部写入不具备等价保证。
 
-Worktree isolation 不是 harness runtime 行为。deployment 或 prompt 可以安排独立 worktree，但 Team 领域不会推断 branch、merge 变更或静默改变 cwd。这样保留既有 same-world subagent 与 sandbox 契约。
+可选 worktree 与集成 provider 由[可恢复的 Team 工作区与工作台账](2026-09-04-agent-team-workspaces-and-ledgers.zh.md)约束。默认仍使用共享 checkout；启用 provider 是显式部署选择。
 
 ## Alternatives considered
 
@@ -52,7 +52,7 @@ Worktree isolation 不是 harness runtime 行为。deployment 或 prompt 可以�
 
 **把 task ownership 或 write scope 当作锁。** 拒绝，因为外部 writer 会绕过它们，崩溃 owner 会持久保留，而路径前缀重叠不能证明语义独立。虚假的互斥保证比明确 warning 更危险。
 
-**自动创建隔离 worktree。** 拒绝，因为 worktree 创建、branch 命名、merge 策略、ignored file、构建产物与 cleanup 都是 deployment 选择；它也会改变既有 subagent 与 sandbox 暴露的 same-world 行为。
+**为每个 subagent 隐式创建隔离 worktree。** 拒绝，因为 worktree 创建、branch 命名、merge 策略、ignored file、构建产物与 cleanup 都是 deployment 选择；它也会改变既有 subagent 与 sandbox 暴露的 same-world 行为。
 
 **在默认工具目录中启用 Team。** 拒绝，因为 scoped Team control 会覆盖同名旧全局工具，主动 delegation 也会给简单任务增加延迟和 token 成本。私有 profile bundle 会插入 Team 并禁用旧 control，同时不向已发布依赖图添加 Team 包。
 
@@ -71,3 +71,5 @@ Lead Session 会随着完整 task／member 快照与 mailbox acknowledgement 增
 active roster member 可以不驻留，因此 `inactive` 不表示失败，wakeup 可能产生 cold-resume 延迟。发往 inactive target 的 quiet message 可能无限等待，直到 target 因其他原因 materialize。failed member 会永久占用名字与 member slot，使 provisioning failure 保持可见而不是静默回收身份。
 
 协调可以降低 checkout 冲突概率，但无法消除文件系统 CAS 工具之外的写入。最终 diff 与测试仍是 Lead 的集成边界。
+
+[完成依据记录](../../../../snapshots/session/team-task-evidence/session.jsonl) 通过 headless profile 固定缺少依据时的拒绝、结果可见性、reopen 与已完成任务的删除。任务限额拒绝超长依据且不推进 revision；浏览器测试覆盖冲突后的显式重试与较新完成草稿的保留。

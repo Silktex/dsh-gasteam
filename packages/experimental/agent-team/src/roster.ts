@@ -10,6 +10,7 @@ import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import type { ContinuableStart } from '@deepseek-ai/dsh-subagent'
 import { errorMessage, TeamError } from './error.ts'
 import type { TeamJournal } from './journal.ts'
+import type { TeamWorktrees } from './worktrees.ts'
 import type { TeamRuntimeLifecycle } from './lifecycle.ts'
 import type { TeamState } from './projection.ts'
 import { messageAccepted } from './session-message.ts'
@@ -50,6 +51,10 @@ export function resolveActiveMember(
   if (member === undefined || member.phase !== 'active') {
     throw new TeamError(`active teammate "${name}" not found`, 'TEAM_MEMBER_NOT_FOUND')
   }
+  const worktree = state.worktrees.find(candidate => candidate.memberId === member.id)
+  if (worktree !== undefined && worktree.phase !== 'ready') {
+    throw new TeamError(`teammate "${name}" has no ready worktree`, 'TEAM_WORKTREE_UNAVAILABLE')
+  }
   return { id: member.id, name }
 }
 
@@ -62,12 +67,16 @@ export class TeamRoster {
    * @param journal - authoritative Lead-log transaction owner.
    * @param lifecycle - shared Team runtime admission cutoff.
    * @param maxMembers - maximum immutable roster entries per Team.
+   * @param worktrees - durable workspace provisioning owner.
+   * @param cleanupTimeoutMs - rollback cancellation deadline.
    */
   constructor(
     private readonly ctx: Context,
     private readonly journal: TeamJournal,
     private readonly lifecycle: TeamRuntimeLifecycle,
     private readonly maxMembers: number,
+    private readonly worktrees: TeamWorktrees,
+    private readonly cleanupTimeoutMs: number,
   ) {}
 
   /**
@@ -137,6 +146,8 @@ export class TeamRoster {
       diagnostics: [],
     }]
     for (const member of state.members) {
+      const worktree = state.worktrees.find(candidate => candidate.memberId === member.id)
+      const recovery = state.recoveries.find(candidate => candidate.memberId === member.id)
       const live = this.ctx.agents.get(member.id)
       const model = live?.options.model ?? root.options.model
       result.push({
@@ -153,6 +164,8 @@ export class TeamRoster {
         context: member.context,
         ...model === undefined ? {} : { model },
         diagnostics: member.error === undefined ? [] : [member.error],
+        ...worktree === undefined ? {} : { worktree: { ...worktree } },
+        ...recovery === undefined ? {} : { recoveryAttempts: recovery.attempt },
       })
     }
     return result
@@ -276,10 +289,12 @@ export class TeamRoster {
       await this.journal.appendAndFlush(root, 'team/member', { version: 1, teamId: TeamId(root.id), member })
     })
 
-    let started: ContinuableStart
+    let started: ContinuableStart | undefined
     try {
+      const worktree = await this.worktrees.prepare(root, childId, signal)
       started = await this.ctx.subagents.startContinuable({
         childId,
+        ...worktree === undefined ? {} : { cwd: worktree.cwd },
         provider: request.provider,
         label: description,
         request: {
@@ -298,6 +313,9 @@ export class TeamRoster {
       try {
         const phase = await this.settleProvisioning(root, failed)
         await this.stopTeammates(root, [childId])
+        if (started === undefined) {
+          await this.worktrees.release(root, childId, AbortSignal.timeout(this.cleanupTimeoutMs))
+        }
         if (phase === 'active') {
           throw new TeamError(
             `teammate "${name}" became active while its creator reported failure`,
@@ -332,7 +350,7 @@ export class TeamRoster {
       }
       throw conflict
     }
-    return { member: this.memberView(active) }
+    return { member: this.memberView(root, active) }
   }
 
   /** Flush the accepted initial inbox item before the Lead can commit `active`. */
@@ -404,6 +422,8 @@ export class TeamRoster {
         if (loaded.meta.parentSession === root.id
           && descriptor?.mode === 'continuable'
           && descriptor.provider === member.provider
+          && this.journal.state(root).worktrees.every(worktree =>
+            worktree.memberId !== member.id || worktree.phase === 'ready' && loaded.meta.cwd === worktree.cwd)
           && acceptedInitialPrompt) {
           phase = 'active'
         } else {
@@ -432,8 +452,9 @@ export class TeamRoster {
   }
 
   /** Build one runtime member row after successful creation. */
-  private memberView(member: TeamMemberSnapshot & { readonly phase: 'active' }): TeamMemberView {
+  private memberView(root: Agent, member: TeamMemberSnapshot & { readonly phase: 'active' }): TeamMemberView {
     const live = this.ctx.agents.get(member.id)
+    const worktree = this.journal.state(root).worktrees.find(candidate => candidate.memberId === member.id)
     return {
       id: member.id,
       name: member.name,
@@ -444,6 +465,7 @@ export class TeamRoster {
       context: member.context,
       ...live?.options.model === undefined ? {} : { model: live.options.model },
       diagnostics: [],
+      ...worktree === undefined ? {} : { worktree: { ...worktree } },
     }
   }
 
