@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
   TeamTaskId, TeamTaskView as TeamTask, TeamView,
+  OperatorEscalation,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { makeTranslate } from '../../../tests/support/translate.ts'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -87,8 +88,16 @@ function actions(overrides: Partial<TeamActionInjected> = {}): TeamActionInjecte
       value: { ok: true, value: { ...task, revision: 2 } },
     }),
     openTeammate: () => Promise.resolve(),
+    healthInbox: () => Promise.resolve({ ok: true, value: [] }),
+    acknowledgeHealth: () => Promise.resolve({ ok: true, value: healthEscalation }),
     ...overrides,
   }
+}
+
+const healthEscalation: OperatorEscalation = {
+  id: 'escalation-1', attemptId: 'attempt-health', generation: 1, condition: 'failed', severity: 'critical', source: 'health',
+  diagnostics: 'Pinned integration receipt failed.', work: { projectId: 'project-health', teamId: 'lead', taskId: 'task-health', state: 'failed' },
+  revision: 3, cooldownUntil: 123,
 }
 
 function completeTask(evidence = 'Changed runtime; focused tests passed.', index = 0): void {
@@ -100,6 +109,76 @@ function completeTask(evidence = 'Changed runtime; focused tests passed.', index
 }
 
 describe('TeamAction', () => {
+  it('fences a deferred health load or acknowledgement to its original project', async () => {
+    const oldLoad = Promise.withResolvers<TeamActionResult<OperatorEscalation[]>>()
+    const oldAck = Promise.withResolvers<TeamActionResult<OperatorEscalation>>()
+    const healthInbox = vi.fn().mockImplementation(() => oldLoad.promise)
+    const acknowledgeHealth = vi.fn().mockImplementation(() => oldAck.promise)
+    render(<TeamAction {...props(actions({ healthInbox, acknowledgeHealth }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    await screen.findByText('Implement runtime')
+    const project = screen.getByRole('textbox', { name: zh['health.project'] })
+    fireEvent.change(project, { target: { value: 'project-health' } })
+    fireEvent.click(within(screen.getByLabelText(zh['health.title'])).getByRole('button', { name: zh['health.refresh'] }))
+    fireEvent.change(project, { target: { value: 'project-other' } })
+    oldLoad.resolve({ ok: true, value: [healthEscalation] })
+    await Promise.resolve()
+    expect(screen.queryByText('Pinned integration receipt failed.')).toBeNull()
+
+    const currentLoad = Promise.withResolvers<TeamActionResult<OperatorEscalation[]>>()
+    healthInbox.mockImplementationOnce(() => currentLoad.promise)
+    fireEvent.change(project, { target: { value: 'project-health' } })
+    fireEvent.click(within(screen.getByLabelText(zh['health.title'])).getByRole('button', { name: zh['health.refresh'] }))
+    currentLoad.resolve({ ok: true, value: [healthEscalation] })
+    expect(await screen.findByText('Pinned integration receipt failed.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: zh['health.acknowledge'] }))
+    fireEvent.change(project, { target: { value: 'project-other' } })
+    fireEvent.change(project, { target: { value: 'project-health' } })
+    oldAck.resolve({ ok: true, value: { ...healthEscalation, acknowledgement: { actor: 'lead', at: 1 }, revision: 4 } })
+    await Promise.resolve()
+    expect(screen.queryByText(`${zh['health.acknowledged']} · lead`)).toBeNull()
+  })
+
+  it('shows a rejected health RPC instead of leaving its loading state pending', async () => {
+    const healthInbox = vi.fn().mockRejectedValue(new Error('gateway unavailable'))
+    render(<TeamAction {...props(actions({ healthInbox }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    await screen.findByText('Implement runtime')
+    fireEvent.change(screen.getByRole('textbox', { name: zh['health.project'] }), { target: { value: 'project-health' } })
+    fireEvent.click(within(screen.getByLabelText(zh['health.title'])).getByRole('button', { name: zh['health.refresh'] }))
+    expect(await screen.findByText('Error: gateway unavailable')).toBeTruthy()
+    expect(screen.queryByText(zh['health.loading'])).toBeNull()
+  })
+
+  it('loads a project-scoped health inbox and acknowledges its exact revision', async () => {
+    const healthInbox = vi.fn().mockResolvedValue({ ok: true, value: [healthEscalation] })
+    const acknowledgeHealth = vi.fn().mockResolvedValue({ ok: true, value: { ...healthEscalation, revision: 4, acknowledgement: { actor: 'lead', at: 1 } } })
+    render(<TeamAction {...props(actions({ healthInbox, acknowledgeHealth }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    await screen.findByText('Implement runtime')
+    fireEvent.change(screen.getByRole('textbox', { name: zh['health.project'] }), { target: { value: 'project-health' } })
+    fireEvent.click(within(screen.getByLabelText(zh['health.title'])).getByRole('button', { name: zh['health.refresh'], exact: true }))
+    expect(await screen.findByText('Pinned integration receipt failed.')).toBeTruthy()
+    expect(healthInbox).toHaveBeenCalledWith(SESSION, 'project-health')
+    fireEvent.click(screen.getByRole('button', { name: zh['health.acknowledge'] }))
+    await waitFor(() => { expect(acknowledgeHealth).toHaveBeenCalledWith(SESSION, 'project-health', 'escalation-1', 3) })
+    expect(await screen.findByText(`${zh['health.acknowledged']} · lead`)).toBeTruthy()
+  })
+
+  it('keeps a stale health acknowledgement visible and reloads the scoped inbox', async () => {
+    const healthInbox = vi.fn().mockResolvedValue({ ok: true, value: [healthEscalation] })
+    const acknowledgeHealth = vi.fn().mockResolvedValue(remoteFailure('Stale escalation revision'))
+    render(<TeamAction {...props(actions({ healthInbox, acknowledgeHealth }))} />)
+    fireEvent.click(screen.getByRole('button', { name: /Agent Team/u }))
+    await screen.findByText('Implement runtime')
+    fireEvent.change(screen.getByRole('textbox', { name: zh['health.project'] }), { target: { value: 'project-health' } })
+    fireEvent.click(within(screen.getByLabelText(zh['health.title'])).getByRole('button', { name: zh['health.refresh'], exact: true }))
+    await screen.findByText('Pinned integration receipt failed.')
+    fireEvent.click(screen.getByRole('button', { name: zh['health.acknowledge'] }))
+    expect(await screen.findByText(zh['health.stale'])).toBeTruthy()
+    await waitFor(() => { expect(healthInbox).toHaveBeenCalledTimes(2) })
+  })
+
   it('ignores a stale Team load after the conversation switches sessions', async () => {
     const nextSession = 'next-lead' as SessionId
     const firstLoad = Promise.withResolvers<{ ok: true; value: TeamView }>()

@@ -437,3 +437,25 @@ Adapter checkpoint `08988a91ecd80fb545855458d1b2fc981f82b994` passed full local 
 Independent clean archive `/tmp/gasteam-ci-drain-final-1788642377` overlays only runtime-drain, DSH runtime constructor injection, and the regression test on `08988a9`; manifest `/tmp/gasteam-ci-drain-final-manifest.sha256`. Frozen offline installation, build, types, 88 focused tests, and 334 regular tests (one optional probe skipped) passed. Logs `/tmp/gasteam-ci-drain-final-{install,build,typecheck,focused,regular}.log`. The earlier failed CI is retained as evidence, not represented as passing.
 
 The same frozen archive also passed 17 process acceptance scenarios, documentation checks, and CLI smoke; logs `/tmp/gasteam-ci-drain-final-{acceptance,docs,smoke}.log`.
+
+
+## 2026-09-05 — Published shutdown correction and M4 checklist audit
+
+Checkpoint `f05b35e` passed [exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/33992206500), including 334 regular tests (one optional probe skipped), 17 process scenarios, build, types, docs, and smoke. Receipt: `/tmp/gasteam-ci-f05b35e.json`.
+
+Review of existing published source and tests closes two stale M4 checklist entries without new runtime changes. `SubmissionStore` persists exact task/attempt/source/evidence/policy-revision input before admission, preserves one integration identity, and rejects changed replay. The coordinator fences stale, superseded, cancelled, and non-code submissions. `submissions.spec.ts` proves pending-intent restoration; Team tests prove concurrent pinned admission, reconstruction, failed durability acknowledgement, and conflicting inputs. Cold-process acceptance proves promotion and task-receipt recovery without another worker or merge.
+
+Integration execution acquires ownership under the canonical Git common directory keyed by target branch before verification and holds it through promotion. Team busy-queue tests prove no verification starts under competing ownership; `tests/integration-restart.spec.ts` proves cross-process exclusion and reacquisition after SIGKILL. Real-Git provider tests prove clean-checkout and expected-target guards. These results are covered by the green published checkpoint; broader M4 completion and full-plan acceptance are not inferred solely from these two entries.
+
+
+## 2026-09-05 — Project-scoped runtime health inbox UI
+
+The Team header now loads the registered Lead's project-scoped health inbox through the existing typed Remote operations, displays severity/condition/diagnostics, and acknowledges with the incident revision. English/Chinese copy covers loading, empty, transport error, stale revision reload, and acknowledged states. Review fixed stale project responses, rejected promise handling, A-to-B-to-A acknowledgement races, and older acknowledgement responses overwriting a newer incident revision. Deferred-response UI tests cover these boundaries.
+
+Frozen archive `/tmp/gasteam-m8-health-f05-1788643001` starts at published `f05b35e`; the five exact UI source/test files are recorded in `/tmp/gasteam-m8-health-final-manifest.sha256`. Build, types, and 27 focused UI tests passed (`/tmp/gasteam-m8-health-f05-validation.log`).
+
+Browser verification ran the shipped React component against isolated mock Remote results. Obscura produced only the collapsed trigger and is not counted as incident evidence. Playwright/Chrome were installed under `/tmp/gasteam-m8-browser-tools-1788643002` with private Debian libraries and fonts, leaving repository dependencies and actual service/data untouched. Native keyboard/CDP text commands produced no input events despite trusted focus. Verification therefore used the native input value setter plus bubbling input/change events, followed by refresh/acknowledgement clicks; this proves rendered handler behavior, not real keyboard transport. Root inspected visible normal, stale-reload, error, and switched-project screenshots. Artifacts: `/tmp/gasteam-m8-browser-{normal,stale,empty,error,switch}.png`, `/tmp/gasteam-m8-fallback.mjs`, and the archive's `.m8-browser` fixture.
+
+This is a project health slice. The full workspace dashboard, activity feed/pagination, remaining operational controls, real service demonstration, and broader M8 acceptance remain unfinished.
+
+The same final UI archive passed 338 regular tests (one optional probe skipped), 17 process acceptance scenarios, documentation checks, and CLI smoke; logs `/tmp/gasteam-m8-health-final-{regular,acceptance,docs,smoke}.log`. Successful acknowledgement was also captured in `/tmp/gasteam-m8-browser-acknowledged.png`, showing the server-derived fixture actor after the revision-fenced action.

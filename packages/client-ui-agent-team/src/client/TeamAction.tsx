@@ -8,6 +8,7 @@ import type {
   TeamTaskMutationResult,
   TeamTaskView as TeamTask,
   TeamView,
+  OperatorEscalation,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import {
@@ -31,6 +32,8 @@ export interface TeamActionInjected {
   createTask: (sessionId: SessionId, input: CreateTeamTaskRequest) => Promise<TeamTaskActionResult>
   updateTask: (sessionId: SessionId, input: UpdateTeamTaskRequest) => Promise<TeamTaskActionResult>
   openTeammate: (sessionId: SessionId, member: TeamRosterMember) => Promise<void>
+  healthInbox: (sessionId: SessionId, projectId: string) => Promise<TeamActionResult<OperatorEscalation[]>>
+  acknowledgeHealth: (sessionId: SessionId, projectId: string, escalationId: string, expectedRevision: number) => Promise<TeamActionResult<OperatorEscalation>>
 }
 
 /** Full props of the Team conversation-header action. */
@@ -84,7 +87,7 @@ function memberStatusKey(status: TeamRosterMember['status']): TeamKey {
 
 /** Render the live Team roster and compare-and-set task board. */
 export function TeamAction({
-  sessionId, load, createTask, updateTask, openTeammate, t,
+  sessionId, load, createTask, updateTask, openTeammate, healthInbox, acknowledgeHealth, t,
 }: TeamActionProps) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -96,13 +99,24 @@ export function TeamAction({
   const [editDraft, setEditDraft] = useState<Draft>(EMPTY_DRAFT)
   const [pendingTasks, setPendingTasks] = useState<ReadonlySet<string>>(() => new Set())
   const [completion, setCompletion] = useState<{ taskId: TeamTaskId; result: string } | null>(null)
+  const [healthProjectId, setHealthProjectId] = useState('')
+  const [health, setHealth] = useState<OperatorEscalation[] | null>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [healthError, setHealthError] = useState<string | null>(null)
+  const [healthNotice, setHealthNotice] = useState<string | null>(null)
+  const [acknowledging, setAcknowledging] = useState<ReadonlySet<string>>(() => new Set())
   const completionTask = view?.tasks.find(task => task.id === completion?.taskId && task.status === 'in_progress')
   const sessionRef = useRef(sessionId)
   const refreshGeneration = useRef(0)
+  const healthGeneration = useRef(0)
+  const healthProjectEpoch = useRef(0)
+  const healthProjectRef = useRef(healthProjectId.trim())
   sessionRef.current = sessionId
+  healthProjectRef.current = healthProjectId.trim()
 
   useEffect(() => {
     refreshGeneration.current += 1
+    healthProjectEpoch.current += 1
     setOpen(false)
     setLoading(false)
     setView(null)
@@ -113,6 +127,12 @@ export function TeamAction({
     setEditDraft(EMPTY_DRAFT)
     setPendingTasks(new Set())
     setCompletion(null)
+    setHealthProjectId('')
+    setHealth(null)
+    setHealthLoading(false)
+    setHealthError(null)
+    setHealthNotice(null)
+    setAcknowledging(new Set())
   }, [sessionId])
 
   const refresh = useCallback(async (): Promise<boolean> => {
@@ -131,6 +151,62 @@ export function TeamAction({
       return false
     }
   }, [load, sessionId])
+
+  const refreshHealth = useCallback(async (projectId = healthProjectId): Promise<void> => {
+    const normalizedProjectId = projectId.trim()
+    const requestedSession = sessionId
+    const generation = ++healthGeneration.current
+    if (normalizedProjectId === '') {
+      setHealth(null)
+      setHealthError(null)
+      setHealthLoading(false)
+      return
+    }
+    setHealthLoading(true)
+    try {
+      const result = await healthInbox(requestedSession, normalizedProjectId)
+      if (sessionRef.current !== requestedSession || healthGeneration.current !== generation || healthProjectRef.current !== normalizedProjectId) return
+      if (result.ok) {
+        setHealth(result.value)
+        setHealthError(null)
+      } else {
+        setHealthError(failureText(result.error))
+      }
+    } catch (error) {
+      if (sessionRef.current === requestedSession && healthGeneration.current === generation && healthProjectRef.current === normalizedProjectId) setHealthError(String(error))
+    } finally {
+      if (sessionRef.current === requestedSession && healthGeneration.current === generation && healthProjectRef.current === normalizedProjectId) setHealthLoading(false)
+    }
+  }, [healthInbox, healthProjectId, sessionId])
+
+  const acknowledge = useCallback(async (escalation: OperatorEscalation): Promise<void> => {
+    const projectId = healthProjectId.trim()
+    if (projectId === '') return
+    const requestedSession = sessionId
+    const projectEpoch = healthProjectEpoch.current
+    setAcknowledging(current => new Set(current).add(escalation.id))
+    try {
+      const result = await acknowledgeHealth(requestedSession, projectId, escalation.id, escalation.revision)
+      if (sessionRef.current !== requestedSession || healthProjectRef.current !== projectId || healthProjectEpoch.current !== projectEpoch) return
+      if (!result.ok) {
+        if (/stale|revision/i.test(result.error.message)) {
+          await refreshHealth(projectId)
+          if (sessionRef.current === requestedSession && healthProjectRef.current === projectId && healthProjectEpoch.current === projectEpoch) setHealthNotice(t('health.stale'))
+        } else setHealthError(failureText(result.error))
+        return
+      }
+      setHealth(current => current?.map(item => item.id === result.value.id && item.revision <= result.value.revision ? result.value : item) ?? current)
+      setHealthError(null)
+    } catch (error) {
+      if (sessionRef.current === requestedSession && healthProjectRef.current === projectId && healthProjectEpoch.current === projectEpoch) setHealthError(String(error))
+    } finally {
+      if (sessionRef.current === requestedSession && healthProjectRef.current === projectId && healthProjectEpoch.current === projectEpoch) setAcknowledging(current => {
+        const next = new Set(current)
+        next.delete(escalation.id)
+        return next
+      })
+    }
+  }, [acknowledgeHealth, healthProjectId, refreshHealth, sessionId, t])
 
   const invalidateRefresh = useCallback((): void => {
     refreshGeneration.current += 1
@@ -400,6 +476,37 @@ export function TeamAction({
                   {job.error !== undefined && <p className={css.warning}>{job.error}</p>}
                 </article>)}
               </section>}
+              <section aria-label={t('health.title')}>
+                <div className={css.sectionTitle}>
+                  <h3>{t('health.title')}</h3>
+                  <button type="button" className={css.smallButton} disabled={healthLoading || healthProjectId.trim() === ''} onClick={() => { void refreshHealth() }}>{t('health.refresh')}</button>
+                </div>
+                <label className={css.healthProject}>
+                  <span>{t('health.project')}</span>
+                  <input aria-label={t('health.project')} value={healthProjectId} placeholder={t('health.projectPlaceholder')} onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                    healthGeneration.current += 1
+                    healthProjectEpoch.current += 1
+                    setHealthProjectId(event.target.value)
+                    setHealth(null)
+                    setHealthLoading(false)
+                    setHealthError(null)
+                    setHealthNotice(null)
+                    setAcknowledging(new Set())
+                  }} />
+                </label>
+                {healthError !== null && <div className={css.error} role="alert">{healthError}</div>}
+                {healthNotice !== null && <div className={css.notice} role="status">{healthNotice}</div>}
+                {healthLoading && <div className={css.notice}>{t('health.loading')}</div>}
+                {!healthLoading && healthProjectId.trim() !== '' && health?.length === 0 && <div className={css.notice}>{t('health.empty')}</div>}
+                {health !== null && health.map(escalation => <article key={escalation.id} className={css.healthIncident}>
+                  <div className={css.taskTitle}><strong>{t(`health.severity.${escalation.severity}`)}</strong><span>{t(`health.condition.${escalation.condition}`)}</span></div>
+                  <p>{escalation.diagnostics}</p>
+                  <div className={css.meta}><span>{escalation.work.taskId}</span><span>{escalation.attemptId}</span></div>
+                  {escalation.acknowledgement === undefined
+                    ? <button type="button" className={css.smallButton} disabled={acknowledging.has(escalation.id)} onClick={() => { void acknowledge(escalation) }}>{t('health.acknowledge')}</button>
+                    : <div className={css.meta}>{t('health.acknowledged')} · {escalation.acknowledgement.actor}</div>}
+                </article>)}
+              </section>
               {completion !== null && completionTask !== undefined && (
                 <div className={css.taskForm} role="dialog" aria-label={t('completionEvidence')}>
                   <label>

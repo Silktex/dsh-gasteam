@@ -3,6 +3,7 @@
 import type {
   TeamMemberView as TeamRosterMember,
   TeamView,
+  OperatorEscalation,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/remote'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -60,6 +61,12 @@ function registerUi(ctx: ClientContext): void {
         childSessionId: member.id,
         mode: 'continuable',
       })
+    },
+    async healthInbox(sessionId, projectId): Promise<TeamActionResult<OperatorEscalation[]>> {
+      return await ctx.remote.agentTeams.healthInbox(leadSessionId(sessionId), { projectId })
+    },
+    async acknowledgeHealth(sessionId, projectId, escalationId, expectedRevision): Promise<TeamActionResult<OperatorEscalation>> {
+      return await ctx.remote.agentTeams.acknowledgeHealth(leadSessionId(sessionId), { projectId, escalationId, expectedRevision })
     },
   }
 
