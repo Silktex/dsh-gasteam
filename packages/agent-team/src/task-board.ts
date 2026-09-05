@@ -130,8 +130,8 @@ export class TeamTaskBoard {
     const taskId = TeamTaskId(`workflow-${request.admissionKey}`)
     const subject = requiredText(request.subject, 'subject', 200)
     const description = requiredText(request.description, 'description', 16_384)
-    if ((request.nonCodeCriteria === undefined) === (request.reviewGate === undefined)) {
-      throw new TeamError('Pinned task requires exactly one report criteria or integration review gate', 'TEAM_INVALID_ARGUMENT')
+    if (request.nonCodeCriteria !== undefined && request.reviewGate !== undefined) {
+      throw new TeamError('Pinned task cannot combine report criteria and integration review gate', 'TEAM_INVALID_ARGUMENT')
     }
     const nonCodeCriteria = request.nonCodeCriteria === undefined ? undefined : requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384)
     const reviewGate = request.reviewGate === undefined ? undefined : requiredText(request.reviewGate, 'integration review gate', 128)

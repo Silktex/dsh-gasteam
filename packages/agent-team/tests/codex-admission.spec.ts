@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { CodexAdmissionError, admitCodex } from '../src/codex-admission.ts'
@@ -56,21 +56,28 @@ it('returns at its timeout when a killed probe leader leaves an inherited pipe o
   const root = await mkdtemp(join(tmpdir(), 'gasteam-codex-admission-pipe-'))
   const pidFile = join(root, 'descendant.pid')
   const readyFile = join(root, 'ready')
+  const releaseFile = join(root, 'release')
   const exitFile = join(root, 'exited')
   const prior = process.env.CODEX_ADMISSION_FIXTURE_PID_FILE
   const priorReady = process.env.CODEX_ADMISSION_FIXTURE_READY_FILE
   const priorExit = process.env.CODEX_ADMISSION_FIXTURE_EXIT_FILE
+  const priorRelease = process.env.CODEX_ADMISSION_FIXTURE_RELEASE_FILE
   process.env.CODEX_ADMISSION_FIXTURE_PID_FILE = pidFile
   process.env.CODEX_ADMISSION_FIXTURE_READY_FILE = readyFile
   process.env.CODEX_ADMISSION_FIXTURE_EXIT_FILE = exitFile
+  process.env.CODEX_ADMISSION_FIXTURE_RELEASE_FILE = releaseFile
   const executable = resolve('packages/agent-team/tests/fixtures/codex-admission-inherited-pipe.mjs')
   const pipedConfig = { ...config, executable }
   const pipedPolicy = { ...policy, executable }
   try {
-    await expect(admitCodex({ config: pipedConfig, policy: pipedPolicy, maxOutputBytes: 128, timeoutMs: 100 })).rejects.toThrow(/timed out/i)
+    // This is an intentional probe deadline, not a scheduling assertion. It
+    // leaves enough time for a fresh Node fixture to publish its child barrier
+    // under a loaded full suite, while the child still outlives its leader.
+    await expect(admitCodex({ config: pipedConfig, policy: pipedPolicy, maxOutputBytes: 128, timeoutMs: 1_000 })).rejects.toThrow(/timed out/i)
     await waitForFile(readyFile)
     const pid = Number(await readFile(pidFile, 'utf8'))
     expect(() => process.kill(pid, 0)).not.toThrow()
+    await writeFile(releaseFile, 'release')
     await waitForFile(exitFile)
   } finally {
     if (prior === undefined) delete process.env.CODEX_ADMISSION_FIXTURE_PID_FILE
@@ -79,7 +86,12 @@ it('returns at its timeout when a killed probe leader leaves an inherited pipe o
     else process.env.CODEX_ADMISSION_FIXTURE_READY_FILE = priorReady
     if (priorExit === undefined) delete process.env.CODEX_ADMISSION_FIXTURE_EXIT_FILE
     else process.env.CODEX_ADMISSION_FIXTURE_EXIT_FILE = priorExit
-    // The fixture-owned descendant self-terminates. No persisted PID is ever signalled.
+    if (priorRelease === undefined) delete process.env.CODEX_ADMISSION_FIXTURE_RELEASE_FILE
+    else process.env.CODEX_ADMISSION_FIXTURE_RELEASE_FILE = priorRelease
+    // Release a fixture descendant on every assertion path. Its generous
+    // self-exit backstop covers a crashed parent; no persisted PID is signalled.
+    await writeFile(releaseFile, 'release').catch(() => {})
+    await waitForFile(exitFile).catch(() => {})
     await rm(root, { recursive: true, force: true })
   }
 })

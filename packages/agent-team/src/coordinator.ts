@@ -1,5 +1,5 @@
 /** Durable workspace startup, directory ownership, and registered-Team admission. */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -17,7 +17,8 @@ import type {} from './index.ts'
 import { CoordinatorExecution, executionConfigSchema } from './coordinator-execution.ts'
 import type { ExecutionConfig, ExecutionBlock, DispatchStatus } from './coordinator-execution.ts'
 import { schedulingQuerySchema, schedulingControlSchema } from './scheduling-schemas.ts'
-import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
+import { workspaceBatchPlanSchema, workspaceBatchTaskSchema } from './scheduling-schemas.ts'
+import type { SchedulingQuery, SchedulingControl, SchedulingView, WorkspaceBatchPlanRequest } from './scheduling-schemas.ts'
 import type { SubmitRequest, SubmissionRecord } from './submissions.ts'
 import { reviewReportsRequestSchema } from './reports.ts'
 import type { AcceptReportRequest, ReportAcceptanceRecord, ReviewableReport } from './reports.ts'
@@ -28,6 +29,8 @@ import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime
 import type { CreateWorkflowRequest, WorkflowPublicationReceipt, WorkflowPublicationIntent, WorkflowRuntimeView } from './workflow-runtime.ts'
 import { implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate } from './workflow-templates.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
+import { CoordinatorBatchStore } from './coordinator-batches.ts'
+import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, WorkspaceBatchView, WorkspaceTaskRef } from './coordinator-batches.ts'
 
 export type CoordinatorId = Branded<'CoordinatorId'>
 declare module '@deepseek-ai/cordis' {
@@ -39,16 +42,21 @@ const envelope = { version: z.literal(1), sequence: revision.min(1) }
 const reconciliationSchema = z.object({
   projectId: id, teamId: id, status: z.enum(['available', 'unavailable']), diagnostic: z.string().max(16_384),
 }).strict()
+const storedBatchPlanSchema = workspaceBatchPlanSchema.extend({ id, items: z.array(workspaceBatchTaskSchema.extend({ admissionKey: id, taskId: id })).min(1).max(256) }).strict()
+interface StoredBatchPlan extends z.output<typeof storedBatchPlanSchema> {}
 const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('coordinator/created'), id }).strict(),
+  z.object({ ...envelope, type: z.literal('coordinator/workspace-operator-configured'), operatorId: id }).strict(),
   z.object({ ...envelope, type: z.literal('project/paused'), projectId: id, expectedRevision: revision, paused: z.boolean() }).strict(),
   z.object({ ...envelope, type: z.literal('team/reconciliation'), reconciliation: reconciliationSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('workspace-batch/planned'), plan: storedBatchPlanSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('workspace-batch/task-admitted'), batchId: id, itemId: id }).strict(),
 ])
 type Event = z.output<typeof eventSchema>
 type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'sequence'> : never : never
 interface Control { projectId: string; revision: number; paused: boolean }
 type Reconciliation = z.output<typeof reconciliationSchema>
-interface State { id: CoordinatorId | undefined; controls: Control[]; reconciliations: Reconciliation[] }
+interface State { id: CoordinatorId | undefined; operatorId: string | undefined; controls: Control[]; reconciliations: Reconciliation[]; plans: StoredBatchPlan[]; admitted: { batchId: string; itemId: string }[] }
 function reduce(state: State, raw: unknown): State {
   const event = eventSchema.parse(raw)
   if (event.type === 'coordinator/created') {
@@ -56,6 +64,10 @@ function reduce(state: State, raw: unknown): State {
     return { ...state, id: event.id as CoordinatorId }
   }
   if (state.id === undefined) throw new Error('Coordinator identity must precede operations')
+  if (event.type === 'coordinator/workspace-operator-configured') {
+    if (state.operatorId !== undefined && state.operatorId !== event.operatorId) throw new Error('Workspace operator authority cannot be replaced')
+    return { ...state, operatorId: event.operatorId }
+  }
   if (event.type === 'project/paused') {
     const old = state.controls.find(control => control.projectId === event.projectId)
     if ((old?.revision ?? 0) !== event.expectedRevision) throw new Error('Stale project control revision')
@@ -63,12 +75,24 @@ function reduce(state: State, raw: unknown): State {
       projectId: event.projectId, revision: event.expectedRevision + 1, paused: event.paused,
     }] }
   }
+  if (event.type === 'workspace-batch/planned') {
+    if (state.plans.some(plan => plan.id === event.plan.id)) throw new Error('Workspace batch plan id is already used')
+    if (new Set(event.plan.items.map(item => item.id)).size !== event.plan.items.length) throw new Error('Workspace batch plan repeats an item id')
+    if (event.plan.items.some(item => item.dependsOn.some(dependency => !event.plan.items.some(candidate => candidate.id === dependency)))) throw new Error('Workspace batch plan references an unknown dependency')
+    return { ...state, plans: [...state.plans, event.plan] }
+  }
+  if (event.type === 'workspace-batch/task-admitted') {
+    const plan = state.plans.find(value => value.id === event.batchId)
+    if (!plan || !plan.items.some(item => item.id === event.itemId)) throw new Error('Workspace batch admission lacks a durable plan item')
+    if (state.admitted.some(value => value.batchId === event.batchId && value.itemId === event.itemId)) return state
+    return { ...state, admitted: [...state.admitted, { batchId: event.batchId, itemId: event.itemId }] }
+  }
   const next = event.reconciliation
   return { ...state, reconciliations: [...state.reconciliations.filter(value =>
     value.projectId !== next.projectId || value.teamId !== next.teamId), next] }
 }
 export interface PublicationConfig { readonly grants: readonly ConfiguredPublicationGrant[]; readonly publisher: { readonly identity: string; readonly revision: number; publish(intent: WorkflowPublicationIntent): Promise<WorkflowPublicationReceipt> } }
-export interface CoordinatorConfig { readonly directory: string; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined }
+export interface CoordinatorConfig { readonly directory: string; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined; /** Exact server-configured Agent allowed to coordinate across projects. */ readonly workspaceOperatorId?: string | undefined }
 export interface Config extends CoordinatorConfig { readonly scanIntervalMs: number }
 export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
@@ -77,6 +101,7 @@ export const Config: schema<Config> = schema.object({
   execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), health: schema.union([schema.const(undefined), schema.object({ dshDeadlineMs: schema.number().step(1).min(1), externalDeadlineMs: schema.number().step(1).min(1), escalationCooldownMs: schema.number().step(1).min(0), maxEscalationsPerCondition: schema.number().step(1).min(1).max(100) })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
   // The publisher is a server object, never a model-supplied value.
   publication: schema.union([schema.const(undefined), schema.object({ grants: schema.array(schema.object({ projectId: schema.string().required(), teamId: schema.string().required(), authorization: schema.string().required() })).required(), publisher: schema.object({ identity: schema.string().required(), revision: schema.number().step(1).min(1).required(), publish: schema.function().required() }).required() })]),
+  workspaceOperatorId: schema.union([schema.const(undefined), schema.string()]),
 }) as schema<Config>
 
 /** Opt-in server lifecycle: startup is awaited before service publication; scans do not overlap. */
@@ -120,6 +145,8 @@ export interface CoordinatorView {
   readonly escalations: OperatorEscalation[]
   readonly readyTasks: { projectId: string; teamId: string; taskId: string }[]
   readonly workflows: WorkflowRuntimeView[]
+  readonly batches: WorkspaceBatchView[]
+  readonly batchNotifications: WorkspaceBatchNotification[]
 }
 
 /** Owns the complete workspace while its coordinator journal remains open. No fabricated Agent authority. */
@@ -131,11 +158,12 @@ export class WorkspaceCoordinator {
   private execution: CoordinatorExecution | undefined
   private workflowStore: WorkflowStore | undefined
   private workflows: WorkflowRuntime | undefined
+  private batches: CoordinatorBatchStore | undefined
 
   private constructor(
     private readonly ctx: Context,
     private readonly journal: DurableJournal<State, Payload>,
-    private readonly catalog: ProjectCatalog, private readonly publication: PublicationConfig | undefined,
+    private readonly catalog: ProjectCatalog, private readonly publication: PublicationConfig | undefined, private readonly workspaceOperatorId: string | undefined,
   ) {}
 
   static async open(ctx: Context, config: CoordinatorConfig): Promise<WorkspaceCoordinator> {
@@ -143,20 +171,28 @@ export class WorkspaceCoordinator {
     if (!isAbsolute(config.directory)) throw new Error('Coordinator directory must be absolute')
     // Acquire this directory-wide service lock before opening any subordinate store.
     const journal = await DurableJournal.open<State, Payload>(join(config.directory, 'coordinator.jsonl'), {
-      id: undefined, controls: [], reconciliations: [],
+      id: undefined, operatorId: undefined, controls: [], reconciliations: [], plans: [], admitted: [],
     }, reduce)
     let catalog: ProjectCatalog | undefined
     let execution: CoordinatorExecution | undefined
     let workflowStore: WorkflowStore | undefined
     let workflows: WorkflowRuntime | undefined
+    let coordinator: WorkspaceCoordinator | undefined
     try {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
       if (config.publication && (!config.publication.grants.length || typeof config.publication.publisher.publish !== 'function' || !config.publication.publisher.identity || !Number.isInteger(config.publication.publisher.revision) || config.publication.publisher.revision < 1)) throw new Error('Publication configuration requires grants and an identified idempotent publisher')
       catalog = await ProjectCatalog.open(config.directory, config.publication?.grants)
-      const coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication)
+      coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId)
+      const activeCoordinator = coordinator
+      if (journal.snapshot().operatorId !== config.workspaceOperatorId) {
+        if (journal.snapshot().operatorId !== undefined || config.workspaceOperatorId === undefined) throw new Error('Configured workspace operator disagrees with durable coordinator authority')
+        await journal.append(() => ({ type: 'coordinator/workspace-operator-configured', operatorId: config.workspaceOperatorId! }))
+      }
       const ownedCatalog = catalog
       execution = await CoordinatorExecution.open(ctx, config.directory, config.execution, () => ownedCatalog.list())
-      coordinator.execution = execution
+      activeCoordinator.execution = execution
+      activeCoordinator.batches = await CoordinatorBatchStore.open(config.directory)
+      execution.setWorkspaceBatchBlocker(work => activeCoordinator.workspaceBatchBlocker(work))
       workflowStore = await WorkflowStore.open(config.directory)
       workflows = await WorkflowRuntime.open(config.directory, workflowStore, execution.reportStore(), {
         createPinnedTask: async intent => await execution!.createPinnedWorkflowTask(intent),
@@ -165,14 +201,15 @@ export class WorkspaceCoordinator {
         approvePinnedIntegration: async receipt => await execution!.approveWorkflowIntegration(receipt),
         ...(config.publication === undefined ? {} : { publishAuthorizedRelease: async intent => await config.publication!.publisher.publish(intent), publicationPublisher: { identity: config.publication.publisher.identity, revision: config.publication.publisher.revision } }),
       }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate, ...(config.publication === undefined ? [] : [releasePublicationTemplate])])
-      coordinator.workflowStore = workflowStore
-      coordinator.workflows = workflows
-      await coordinator.reconcile()
-      return coordinator
+      activeCoordinator.workflowStore = workflowStore
+      activeCoordinator.workflows = workflows
+      await activeCoordinator.reconcile()
+      return activeCoordinator
     } catch (error) {
       await workflows?.close()
       await workflowStore?.close()
       await execution?.close()
+      await coordinator?.batches?.close()
       try { await catalog?.close() } finally { await journal.close() }
       throw error
     }
@@ -199,6 +236,81 @@ export class WorkspaceCoordinator {
       const task = await this.ctx.agentTeams.createTask(caller, snapshot)
       await this.scan()
       return task
+    })
+  }
+
+  /**
+   * Plan globally-addressed work under the configured workspace operator.
+   * Task admission keys and references are persisted before any Team-log write.
+   */
+  planWorkspaceBatch(caller: Agent, request: WorkspaceBatchPlanRequest): Promise<WorkspaceBatchView> {
+    const input = workspaceBatchPlanSchema.parse(structuredClone(request))
+    return this.run(async () => {
+      this.assertWorkspaceOperator(caller)
+      const batchId = input.id ?? `workspace-batch-${createHash('sha256').update(JSON.stringify(input)).digest('hex')}`
+      const itemIds = new Set(input.items.map(item => item.id))
+      if (itemIds.size !== input.items.length) throw new Error('Workspace batch plan repeats an item id')
+      for (const item of input.items) {
+        const project = this.catalog.list().find(project => project.id === item.projectId)
+        if (!project || !project.teamIds.includes(item.teamId)) throw new Error('Workspace batch plan escapes registered project ownership')
+        if (item.dependsOn.some(dependency => !itemIds.has(dependency))) throw new Error('Workspace batch plan references an unknown dependency')
+      }
+      const visiting = new Set<string>(), visited = new Set<string>()
+      const visit = (itemId: string): void => {
+        if (visiting.has(itemId)) throw new Error('Workspace batch plan dependencies contain a cycle')
+        if (visited.has(itemId)) return
+        visiting.add(itemId)
+        for (const dependency of input.items.find(item => item.id === itemId)!.dependsOn) visit(dependency)
+        visiting.delete(itemId); visited.add(itemId)
+      }
+      for (const item of input.items) visit(item.id)
+      if (input.subscriptions.some(subscription => subscription.destination !== `in-app:${caller.id}`)) throw new Error('Workspace batch subscriptions are limited to the durable in-app operator inbox')
+      const items = input.items.map(item => ({ ...item,
+        admissionKey: `batch-${createHash('sha256').update(`${batchId}\u0000${item.id}`).digest('hex')}`.slice(0, 101),
+        taskId: '' }))
+      const plan: StoredBatchPlan = { ...input, id: batchId,
+        items: items.map(item => ({ ...item, taskId: `workflow-${item.admissionKey}` })) }
+      const prior = this.journal.snapshot().plans.find(value => value.id === batchId)
+      if (prior !== undefined) {
+        if (JSON.stringify(prior) !== JSON.stringify(plan)) throw new Error('Workspace batch plan replay differs from its durable intent')
+      } else await this.journal.append(() => ({ type: 'workspace-batch/planned', plan }))
+      await this.reconcileWorkspaceBatches()
+      await this.scan()
+      return this.batches!.inspect(batchId)!
+    })
+  }
+
+  inspectWorkspaceBatch(caller: Agent, batchId: string): WorkspaceBatchView {
+    this.assertWorkspaceOperator(caller)
+    const batch = this.batches?.inspect(id.parse(batchId))
+    if (!batch) throw new Error('Workspace batch is missing')
+    return structuredClone(batch)
+  }
+
+  subscribeWorkspaceBatch(caller: Agent, batchId: string, subscriptionId: string): Promise<WorkspaceBatchView> {
+    return this.run(async () => {
+      this.assertWorkspaceOperator(caller)
+      const batch = await this.batches!.subscribe(id.parse(batchId), { id: id.parse(subscriptionId), destination: `in-app:${caller.id}` })
+      await this.scan()
+      return batch
+    })
+  }
+
+  /** Completion is delivered only as a durable coordinator inbox item, never an external message. */
+  workspaceBatchInbox(caller: Agent): Promise<WorkspaceBatchNotification[]> {
+    return this.run(async () => {
+      this.assertWorkspaceOperator(caller)
+      await this.batches!.notificationIntents()
+      return structuredClone(this.batches!.pendingNotifications().filter(item => item.destination === `in-app:${caller.id}`))
+    })
+  }
+
+  acknowledgeWorkspaceBatchNotification(caller: Agent, intentId: string): Promise<void> {
+    return this.run(async () => {
+      this.assertWorkspaceOperator(caller)
+      const notification = this.batches!.pendingNotifications().find(item => item.intentId === intentId && item.destination === `in-app:${caller.id}`)
+      if (!notification) throw new Error('Workspace batch completion notification is not in this operator inbox')
+      await this.batches!.recordNotificationReceipt(intentId, `in-app:${caller.id}`)
     })
   }
 
@@ -353,9 +465,12 @@ export class WorkspaceCoordinator {
       ...execution,
       id: this.journal.snapshot().id!, projects: this.projects,
       workflows: this.workflowViews(),
-      // Dependency acceptance is added by the scheduler/integration slices. No dependent work is prematurely eligible.
+      batches: this.batches?.list() ?? [],
+      batchNotifications: this.batches?.pendingNotifications() ?? [],
+      // This mirrors the scheduler's authoritative batch fence for dashboard callers.
       readyTasks: this.projects.flatMap(project => project.paused ? [] : project.teams.flatMap(team =>
         team.status !== 'available' ? [] : team.tasks.filter(task => task.status === 'pending' && task.blockedBy.every(id => team.tasks.find(task => task.id === id)?.status === 'completed')
+          && this.workspaceBatchBlocker({ projectId: project.project.id, teamId: team.teamId, taskId: task.id }) === undefined
           && !execution.attempts.some(attempt => attempt.teamId === team.teamId && attempt.taskId === task.id)
           && !execution.dispatchRequests.some(request => request.teamId === team.teamId && request.taskId === task.id && request.cancelReason !== undefined))
           .map(task => ({ projectId: project.project.id, teamId: team.teamId, taskId: task.id })))),
@@ -369,6 +484,7 @@ export class WorkspaceCoordinator {
       await this.workflows?.close()
       await this.workflowStore?.close()
       await this.execution?.close()
+      await this.batches?.close()
       try { await this.catalog.close() } finally { await this.journal.close() }
     }).catch((error: unknown) => {
       this.closing = undefined
@@ -395,6 +511,66 @@ export class WorkspaceCoordinator {
     if (!project) throw new Error('Project is not registered')
     if (!project.teamIds.includes(caller.id)) throw new Error('Lead is not authorized for this project')
     return project
+  }
+
+  private assertWorkspaceOperator(caller: Agent): void {
+    if (!this.workspaceOperatorId || this.journal.snapshot().operatorId !== this.workspaceOperatorId) throw new Error('Cross-project batch operations require configured workspace operator authority')
+    if (this.ctx.agents.get(caller.id) !== caller || caller.id !== this.workspaceOperatorId) throw new Error('Caller is not the configured workspace operator')
+  }
+
+  private workspaceBatchBlocker(work: WorkspaceTaskRef): string | undefined {
+    for (const batch of this.batches?.list() ?? []) {
+      const item = batch.items.find(item => item.ref.projectId === work.projectId && item.ref.teamId === work.teamId && item.ref.taskId === work.taskId)
+      if (!item) continue
+      const pending = item.dependsOn.filter(dependency => batch.items.find(candidate => candidate.ref.projectId === dependency.projectId && candidate.ref.teamId === dependency.teamId && candidate.ref.taskId === dependency.taskId)?.state !== 'accepted')
+      if (pending.length) return `Workspace batch ${batch.id} requires accepted cross-project dependencies: ${pending.map(value => `${value.projectId}/${value.teamId}/${value.taskId}`).join(', ')}`
+    }
+    return undefined
+  }
+
+  private async reconcileWorkspaceBatches(): Promise<void> {
+    if (!this.batches || !this.execution) return
+    for (const plan of this.journal.snapshot().plans) {
+      if (!this.batches.inspect(plan.id)) {
+        await this.batches.create({ id: plan.id, name: plan.name,
+          items: plan.items.map(item => ({ ref: { projectId: item.projectId, teamId: item.teamId, taskId: item.taskId }, dependsOn: item.dependsOn.map(dependency => {
+            const target = plan.items.find(candidate => candidate.id === dependency)!
+            return { projectId: target.projectId, teamId: target.teamId, taskId: target.taskId }
+          }) })), subscriptions: plan.subscriptions })
+      }
+      for (const item of plan.items) {
+        if (this.journal.snapshot().admitted.some(value => value.batchId === plan.id && value.itemId === item.id)) continue
+        const project = this.catalog.list().find(project => project.id === item.projectId)
+        if (!project) throw new Error('Workspace batch durable plan references an unregistered project')
+        const lead = await this.execution.admittedLead(project, item.teamId)
+        const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: item.admissionKey, subject: item.subject, description: item.description,
+          workflowBinding: { executionId: plan.id, stepId: item.id, inputs: [] }, ...(item.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: item.nonCodeCriteria }) })
+        if (task.id !== item.taskId) throw new Error('Workspace batch task admission key produced an unexpected task identity')
+        await this.journal.append(() => ({ type: 'workspace-batch/task-admitted', batchId: plan.id, itemId: item.id }))
+      }
+    }
+  }
+
+  private async observeWorkspaceBatches(projects: readonly CoordinatorProjectView[]): Promise<void> {
+    if (!this.batches) return
+    const execution = this.execution?.view(projects)
+    for (const batch of this.batches.list()) {
+      const observations = batch.items.flatMap(item => {
+        const project = projects.find(project => project.project.id === item.ref.projectId)
+        const team = project?.teams.find(team => team.teamId === item.ref.teamId)
+        const task = team?.tasks.find(task => task.id === item.ref.taskId)
+        if (!task) return []
+        const attempt = execution?.attempts.findLast(attempt => attempt.projectId === item.ref.projectId && attempt.teamId === item.ref.teamId && attempt.taskId === item.ref.taskId)
+        const reportAccepted = execution?.reports.some(report => report.phase === 'accepted' && report.projectId === item.ref.projectId && report.teamId === item.ref.teamId && report.taskId === item.ref.taskId) ?? false
+        const submissionAccepted = execution?.submissions.some(submission => submission.phase === 'accepted' && submission.projectId === item.ref.projectId && submission.teamId === item.ref.teamId && submission.taskId === item.ref.taskId) ?? false
+        const accepted = task.status === 'completed' && (task.nonCodeCriteria === undefined ? submissionAccepted : reportAccepted)
+        const failed = attempt?.phase === 'terminal' && !!attempt.stopReason
+        const activeAssignment = attempt !== undefined && attempt.phase !== 'terminal'
+        const state = accepted ? 'accepted' as const : failed ? 'failed' as const : task.status !== 'pending' && !activeAssignment ? 'blocked' as const : activeAssignment ? 'active' as const : 'waiting' as const
+        return [{ ref: item.ref, revision: { task: task.revision, generation: attempt?.generation ?? 0, attempt: attempt?.revision ?? 0, acceptance: accepted ? 1 : 0 }, state, activeAssignment }]
+      })
+      if (observations.length) await this.batches.observe(batch.id, observations)
+    }
   }
 
   private async scan(): Promise<void> {
@@ -425,7 +601,16 @@ export class WorkspaceCoordinator {
       projects.push({ project, paused: control?.paused ?? false, controlRevision: control?.revision ?? 0, teams })
     }
     this.projects = projects
+    await this.reconcileWorkspaceBatches()
+    await this.observeWorkspaceBatches(projects)
+    await this.batches?.notificationIntents()
     await this.execution?.scan(projects)
+    // Execution can accept a report or integrated submission after the first
+    // projection. Re-read the authoritative Team logs before returning so the
+    // batch phase and completion inbox never lag a completed managed task.
+    await this.refreshProjects()
+    await this.observeWorkspaceBatches(this.projects)
+    await this.batches?.notificationIntents()
     let workflowTaskCreated = false
     for (const project of projects) if (!project.paused) {
       const dispatched = await this.workflows?.scan(project.project)

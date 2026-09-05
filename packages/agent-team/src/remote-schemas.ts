@@ -51,7 +51,8 @@ export const workflowQuerySchema = wireSchema<{ executionId: string }>(z.object(
 export const workflowViewSchema = wireSchema<WorkflowRuntimeView>(z.object({
   executionId: z.string().readonly(), projectId: z.string().readonly(), teamId: z.string().readonly(), templateId: z.string().readonly(), templateVersion: z.number().readonly(),
   steps: z.array(z.object({ stepId: z.string().readonly(), taskId: z.string().readonly().optional(), intentId: z.string().readonly().optional(), reportId: z.string().readonly().optional(),
-    phase: z.union([z.literal('pending'), z.literal('running'), z.literal('completed'), z.literal('failed')]).readonly() }).strict().readonly()).readonly(),
+    phase: z.union([z.literal('pending'), z.literal('running'), z.literal('completed'), z.literal('failed')]).readonly(), revision: z.number().int().positive().readonly(), attempts: z.number().int().nonnegative().readonly(),
+    failure: z.object({ reason: z.string().readonly(), evidence: z.object({ kind: z.string().readonly(), ref: z.string().readonly() }).strict().readonly() }).strict().readonly().optional(), retryNotBefore: z.number().int().nonnegative().readonly().optional() }).strict().readonly()).readonly(),
 }).strict().readonly())
 export const nullableWorkflowViewSchema = wireSchema<WorkflowRuntimeView | undefined>(z.union([workflowViewSchema, z.undefined()]))
 export const healthInboxRequestSchema = wireSchema<HealthInboxRequest>(z.object({ projectId: z.string().readonly() }).strict())

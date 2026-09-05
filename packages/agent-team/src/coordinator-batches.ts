@@ -7,32 +7,47 @@ import { DurableJournal } from './durable-journal.ts'
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const text = z.string().trim().min(1).max(16_384)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+const nonnegative = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const taskRefSchema = z.object({ projectId: id, teamId: id, taskId: id }).strict()
 const stateSchema = z.enum(['waiting', 'active', 'blocked', 'failed', 'accepted'])
 const itemSchema = z.object({ ref: taskRefSchema, dependsOn: z.array(taskRefSchema).max(256).default([]) }).strict()
 const subscriptionSchema = z.object({ id, destination: text }).strict()
-const observationSchema = z.object({ ref: taskRefSchema, revision: positive, state: stateSchema, activeAssignment: z.boolean() }).strict()
+/** Exact source revisions, compared lexicographically. Avoid lossy arithmetic packing. */
+const observationRevisionSchema = z.object({ task: nonnegative, generation: nonnegative, attempt: nonnegative, acceptance: nonnegative }).strict()
+/** Tuple journals written before receipt materialization was explicit. */
+const legacyTupleRevisionSchema = z.object({ task: nonnegative, generation: nonnegative, attempt: nonnegative }).strict()
+const observationSchema = z.object({ ref: taskRefSchema, revision: observationRevisionSchema, state: stateSchema, activeAssignment: z.boolean() }).strict()
+/** Read-only compatibility for journals written before revision tuples. */
+const legacyObservationSchema = z.object({ ref: taskRefSchema, revision: nonnegative, state: stateSchema, activeAssignment: z.boolean() }).strict()
+const tupleLegacyObservationSchema = z.object({ ref: taskRefSchema, revision: legacyTupleRevisionSchema, state: stateSchema, activeAssignment: z.boolean() }).strict()
 
 export type WorkspaceTaskRef = z.output<typeof taskRefSchema>
 export type WorkspaceTaskAcceptanceState = z.output<typeof stateSchema>
 export interface WorkspaceBatchItem { readonly ref: WorkspaceTaskRef; readonly dependsOn?: readonly WorkspaceTaskRef[] | undefined }
 export interface CreateWorkspaceBatchRequest { readonly id?: string | undefined; readonly name: string; readonly items: readonly WorkspaceBatchItem[]; readonly subscriptions?: readonly { readonly id: string; readonly destination: string }[] | undefined }
-export interface WorkspaceTaskObservation { readonly ref: WorkspaceTaskRef; readonly revision: number; readonly state: WorkspaceTaskAcceptanceState; readonly activeAssignment: boolean }
+export interface WorkspaceObservationRevision { readonly task: number; readonly generation: number; readonly attempt: number; /** Monotonic accepted-receipt materialization for an otherwise unchanged attempt. */ readonly acceptance: number }
+export interface WorkspaceTaskObservation { readonly ref: WorkspaceTaskRef; readonly revision: WorkspaceObservationRevision; readonly state: WorkspaceTaskAcceptanceState; readonly activeAssignment: boolean }
 export interface WorkspaceBatchNotification { readonly intentId: string; readonly batchId: string; readonly subscriptionId: string; readonly destination: string; readonly completionEpoch: number }
 
 const historySchema = z.object({ state: stateSchema, activeAssignment: z.boolean(), at: positive }).strict()
-const storedItemSchema = itemSchema.extend({ observationRevision: z.number().int().nonnegative(), state: stateSchema, activeAssignment: z.boolean(), history: z.array(historySchema).max(1024) }).strict()
+const storedItemSchema = itemSchema.extend({ observationRevision: observationRevisionSchema, state: stateSchema, activeAssignment: z.boolean(), history: z.array(historySchema).max(1024) }).strict()
 const notificationSchema = z.object({ intentId: id, batchId: id, subscriptionId: id, destination: text, completionEpoch: z.number().int().positive(), receipt: text.optional(), suppressed: z.literal(true).optional() }).strict()
 const batchSchema = z.object({ id, name: text, items: z.array(storedItemSchema).min(1).max(1024), subscriptions: z.array(subscriptionSchema).max(256),
+  phase: z.enum(['active', 'blocked', 'failed', 'completed']), completionEpoch: z.number().int().nonnegative(), history: z.array(z.object({ phase: z.enum(['completed', 'reopened', 'failed']), at: positive }).strict()).max(1024),
+}).strict()
+const tupleLegacyBatchSchema = z.object({ id, name: text, items: z.array(itemSchema.extend({ observationRevision: legacyTupleRevisionSchema, state: stateSchema, activeAssignment: z.boolean(), history: z.array(historySchema).max(1024) })).min(1).max(1024), subscriptions: z.array(subscriptionSchema).max(256),
+  phase: z.enum(['active', 'blocked', 'failed', 'completed']), completionEpoch: z.number().int().nonnegative(), history: z.array(z.object({ phase: z.enum(['completed', 'reopened', 'failed']), at: positive }).strict()).max(1024),
+}).strict()
+const legacyBatchSchema = z.object({ id, name: text, items: z.array(itemSchema.extend({ observationRevision: nonnegative, state: stateSchema, activeAssignment: z.boolean(), history: z.array(historySchema).max(1024) })).min(1).max(1024), subscriptions: z.array(subscriptionSchema).max(256),
   phase: z.enum(['active', 'blocked', 'failed', 'completed']), completionEpoch: z.number().int().nonnegative(), history: z.array(z.object({ phase: z.enum(['completed', 'reopened', 'failed']), at: positive }).strict()).max(1024),
 }).strict()
 type Batch = z.output<typeof batchSchema>
 interface State { readonly batches: Batch[]; readonly notifications: z.output<typeof notificationSchema>[] }
 const envelope = { version: z.literal(1), sequence: positive }
 const eventSchema = z.discriminatedUnion('type', [
-  z.object({ ...envelope, type: z.literal('batch/created'), batch: batchSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('batch/created'), batch: z.union([batchSchema, tupleLegacyBatchSchema, legacyBatchSchema]) }).strict(),
   z.object({ ...envelope, type: z.literal('batch/subscribed'), batchId: id, subscription: subscriptionSchema }).strict(),
-  z.object({ ...envelope, type: z.literal('batch/observed'), batchId: id, observations: z.array(observationSchema).min(1).max(1024), at: positive }).strict(),
+  z.object({ ...envelope, type: z.literal('batch/observed'), batchId: id, observations: z.array(z.union([observationSchema, tupleLegacyObservationSchema, legacyObservationSchema])).min(1).max(1024), at: positive }).strict(),
   z.object({ ...envelope, type: z.literal('batch/notification-intended'), notification: notificationSchema.omit({ receipt: true }) }).strict(),
   z.object({ ...envelope, type: z.literal('batch/notification-receipted'), intentId: id, receipt: text }).strict(),
 ])
@@ -41,6 +56,23 @@ type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'se
 
 function key(ref: WorkspaceTaskRef): string { return `${ref.projectId}\u0000${ref.teamId}\u0000${ref.taskId}` }
 function sameRef(left: WorkspaceTaskRef, right: WorkspaceTaskRef): boolean { return key(left) === key(right) }
+function compareRevision(left: WorkspaceObservationRevision, right: WorkspaceObservationRevision): number {
+  return left.task - right.task || left.generation - right.generation || left.attempt - right.attempt || left.acceptance - right.acceptance
+}
+function normalizeRevision(value: WorkspaceObservationRevision | z.output<typeof legacyTupleRevisionSchema> | number): WorkspaceObservationRevision {
+  // Legacy numeric packing cannot be safely decoded into task/generation/
+  // attempt components. It stays ordered among legacy entries below a fresh
+  // host task revision, so the first authoritative reconciliation supersedes it.
+  return typeof value === 'number' ? { task: 0, generation: 0, attempt: value, acceptance: 0 } : { ...value, acceptance: 'acceptance' in value ? value.acceptance : 0 }
+}
+function normalizeBatch(value: unknown): Batch {
+  const parsed = z.union([batchSchema, tupleLegacyBatchSchema, legacyBatchSchema]).parse(value)
+  return batchSchema.parse({ ...parsed, items: parsed.items.map(item => ({ ...item, observationRevision: normalizeRevision(item.observationRevision) })) })
+}
+function normalizeObservation(value: unknown): z.output<typeof observationSchema> {
+  const parsed = z.union([observationSchema, tupleLegacyObservationSchema, legacyObservationSchema]).parse(value)
+  return observationSchema.parse({ ...parsed, revision: normalizeRevision(parsed.revision) })
+}
 function get(state: State, batchId: string): Batch {
   const batch = state.batches.find(value => value.id === batchId)
   if (!batch) throw new Error('Workspace batch is missing')
@@ -91,11 +123,12 @@ function validateWorkspaceGraph(batches: readonly { readonly items: readonly z.o
 function reduce(state: State, raw: unknown): State {
   const event = eventSchema.parse(raw)
   if (event.type === 'batch/created') {
-    if (state.batches.some(batch => batch.id === event.batch.id)) throw new Error('Workspace batch id is already used')
-    validateGraph(event.batch.items)
-    validateWorkspaceGraph([...state.batches, event.batch])
-    if (event.batch.phase !== 'active' || event.batch.completionEpoch !== 0 || event.batch.history.length !== 0 || event.batch.items.some(item => item.observationRevision !== 0 || item.state !== 'waiting' || item.activeAssignment || item.history.length !== 0)) throw new Error('Workspace batch must start with empty waiting state')
-    return { ...state, batches: [...state.batches, event.batch] }
+    const batch = normalizeBatch(event.batch)
+    if (state.batches.some(candidate => candidate.id === batch.id)) throw new Error('Workspace batch id is already used')
+    validateGraph(batch.items)
+    validateWorkspaceGraph([...state.batches, batch])
+    if (batch.phase !== 'active' || batch.completionEpoch !== 0 || batch.history.length !== 0 || batch.items.some(item => item.observationRevision.task !== 0 || item.observationRevision.generation !== 0 || item.observationRevision.attempt !== 0 || item.observationRevision.acceptance !== 0 || item.state !== 'waiting' || item.activeAssignment || item.history.length !== 0)) throw new Error('Workspace batch must start with empty waiting state')
+    return { ...state, batches: [...state.batches, batch] }
   }
   if (event.type === 'batch/subscribed') {
     const prior = get(state, event.batchId)
@@ -109,15 +142,19 @@ function reduce(state: State, raw: unknown): State {
   }
   if (event.type === 'batch/observed') {
     const prior = get(state, event.batchId)
-    const observations = new Map(event.observations.map(value => [key(value.ref), value]))
+    const observations = new Map(event.observations.map(value => {
+      const observation = normalizeObservation(value)
+      return [key(observation.ref), observation]
+    }))
     if (observations.size !== event.observations.length) throw new Error('Workspace batch observation repeats a task')
     if ([...observations.keys()].some(value => !prior.items.some(item => key(item.ref) === value))) throw new Error('Workspace batch observation is not required')
     const items = prior.items.map(item => {
       const observation = observations.get(key(item.ref))
       if (!observation) return item
-      if (observation.revision < item.observationRevision) throw new Error('Workspace batch observation is stale')
-      if (observation.revision === item.observationRevision) {
-        if (observation.state !== item.state || observation.activeAssignment !== item.activeAssignment) throw new Error('Workspace batch observation revision conflicts')
+      const compared = compareRevision(observation.revision, item.observationRevision)
+      if (compared < 0) throw new Error('Workspace batch observation is stale')
+      if (compared === 0) {
+        if (observation.state !== item.state || observation.activeAssignment !== item.activeAssignment) throw new Error(`Workspace batch observation revision conflicts: ${JSON.stringify({ revision: observation.revision, prior: { state: item.state, activeAssignment: item.activeAssignment }, next: { state: observation.state, activeAssignment: observation.activeAssignment } })}`)
         return item
       }
       if (item.history.length >= 1024) throw new Error('Workspace batch task history limit is reached')
@@ -167,7 +204,7 @@ export class CoordinatorBatchStore {
     validateGraph(parsed.items)
     if (new Set(parsed.subscriptions.map(value => value.id)).size !== parsed.subscriptions.length) throw new Error('Workspace batch repeats a completion subscription')
     const batch: Batch = { id: parsed.id ?? `workspace-batch-${randomUUID()}`, name: parsed.name, subscriptions: parsed.subscriptions, phase: 'active', completionEpoch: 0, history: [],
-      items: parsed.items.map(item => ({ ...item, observationRevision: 0, state: 'waiting', activeAssignment: false, history: [] })) }
+      items: parsed.items.map(item => ({ ...item, observationRevision: { task: 0, generation: 0, attempt: 0, acceptance: 0 }, state: 'waiting', activeAssignment: false, history: [] })) }
     const state = await this.journal.append(() => ({ type: 'batch/created', batch }))
     return view(get(state, batch.id))
   }
@@ -204,6 +241,11 @@ export class CoordinatorBatchStore {
     return this.journal.snapshot().notifications.filter(value => value.receipt === undefined && value.suppressed === undefined).map(value => ({ intentId: value.intentId, batchId: value.batchId, subscriptionId: value.subscriptionId, destination: value.destination, completionEpoch: value.completionEpoch }))
   }
   async recordNotificationReceipt(intentId: string, receipt: string): Promise<void> { await this.journal.append(() => ({ type: 'batch/notification-receipted', intentId: id.parse(intentId), receipt: text.parse(receipt) })) }
+  /** Read-only durable inbox projection; notificationIntents() creates any newly due intents first. */
+  pendingNotifications(): WorkspaceBatchNotification[] {
+    return this.journal.snapshot().notifications.filter(value => value.receipt === undefined && value.suppressed === undefined)
+      .map(value => ({ intentId: value.intentId, batchId: value.batchId, subscriptionId: value.subscriptionId, destination: value.destination, completionEpoch: value.completionEpoch }))
+  }
   close(): Promise<void> { return this.journal.close() }
 }
 export interface WorkspaceBatchView { readonly id: string; readonly name: string; readonly phase: 'active' | 'blocked' | 'failed' | 'completed'; readonly completionEpoch: number; readonly completedRequired: number; readonly required: number; readonly readyWithoutActiveAssignment: readonly WorkspaceTaskRef[]; readonly items: readonly { readonly ref: WorkspaceTaskRef; readonly state: WorkspaceTaskAcceptanceState; readonly activeAssignment: boolean; readonly dependsOn: readonly WorkspaceTaskRef[]; readonly history: readonly { readonly state: WorkspaceTaskAcceptanceState; readonly activeAssignment: boolean; readonly at: number }[] }[]; readonly history: readonly { readonly phase: 'completed' | 'reopened' | 'failed'; readonly at: number }[] }

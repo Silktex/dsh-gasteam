@@ -56,6 +56,41 @@ it('restarts a real-Git gated code workflow after verified candidate and promote
   } finally { try { for (const process of processes.reverse()) await process.stop() } finally { await rm(directory, { recursive: true, force: true }) } }
 }, 30_000)
 
+it('SIGKILLs a two-repository code batch between independent first integration and dependent dispatch', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-workspace-batch-process-'))
+  const processes: ReturnType<typeof processFixture>[] = []
+  try {
+    const seed = processFixture('seed-workspace-batch', directory); processes.push(seed)
+    expect(await seed.barrier<{ barrier: string; file: string }>(), 'the first dependency must have its own committed artifact before integration').toMatchObject({ barrier: 'batch-worker-committed', file: 'batch-a.txt' })
+    const integration = await seed.barrier<{ barrier: string; job?: { phase: string; error?: string }; view?: unknown; integrations?: unknown }>()
+    expect(integration, JSON.stringify(integration)).toMatchObject({ barrier: 'batch-integration', job: { phase: 'merged' } })
+    const first = await seed.barrier<{ barrier: string; denied: boolean; cycle: boolean; headA: string; headB: string; view: { attempts: { projectId: string; attemptId: string; runtimeId: string }[] } }>()
+    expect(first).toMatchObject({ barrier: 'batch-first-integrated', denied: true, cycle: true })
+    expect(first.view.attempts.map(attempt => attempt.projectId)).toEqual(['batch-a'])
+    const firstAttempt = first.view.attempts[0]!
+    await seed.stop(true); processes.pop()
+    const restored = processFixture('restore-workspace-batch', directory); processes.push(restored)
+    const complete = await restored.barrier<{ barrier: string; batch: { phase: string; completedRequired: number; required: number }; headA: string; headB: string; artifactA: string; artifactB: string; integrations: { phase: string }[]; inbox: { intentId: string; destination: string }[]; view: { submissions: { phase: string; projectId: string }[]; attempts: { projectId: string; attemptId: string; runtimeId: string }[] } }>()
+    expect(complete).toMatchObject({ barrier: 'batch-completed', batch: { phase: 'completed', completedRequired: 2, required: 2 }, artifactA: 'verified', artifactB: 'verified' })
+    expect(complete.headA).toBe(first.headA)
+    expect(complete.headB).not.toBe(first.headB)
+    expect(complete.view.submissions).toEqual(expect.arrayContaining([expect.objectContaining({ projectId: 'batch-a', phase: 'accepted' }), expect.objectContaining({ projectId: 'batch-b', phase: 'accepted' })]))
+    expect(complete.integrations.filter(value => value.phase === 'merged')).toHaveLength(2)
+    expect(complete.view.attempts.filter(value => value.projectId === 'batch-a')).toEqual([firstAttempt])
+    expect(complete.view.attempts.filter(value => value.projectId === 'batch-b')).toHaveLength(1)
+    expect(complete.inbox).toEqual([expect.objectContaining({ destination: 'in-app:restart-ready-team' })])
+    await restored.stop(); processes.pop()
+    const replayed = processFixture('restore-workspace-batch', directory); processes.push(replayed)
+    const replay = await replayed.barrier<typeof complete>()
+    expect(replay.inbox).toEqual(complete.inbox)
+    await replayed.stop(); processes.pop()
+    const acknowledged = processFixture('ack-workspace-batch', directory); processes.push(acknowledged)
+    const ack = await acknowledged.barrier<typeof complete & { inboxAfterAck: unknown[] }>()
+    expect(ack.inbox).toEqual(complete.inbox)
+    expect(ack.inboxAfterAck).toEqual([])
+  } finally { try { for (const process of processes.reverse()) await process.stop(true) } finally { await rm(directory, { recursive: true, force: true }) } }
+}, 30_000)
+
 it('keeps a real-Git candidate verified when its durable reviewer decision is rejected, including after restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-code-workflow-rejected-process-'))
   const processes: ReturnType<typeof processFixture>[] = []

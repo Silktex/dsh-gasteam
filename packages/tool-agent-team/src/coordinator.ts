@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/coordinator'
-import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView } from '@deepseek-ai/dsh-experimental-agent-team/client'
+import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView, WorkspaceBatchView, WorkspaceBatchNotification } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'tool-team-coordinator'
@@ -30,7 +30,8 @@ const reportsOutput = { schema: reportsSchema, render: (_args: unknown, value: u
 const workflowSchema = { type: 'object', additionalProperties: false, properties: {
   executionId: { type: 'string', required: true }, projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, templateId: { type: 'string', required: true }, templateVersion: { type: 'integer', required: true },
   steps: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
-    stepId: { type: 'string', required: true }, taskId: { type: 'string' }, intentId: { type: 'string' }, reportId: { type: 'string' }, phase: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed'] },
+    stepId: { type: 'string', required: true }, taskId: { type: 'string' }, intentId: { type: 'string' }, reportId: { type: 'string' }, phase: { type: 'string', required: true, enum: ['pending', 'running', 'completed', 'failed'] }, revision: { type: 'integer', required: true }, attempts: { type: 'integer', required: true },
+    failure: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true }, evidence: { type: 'object', additionalProperties: false, properties: { kind: { type: 'string', required: true }, ref: { type: 'string', required: true } } } } }, retryNotBefore: { type: 'number' },
   } } },
 } } as const
 const workflowOutput = { schema: workflowSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
@@ -42,6 +43,26 @@ const escalationSchema = { type: 'object', additionalProperties: false, properti
 } } as const
 const healthInboxOutput = { schema: { type: 'array', items: escalationSchema } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const healthOutput = { schema: escalationSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+const batchRefSchema = { type: 'object', additionalProperties: false, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true } } } as const
+const batchItemHistorySchema = { type: 'object', additionalProperties: false, properties: { state: { type: 'string', required: true }, activeAssignment: { type: 'boolean', required: true }, at: { type: 'number', required: true } } } as const
+const batchHistorySchema = { type: 'object', additionalProperties: false, properties: { phase: { type: 'string', required: true }, at: { type: 'number', required: true } } } as const
+const batchSchema = { type: 'object', additionalProperties: false, properties: {
+  id: { type: 'string', required: true }, name: { type: 'string', required: true }, phase: { type: 'string', required: true }, completionEpoch: { type: 'integer', required: true }, completedRequired: { type: 'integer', required: true }, required: { type: 'integer', required: true },
+  readyWithoutActiveAssignment: { type: 'array', required: true, items: batchRefSchema },
+  items: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { ref: { ...batchRefSchema, required: true }, state: { type: 'string', required: true }, activeAssignment: { type: 'boolean', required: true }, dependsOn: { type: 'array', required: true, items: batchRefSchema }, history: { type: 'array', required: true, items: batchItemHistorySchema }, historyTruncated: { type: 'boolean', required: true } } } },
+  itemsTruncated: { type: 'boolean', required: true }, history: { type: 'array', required: true, items: batchHistorySchema }, historyTruncated: { type: 'boolean', required: true },
+} } as const
+const batchOutput = { schema: batchSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+const batch = (value: WorkspaceBatchView) => {
+  const itemLimit = 64, historyLimit = 32
+  const history = value.history.slice(-historyLimit).map(entry => ({ ...entry }))
+  return { id: value.id, name: value.name, phase: value.phase, completionEpoch: value.completionEpoch, completedRequired: value.completedRequired, required: value.required,
+    readyWithoutActiveAssignment: value.readyWithoutActiveAssignment.map(ref => ({ ...ref })),
+    items: value.items.slice(0, itemLimit).map(item => ({ ref: { ...item.ref }, state: item.state, activeAssignment: item.activeAssignment, dependsOn: item.dependsOn.map(ref => ({ ...ref })), history: item.history.slice(-historyLimit).map(entry => ({ ...entry })), historyTruncated: item.history.length > historyLimit })),
+    itemsTruncated: value.items.length > itemLimit, history, historyTruncated: value.history.length > historyLimit }
+}
+const batchInboxOutput = { schema: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { intentId: { type: 'string', required: true }, batchId: { type: 'string', required: true }, subscriptionId: { type: 'string', required: true }, destination: { type: 'string', required: true }, completionEpoch: { type: 'integer', required: true } } } } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+const notifications = (value: readonly WorkspaceBatchNotification[]) => value.map(item => ({ ...item }))
 function value(view: SchedulingView) {
   return { ...view, requests: view.requests.map(({ attemptId, nextDispatchAt, cancelReason, ...request }) => ({ ...request,
     ...(cancelReason === undefined ? {} : { cancelReason }),
@@ -53,7 +74,10 @@ function reports(value: readonly ReviewableReport[]) {
     ...(decision === undefined ? {} : { decision }), ...(reviewBinding === undefined ? {} : { reviewBinding }),
   }))
 }
-function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.steps.map(step => ({ ...step })) } }
+function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.steps.map(({ failure, retryNotBefore, ...step }) => ({ ...step,
+  ...(failure === undefined ? {} : { failure: { reason: failure.reason, evidence: { ...failure.evidence } } }),
+  ...(retryNotBefore === undefined ? {} : { retryNotBefore }),
+})) } }
 function escalation(item: OperatorEscalation) { const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
   ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution }) } }
 function escalations(value: readonly OperatorEscalation[]) { return value.map(escalation) }
@@ -109,9 +133,37 @@ export function apply(ctx: Context): void {
       },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
-      name: 'team_workflow_inspect', description: 'Inspect pinned workflow steps, their concrete managed tasks, and accepted report receipts.',
+      name: 'team_workflow_inspect', description: 'Inspect pinned workflow steps, task bindings, optimistic revisions, and bounded failure or retry diagnostics.',
       parameters: { execution_id: { type: 'string', required: true } }, output: workflowOutput,
       async execute(args, exec) { return workflow(ctx.workspaceCoordinator.inspectWorkflow(caller(exec.agent), args.execution_id)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_workspace_batch_plan', description: 'Plan coordinator-owned work across registered projects. Only the configured workspace operator can create the durable plan; item actor identity is always derived by the server.',
+      parameters: { batch_id: { type: 'string' }, name: { type: 'string', required: true }, items: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, project_id: { type: 'string', required: true }, team_id: { type: 'string', required: true }, subject: { type: 'string', required: true }, description: { type: 'string', required: true }, non_code_criteria: { type: 'string' }, depends_on: { type: 'array', items: { type: 'string' } } } } }, subscribe: { type: 'boolean' } }, output: batchOutput,
+      async execute(args, exec) { return batch(await ctx.workspaceCoordinator.planWorkspaceBatch(caller(exec.agent), { ...(args.batch_id === undefined ? {} : { id: args.batch_id }), name: args.name,
+        items: args.items.map(item => ({ id: item.id, projectId: item.project_id, teamId: item.team_id, subject: item.subject, description: item.description,
+          ...(item.non_code_criteria === undefined ? {} : { nonCodeCriteria: item.non_code_criteria }), ...(item.depends_on === undefined ? {} : { dependsOn: item.depends_on }) })),
+        ...(args.subscribe ? { subscriptions: [{ id: `operator-${agent.id}`, destination: `in-app:${agent.id}` }] } : {}) })) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_workspace_batch_inspect', description: 'Inspect a coordinator-owned cross-project batch. Access requires the configured workspace operator.',
+      parameters: { batch_id: { type: 'string', required: true } }, output: batchOutput,
+      async execute(args, exec) { return batch(ctx.workspaceCoordinator.inspectWorkspaceBatch(caller(exec.agent), args.batch_id)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_workspace_batch_subscribe', description: 'Subscribe the configured operator to durable in-app completion delivery for one workspace batch.',
+      parameters: { batch_id: { type: 'string', required: true }, subscription_id: { type: 'string', required: true } }, output: batchOutput,
+      async execute(args, exec) { return batch(await ctx.workspaceCoordinator.subscribeWorkspaceBatch(caller(exec.agent), args.batch_id, args.subscription_id)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_workspace_batch_inbox', description: 'Read durable in-app workspace-batch completion notices. It sends no external notification.',
+      parameters: {}, output: batchInboxOutput,
+      async execute(_args, exec) { return notifications(await ctx.workspaceCoordinator.workspaceBatchInbox(caller(exec.agent))) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_workspace_batch_ack', description: 'Acknowledge one durable in-app batch completion notice after reading it.',
+      parameters: { intent_id: { type: 'string', required: true } }, output: batchInboxOutput,
+      async execute(args, exec) { await ctx.workspaceCoordinator.acknowledgeWorkspaceBatchNotification(caller(exec.agent), args.intent_id); return notifications(await ctx.workspaceCoordinator.workspaceBatchInbox(caller(exec.agent))) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_workflow_resume', description: 'Resume durable workflow task admission after an interruption. Existing task bindings are reused.',

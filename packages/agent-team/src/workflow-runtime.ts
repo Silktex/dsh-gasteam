@@ -238,7 +238,23 @@ export interface WorkflowRuntimeView {
   readonly teamId: string
   readonly templateId: string
   readonly templateVersion: number
-  readonly steps: readonly { stepId: string; taskId?: string; intentId?: string; reportId?: string; phase: WorkflowExecution['steps'][number]['phase'] }[]
+  /**
+   * `revision` is the optimistic-concurrency token required by server-side
+   * publication authorization. Failure evidence is deliberately bounded to the
+   * public step failure record; authorization and completion receipts stay host
+   * private.
+   */
+  readonly steps: readonly {
+    stepId: string
+    taskId?: string
+    intentId?: string
+    reportId?: string
+    phase: WorkflowExecution['steps'][number]['phase']
+    revision: number
+    attempts: number
+    failure?: { readonly reason: string; readonly evidence: { readonly kind: string; readonly ref: string } }
+    retryNotBefore?: number
+  }[]
 }
 
 /**
@@ -349,7 +365,9 @@ export class WorkflowRuntime {
       steps: execution.steps.map(step => {
         const value = binding(state, executionId, step.id)
         return { stepId: step.id, ...(value?.taskId === undefined ? {} : { taskId: value.taskId }), ...(value?.intent === undefined ? {} : { intentId: value.intent.intentId }),
-          ...(value?.reportId === undefined ? {} : { reportId: value.reportId }), phase: step.phase }
+          ...(value?.reportId === undefined ? {} : { reportId: value.reportId }), phase: step.phase, revision: step.revision, attempts: step.attempts,
+          ...(step.failure === undefined ? {} : { failure: { reason: step.failure.reason, evidence: { ...step.failure.reference } } }),
+          ...(step.notBefore === undefined ? {} : { retryNotBefore: step.notBefore }) }
       }) }
   }
 

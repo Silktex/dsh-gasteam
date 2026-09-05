@@ -132,6 +132,8 @@ it.each([
   const publish = workflows.inspect('release-failure')!.steps[1]!; await runtime.authorizePublication('release-failure', publish.id, publish.revision, { kind: 'ticket', ref: 'CAB-2' }, 'lead')
   host.failure = failure; host.failWithoutClassification = failWithoutClassification; await runtime.scan(project); await runtime.scan(project)
   expect(host.publicationCalls).toHaveLength(1); expect(workflows.inspect('release-failure')!.steps[1]).toMatchObject({ phase: 'failed', failure: { reason: expect.stringMatching(reason) } })
+  expect(runtime.inspect('release-failure')!.steps[1]).toMatchObject({ phase: 'failed', revision: expect.any(Number), attempts: 1,
+    failure: { reason: expect.stringMatching(reason), evidence: { kind: 'publication', ref: expect.stringMatching(/^publication-/) } } })
 })
 
 it('rejects invalid parameters before it records runtime intent, then accepts a valid execution', async () => {

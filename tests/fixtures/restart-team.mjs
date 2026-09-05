@@ -26,11 +26,12 @@ class FixtureSessionQuery extends SessionQueryEngine {
 }
 
 const [mode, directory] = process.argv.slice(2)
-if (!directory || !['seed', 'seed-repair', 'seed-report', 'seed-workflow-crash', 'seed-code-workflow', 'seed-code-workflow-repair', 'restore-code-review', 'restore-code-reject', 'restore-code-repair-review', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-workflow', 'restore-worker-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'restore-report-intent-crash', 'restore-report-receipt-crash', 'restore-report', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
+if (!directory || !['seed', 'seed-repair', 'seed-report', 'seed-workflow-crash', 'seed-code-workflow', 'seed-code-workflow-repair', 'seed-workspace-batch', 'restore-workspace-batch', 'ack-workspace-batch', 'restore-code-review', 'restore-code-reject', 'restore-code-repair-review', 'restore-repair-crash', 'restore-repair', 'seed-dag', 'seed-paused', 'restore', 'restore-execution', 'restore-workflow', 'restore-worker-crash', 'restore-worker-recovery', 'restore-acceptance-crash', 'restore-promotion-crash', 'restore-ambiguous-promotion', 'restore-stale-target', 'restore-acceptance', 'restore-dag', 'restore-report-intent-crash', 'restore-report-receipt-crash', 'restore-report', 'worker', 'worker-restore', 'contender', 'integration-owner'].includes(mode)) throw new Error('Expected fixture mode and isolated directory')
 const repairMode = mode.includes('repair')
 const reportMode = mode.includes('report')
 const workflowMode = mode.includes('workflow')
 const codeWorkflowMode = mode === 'seed-code-workflow' || mode === 'seed-code-workflow-repair' || mode === 'restore-code-review' || mode === 'restore-code-reject' || mode === 'restore-code-repair-review'
+const workspaceBatchMode = mode === 'seed-workspace-batch' || mode === 'restore-workspace-batch' || mode === 'ack-workspace-batch'
 const verification = [{ command: process.execPath, args: repairMode ? ['-e', "if(!require('node:fs').existsSync('repaired.txt'))process.exit(1)"] : ['--version'] }]
 const acceptanceMode = mode === 'restore-repair-crash' || mode === 'restore-repair' || mode === 'restore-stale-target' || mode === 'restore-worker-recovery' || mode === 'restore-ambiguous-promotion' || mode === 'restore-promotion-crash' || mode === 'restore-acceptance-crash' || mode === 'restore-acceptance' || mode === 'restore-dag'
 const ctx = new Context()
@@ -49,8 +50,8 @@ try {
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentService)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
-  await ctx.plugin(TeamService, acceptanceMode || codeWorkflowMode ? { worktreeProvider: 'git', integrationProvider: 'git' } : (mode === 'restore-execution' || mode === 'restore-worker-crash' || reportMode || workflowMode) ? { worktreeProvider: 'git' } : {})
-  if (mode === 'restore-execution' || mode === 'restore-worker-crash' || acceptanceMode || reportMode || workflowMode || codeWorkflowMode) await ctx.plugin(GitWorktrees, { directory: join(directory, 'workers') })
+  await ctx.plugin(TeamService, acceptanceMode || codeWorkflowMode || workspaceBatchMode ? { worktreeProvider: 'git', integrationProvider: 'git' } : (mode === 'restore-execution' || mode === 'restore-worker-crash' || reportMode || workflowMode) ? { worktreeProvider: 'git' } : {})
+  if (mode === 'restore-execution' || mode === 'restore-worker-crash' || acceptanceMode || reportMode || workflowMode || codeWorkflowMode || workspaceBatchMode) await ctx.plugin(GitWorktrees, { directory: join(directory, 'workers') })
   if (mode === 'integration-owner') {
     let error
     try { integrationRelease = await acquireIntegrationOwnership(join(directory, 'repository'), 'main', new AbortController().signal) }
@@ -61,6 +62,88 @@ try {
     try { assignments = await AssignmentStore.open(directory, { globalCapacity: 2, projectCapacities: { fixture: 2 } }) }
     catch (cause) { error = cause.message }
     await send({ barrier: 'ownership', error })
+  } else if (workspaceBatchMode) {
+    const secondId = SessionId('restart-batch-team-b')
+    const repositoryA = join(directory, 'repository-a'), repositoryB = join(directory, 'repository-b')
+    const setupRepository = async repository => {
+      await mkdir(repository)
+      const git = (...args) => execa('git', args, { cwd: repository })
+      await git('init', '--initial-branch=main'); await git('config', 'user.name', 'Coordinator fixture'); await git('config', 'user.email', 'coordinator@example.invalid'); await git('config', 'commit.gpgsign', 'false')
+      await writeFile(join(repository, 'initial.txt'), 'fixture\n'); await git('add', 'initial.txt'); await git('commit', '-m', 'fixture')
+      return git
+    }
+    const { adapter } = progressAdapter()
+    adapter.stream = async function* (options) {
+      const text = options.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n')
+      const worker = ctx.agents.list().find(agent => ctx.agentTeams.tryMembership(agent)?.role === 'teammate')
+      if (worker?.session.header.cwd) {
+        const file = text.includes('First repository') ? 'batch-a.txt' : 'batch-b.txt'
+        await writeFile(join(worker.session.header.cwd, file), 'verified\n')
+        await execa('git', ['add', '--all'], { cwd: worker.session.header.cwd }); await execa('git', ['commit', '-m', `batch ${file}`], { cwd: worker.session.header.cwd })
+        if (mode === 'seed-workspace-batch') await send({ barrier: 'batch-worker-committed', file, attempts: coordinator?.view().attempts ?? [] })
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text: 'Committed independently verified batch artifact.' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Committed independently verified batch artifact.' } }; yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    ctx.llm.registerAdapter(['mock'], adapter)
+    // The configured integration policy is identical for both repositories;
+    // each controlled worker still commits and the restored process reads a
+    // distinct artifact from each repository below.
+    const verificationCommands = [{ command: process.execPath, args: ['-e', "const fs=require('node:fs');if(!fs.existsSync('batch-a.txt')&&!fs.existsSync('batch-b.txt'))process.exit(1)"] }]
+    await ctx.plugin(GitIntegration, { providerName: 'git', targetBranch: 'main', verification: verificationCommands, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
+    if (mode === 'seed-workspace-batch') {
+      const gitA = await setupRepository(repositoryA), gitB = await setupRepository(repositoryB)
+      const leadA = ctx.agentLoop.create(rootId, { provider: 'mock', model: 'mock' }, { cwd: repositoryA })
+      const leadB = ctx.agentLoop.create(secondId, { provider: 'mock', model: 'mock' }, { cwd: repositoryB })
+      await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 25, workspaceOperatorId: rootId, execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
+      coordinator = ctx.workspaceCoordinator
+      await coordinator.register(leadA, { id: 'batch-a', repository: repositoryA, targetBranch: 'main', teamIds: [rootId], capacity: 1, verification: { revision: 1, commands: verificationCommands } })
+      await coordinator.register(leadB, { id: 'batch-b', repository: repositoryB, targetBranch: 'main', teamIds: [secondId], capacity: 1, verification: { revision: 1, commands: verificationCommands } })
+      let denied = false, cycle = false
+      try { await coordinator.planWorkspaceBatch(leadB, { id: 'denied', name: 'denied', items: [{ id: 'a', projectId: 'batch-a', teamId: rootId, subject: 'denied', description: 'denied' }] }) } catch { denied = true }
+      try { await coordinator.planWorkspaceBatch(leadA, { id: 'cycle', name: 'cycle', items: [{ id: 'a', projectId: 'batch-a', teamId: rootId, subject: 'a', description: 'a', dependsOn: ['b'] }, { id: 'b', projectId: 'batch-b', teamId: secondId, subject: 'b', description: 'b', dependsOn: ['a'] }] }) } catch { cycle = true }
+      const run = ctx.agentTeams.runIntegration.bind(ctx.agentTeams)
+      ctx.agentTeams.runIntegration = async (...args) => {
+        const job = await run(...args)
+        await send({ barrier: 'batch-integration', job, view: coordinator.view() })
+        return job
+      }
+      const accept = ctx.agentTeams.acceptIntegratedTask.bind(ctx.agentTeams)
+      ctx.agentTeams.acceptIntegratedTask = async (...args) => {
+        const task = await accept(...args)
+        if (args[0] === leadA) {
+          await send({ barrier: 'batch-first-integrated', denied, cycle, headA: (await gitA('rev-parse', 'main')).stdout, headB: (await gitB('rev-parse', 'main')).stdout, view: coordinator.view() })
+          await new Promise(() => {})
+        }
+        return task
+      }
+      await coordinator.planWorkspaceBatch(leadA, { id: 'workspace-process', name: 'two repository process', items: [
+        { id: 'first', projectId: 'batch-a', teamId: rootId, subject: 'First repository', description: 'Commit the first verified artifact.' },
+        { id: 'second', projectId: 'batch-b', teamId: secondId, subject: 'Second repository', description: 'Commit only after first acceptance.', dependsOn: ['first'] },
+      ], subscriptions: [{ id: 'operator', destination: `in-app:${rootId}` }] })
+      await new Promise(() => {})
+    } else {
+      await ctx.plugin(CoordinatorPlugin, { directory: join(directory, 'workspace'), scanIntervalMs: 25, workspaceOperatorId: rootId, execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
+      coordinator = ctx.workspaceCoordinator
+      // Once both task items are complete there is no scheduler work that would
+      // otherwise materialize the operator Lead. Reopen it explicitly to prove
+      // the durable inbox survives a further fresh process.
+      const restoredLead = ctx.agents.get(rootId) ?? (await ctx.agents.resume({ resumeSessionId: rootId, agentOptions: { provider: 'mock', model: 'mock' } })).agent
+      await new Promise(resolve => {
+        const timer = setInterval(async () => {
+          const lead = ctx.agents.get(rootId) ?? restoredLead
+          if (!lead) return
+          const batch = coordinator.inspectWorkspaceBatch(lead, 'workspace-process')
+          if (batch.phase !== 'completed') return
+          clearInterval(timer)
+          const gitA = (...args) => execa('git', args, { cwd: repositoryA }), gitB = (...args) => execa('git', args, { cwd: repositoryB })
+          const inbox = await coordinator.workspaceBatchInbox(lead)
+          if (mode === 'ack-workspace-batch') await coordinator.acknowledgeWorkspaceBatchNotification(lead, inbox[0]?.intentId)
+          await send({ barrier: 'batch-completed', batch, headA: (await gitA('rev-parse', 'main')).stdout, headB: (await gitB('rev-parse', 'main')).stdout,
+            artifactA: (await readFile(join(repositoryA, 'batch-a.txt'), 'utf8')).trim(), artifactB: (await readFile(join(repositoryB, 'batch-b.txt'), 'utf8')).trim(), integrations: [...ctx.agentTeams.listIntegrations(lead), ...(ctx.agents.get(secondId) === undefined ? [] : ctx.agentTeams.listIntegrations(ctx.agents.get(secondId)))], inbox, inboxAfterAck: mode === 'ack-workspace-batch' ? await coordinator.workspaceBatchInbox(lead) : undefined, view: coordinator.view() })
+          resolve()
+        }, 20)
+      })
+    }
   } else if (mode === 'worker' || mode === 'worker-restore') {
     assignments = await AssignmentStore.open(directory, { globalCapacity: 2, projectCapacities: { fixture: 2 } })
     const token = record => ({ attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })

@@ -143,7 +143,7 @@ describe('dsh-tool-team', () => {
       async createWorkflow(_caller: Agent, request: { projectId: string; teamId: string; templateId: string; templateVersion: number; parameters: Record<string, string>; executionId?: string }) {
         requests.push(request)
         return { executionId: request.executionId ?? 'generated', projectId: request.projectId, teamId: request.teamId,
-          templateId: request.templateId, templateVersion: request.templateVersion, steps: [{ stepId: request.templateId === 'implementation-test-review-integration' ? 'implement' : 'investigate', phase: 'pending' as const }] }
+          templateId: request.templateId, templateVersion: request.templateVersion, steps: [{ stepId: request.templateId === 'implementation-test-review-integration' ? 'implement' : 'investigate', phase: 'pending' as const, revision: 0, attempts: 0 }] }
       },
     }
     ctx.provide('workspaceCoordinator', coordinator as never)
@@ -164,6 +164,27 @@ describe('dsh-tool-team', () => {
       const missingSubject = await execute(ctx, lead, 'team_workflow_create', { project_id: 'project', workflow_kind: 'implementation-test-review-integration' })
       expect(missingSubject.isError).toBe(true)
       expect(text(missingSubject)).toContain('requires subject')
+    } finally { await tools.dispose() }
+  })
+
+  it('renders actionable bounded workspace-batch item and history transcripts', async () => {
+    const { ctx, lead } = await setup([])
+    const batch = {
+      id: 'batch-view', name: 'cross-project release', phase: 'blocked' as const, completionEpoch: 1, completedRequired: 1, required: 2,
+      readyWithoutActiveAssignment: [],
+      items: [{ ref: { projectId: 'project-a', teamId: 'team-a', taskId: 'first' }, state: 'accepted' as const, activeAssignment: false, dependsOn: [], history: [{ state: 'accepted' as const, activeAssignment: false, at: 10 }] },
+        { ref: { projectId: 'project-b', teamId: 'team-b', taskId: 'second' }, state: 'blocked' as const, activeAssignment: false, dependsOn: [{ projectId: 'project-a', teamId: 'team-a', taskId: 'first' }], history: [{ state: 'waiting' as const, activeAssignment: false, at: 5 }, { state: 'blocked' as const, activeAssignment: false, at: 11 }] }],
+      history: [{ phase: 'completed' as const, at: 9 }, { phase: 'reopened' as const, at: 10 }],
+    }
+    ctx.provide('workspaceCoordinator', { inspectWorkspaceBatch: (_caller: Agent, id: string) => { expect(id).toBe('batch-view'); return batch } } as never)
+    const tools = await ctx.plugin(coordinatorTools)
+    try {
+      const result = await execute(ctx, lead, 'team_workspace_batch_inspect', { batch_id: 'batch-view' })
+      expect(result.isError, text(result)).not.toBe(true)
+      expect(JSON.parse(text(result))).toEqual(expect.objectContaining({ id: 'batch-view', phase: 'blocked', itemsTruncated: false, historyTruncated: false,
+        items: [expect.objectContaining({ ref: { projectId: 'project-a', teamId: 'team-a', taskId: 'first' }, state: 'accepted', dependsOn: [], historyTruncated: false }),
+          expect.objectContaining({ ref: { projectId: 'project-b', teamId: 'team-b', taskId: 'second' }, state: 'blocked', dependsOn: [{ projectId: 'project-a', teamId: 'team-a', taskId: 'first' }], history: [{ state: 'waiting', activeAssignment: false, at: 5 }, { state: 'blocked', activeAssignment: false, at: 11 }], historyTruncated: false })],
+        history: [{ phase: 'completed', at: 9 }, { phase: 'reopened', at: 10 }] }))
     } finally { await tools.dispose() }
   })
 

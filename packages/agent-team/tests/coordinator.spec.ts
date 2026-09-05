@@ -106,6 +106,9 @@ it('fences paused release resume and authorization before the configured publish
   await store.completeStep('paused-release', prepare.id, prepare.revision, { artifacts: { 'release-candidate': { kind: 'report', ref: 'manifest' } }, receipt: { kind: 'report-review', reviewer: lead.id, decision: 'approved', reference: { kind: 'report', ref: 'manifest' } } })
   await running.reconcile()
   const publish = store.inspect('paused-release')!.steps[1]!
+  expect(running.inspectWorkflow(lead, 'paused-release').steps.find(step => step.stepId === publish.id)).toMatchObject({
+    revision: publish.revision, attempts: publish.attempts, phase: 'running',
+  })
   await running.pause(lead, 'project', 0, true)
   await expect(running.resumeWorkflow(lead, 'paused-release')).rejects.toThrow(/paused/i)
   await expect(running.authorizeWorkflowPublication(lead, { executionId: 'paused-release', stepId: publish.id, expectedRevision: publish.revision, evidence: { kind: 'ticket', ref: 'CAB-3' } })).rejects.toThrow(/paused/i)
@@ -134,6 +137,105 @@ it('discovers admitted tasks and stable coordinator identity after fresh service
   cleanup.push(() => restored.close())
   expect(restoredCtx.agents.list()).toHaveLength(0)
   expect(restored.view()).toMatchObject({ id, readyTasks: [{ projectId: 'project', teamId: lead.id, taskId: task.id }] })
+})
+
+it('restores a two-project batch between controlled-worker report and acceptance without bypassing its dependency fence', async () => {
+  const { root, ctx, lead, config, coordinator, request } = await fixture(true)
+  const other = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const otherLead = ctx.agentLoop.create(SessionId('batch-team-b'), { provider: 'mock', model: 'mock' }, { cwd: other.repository })
+  await coordinator.register(lead, request)
+  await coordinator.register(otherLead, { ...request, id: 'project-batch-b', repository: other.repository, teamIds: [otherLead.id] })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Controlled batch report with evidence.'))))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } }, workspaceOperatorId: lead.id })
+  cleanup.push(() => running.close())
+  await expect(running.planWorkspaceBatch(otherLead, { id: 'denied-batch', name: 'denied', items: [{ id: 'one', projectId: 'project', teamId: lead.id, subject: 'one', description: 'one' }] })).rejects.toThrow(/operator/i)
+  await expect(running.planWorkspaceBatch(lead, { id: 'cycle-batch', name: 'cycle', items: [
+    { id: 'a', projectId: 'project', teamId: lead.id, subject: 'a', description: 'a', dependsOn: ['b'] },
+    { id: 'b', projectId: 'project-batch-b', teamId: otherLead.id, subject: 'b', description: 'b', dependsOn: ['a'] },
+  ] })).rejects.toThrow(/cycle/i)
+  const batch = await running.planWorkspaceBatch(lead, { id: 'two-repositories', name: 'two repositories', items: [
+    { id: 'first', projectId: 'project', teamId: lead.id, subject: 'First repository', description: 'First controlled task', nonCodeCriteria: 'Report first evidence.' },
+    { id: 'second', projectId: 'project-batch-b', teamId: otherLead.id, subject: 'Second repository', description: 'Must wait for the first acceptance', nonCodeCriteria: 'Report second evidence.', dependsOn: ['first'] },
+  ], subscriptions: [{ id: 'operator', destination: `in-app:${lead.id}` }] })
+  expect(batch.readyWithoutActiveAssignment).toEqual([])
+  expect(ctx.agentTeams.listTasks(lead).some(task => task.subject === 'First repository')).toBe(true)
+  expect(ctx.agentTeams.listTasks(otherLead).some(task => task.subject === 'Second repository')).toBe(true)
+  expect(running.view().dispatchStatus.find(item => item.projectId === 'project-batch-b')?.blockers).toContainEqual(expect.objectContaining({ code: 'workspace-batch-dependency' }))
+  expect(running.view().readyTasks).not.toContainEqual(expect.objectContaining({ projectId: 'project-batch-b', teamId: otherLead.id }))
+  const firstTask = ctx.agentTeams.listTasks(lead).find(task => task.subject === 'First repository')!
+  let firstAttempt = running.view().attempts.find(attempt => attempt.taskId === firstTask.id)!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(firstAttempt.runtimeId))).toBeUndefined(), { timeout: 5_000 })
+  await running.reconcile()
+  // Reconstruct the coordinator and both registered Leads before any report
+  // acceptance. The second repository remains dependency-fenced across this
+  // fresh process boundary.
+  await running.close()
+  await ctx.fiber.dispose()
+  const restoredCtx = await stack(root, true)
+  const restoredLead = (await restoredCtx.agents.resume({ resumeSessionId: SessionId(lead.id), agentOptions: { provider: 'mock', model: 'mock' } })).agent
+  const restoredOtherLead = (await restoredCtx.agents.resume({ resumeSessionId: SessionId(otherLead.id), agentOptions: { provider: 'mock', model: 'mock' } })).agent
+  restoredCtx.llm.registerAdapter(['mock'], new MockAdapter(Array.from({ length: 8 }, () => textResponse('Controlled batch report with evidence.'))))
+  const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution, workspaceOperatorId: lead.id })
+  cleanup.push(() => restored.close())
+  await restored.reconcile()
+  firstAttempt = restored.view().attempts.find(attempt => attempt.taskId === firstTask.id)!
+  await restored.acceptReport(restoredLead, 'project', { attemptId: firstAttempt.attemptId, generation: firstAttempt.generation, expectedRevision: firstAttempt.revision, expectedTaskRevision: firstTask.revision, rationale: 'First accepted.' })
+  const secondTask = restoredCtx.agentTeams.listTasks(restoredOtherLead).find(task => task.subject === 'Second repository')!
+  await vi.waitFor(() => expect(restored.view().attempts.find(attempt => attempt.taskId === secondTask.id)).toBeDefined())
+  let secondAttempt = restored.view().attempts.find(attempt => attempt.taskId === secondTask.id)!
+  await vi.waitFor(() => expect(restoredCtx.agents.get(SessionId(secondAttempt.runtimeId))).toBeUndefined(), { timeout: 5_000 })
+  await restored.reconcile()
+  secondAttempt = restored.view().attempts.find(attempt => attempt.taskId === secondTask.id)!
+  await restored.acceptReport(restoredOtherLead, 'project-batch-b', { attemptId: secondAttempt.attemptId, generation: secondAttempt.generation, expectedRevision: secondAttempt.revision, expectedTaskRevision: secondTask.revision, rationale: 'Second accepted.' })
+  await vi.waitFor(() => expect(restored.inspectWorkspaceBatch(restoredLead, 'two-repositories').phase).toBe('completed'))
+  expect(await restored.workspaceBatchInbox(restoredLead)).toMatchObject([{ batchId: 'two-repositories', completionEpoch: 1 }])
+  expect(restored.inspectWorkspaceBatch(restoredLead, 'two-repositories')).toMatchObject({ required: 2, completedRequired: 2, phase: 'completed', completionEpoch: 1 })
+  expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(task => task.subject === 'First repository')).toHaveLength(1)
+  expect(restoredCtx.agentTeams.listTasks(restoredOtherLead).filter(task => task.subject === 'Second repository')).toHaveLength(1)
+})
+
+it('admits a workspace batch code item only through verified integration and retains it across restart', async () => {
+  const { ctx, lead, coordinator, request, config, git } = await fixture(true)
+  const commands = [{ command: 'node', args: ["-e", "if(require('node:fs').readFileSync('shared.txt','utf8').trim()!=='batch')process.exit(1)"] }]
+  await coordinator.register(lead, { ...request, verification: { revision: 1, commands } })
+  await coordinator.close()
+  await ctx.plugin(GitIntegration, { providerName: 'test', targetBranch: 'main', verification: commands, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
+  let wrote = false
+  ctx.llm.registerAdapter(['mock'], new class extends MockAdapter {
+    override async *stream(options: Parameters<MockAdapter['stream']>[0]) {
+      if (!wrote) {
+        const worker = ctx.agents.list().find(agent => ctx.agentTeams.tryMembership(agent)?.role === 'teammate')!
+        const cwd = worker.session.header.cwd!
+        await writeFile(join(cwd, 'shared.txt'), 'batch\n')
+        await runGit(cwd, ['add', 'shared.txt'], new AbortController().signal, 30_000)
+        await runGit(cwd, ['commit', '-m', 'batch artifact'], new AbortController().signal, 30_000)
+        wrote = true
+      }
+      yield* super.stream(options)
+    }
+  }([textResponse('Committed batch artifact and verified it.'), textResponse('Lead acknowledgement')]))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id,
+    execution: { ...execution, maxRepairAttempts: 0, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
+  cleanup.push(() => running.close())
+  await running.planWorkspaceBatch(lead, { id: 'code-batch', name: 'verified code', items: [{ id: 'code', projectId: 'project', teamId: lead.id, subject: 'Batch code', description: 'Commit the batch artifact' }] })
+  const task = ctx.agentTeams.listTasks(lead).find(candidate => candidate.subject === 'Batch code')!
+  expect(task.workflowBinding).toMatchObject({ executionId: 'code-batch', stepId: 'code' })
+  expect(task.nonCodeCriteria).toBeUndefined()
+  expect(task.reviewGate).toBeUndefined()
+  const attempt = running.view().attempts.find(candidate => candidate.taskId === task.id)!
+  await vi.waitFor(() => expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined(), { timeout: 5_000 })
+  await running.reconcile()
+  const submission = running.view().submissions.find(candidate => candidate.taskId === task.id)!
+  expect(submission.phase).toBe('accepted')
+  expect(ctx.agentTeams.listIntegrations(lead)).toContainEqual(expect.objectContaining({ id: submission.integrationId, phase: 'merged' }))
+  expect(ctx.agentTeams.getTask(lead, task.id).status).toBe('completed')
+  expect(running.inspectWorkspaceBatch(lead, 'code-batch')).toMatchObject({ phase: 'completed', completedRequired: 1 })
+  expect((await git('show', 'main:shared.txt')).stdout).toBe('batch')
+  await running.close()
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution })
+  cleanup.push(() => restored.close())
+  expect(restored.inspectWorkspaceBatch(lead, 'code-batch')).toMatchObject({ phase: 'completed', completedRequired: 1 })
 })
 
 it('requires registered exact Lead authority before admission and prevents cross-project grants', async () => {

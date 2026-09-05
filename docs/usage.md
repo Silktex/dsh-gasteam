@@ -82,6 +82,8 @@ Set `execution.candidateRetention` only when automatic cleanup is desired. The d
 
 The coordinator runtime includes the built-in `investigation-report@1` and `implementation-test-review-integration@1` workflows. A registered Lead can create, inspect, and resume them through the coordinator host controls or Remote operations (`createWorkflow`, `inspectWorkflow`, `resumeWorkflow`). The report workflow hands an accepted report to the next managed task with the report criteria, rationale, and durable receipt ID.
 
+Workflow definitions use the versioned JSON files in [`workflows/`](../workflows/): `investigation-report.json`, `implementation-test-review-integration.json`, and `release-publication.json`. The host validates and pins the exact substituted JSON definition for each execution, including its parameters, dependencies, artifacts, acceptance rules, and retry policy.
+
 Use `team_workflow_create` with one of these requests:
 
 ```json
@@ -113,3 +115,40 @@ The shipped coordinator Remote operations are `view`, `createTask`, `updateTask`
 For a non-code task, set immutable `non_code_criteria` when creating it. Review with the registered Lead's `reviewReports({projectId})`, then accept the exact report using its attempt generation, expected attempt revision, expected task revision, and a nonempty rationale. The acceptance writes durable report evidence before the Team receipt and releases dependents only after the receipt is accepted. Code tasks cannot use report acceptance; they require pinned submission, verification, and integrated acceptance.
 
 The host-only `submit` operation and project `register` operation are intentionally absent from model tools. Dashboard controls for project registration, full coordinator views, and health operations are not a substitute for those host APIs; the Web panel currently displays the shipped Team surfaces, while the complete autonomous dashboard remains unfinished. See [the architecture decisions](autonomous-architecture.md) and [completion evidence](completion-evidence.md) for the authority and acceptance boundaries.
+
+## Workspace batches across projects
+
+Workspace batches are a coordinator service feature for work that spans registered projects. They require a configured `workspaceOperatorId`; the exact live Agent with that ID is the only authority that can plan, inspect, subscribe to, acknowledge, or read the batch inbox. A model tool never grants this authority.
+
+Register each repository independently with its own Team, capacity, and verification policy. For example, a host can register two repositories before opening a cross-project batch:
+
+```ts
+await ctx.workspaceCoordinator.register(leadA, {
+  id: 'api', repository: '/repos/api', targetBranch: 'main', teamIds: [leadA.id], capacity: 2,
+  verification: { revision: 1, commands: [{ command: 'pnpm', args: ['test'] }] },
+})
+await ctx.workspaceCoordinator.register(leadB, {
+  id: 'web', repository: '/repos/web', targetBranch: 'main', teamIds: [leadB.id], capacity: 1,
+  verification: { revision: 3, commands: [{ command: 'pnpm', args: ['test:e2e'] }] },
+})
+```
+
+With the coordinator configured with `workspaceOperatorId: leadA.id`, that operator can ask its enabled coordinator tool plugin to plan a batch. The server validates registered project and Team ownership, persists the plan before task admission, and rejects cycles, including cycles formed by separate batches.
+
+```json
+{
+  "batch_id": "api-then-web",
+  "name": "Ship API before client",
+  "subscribe": true,
+  "items": [
+    { "id": "api", "project_id": "api", "team_id": "<lead-a>", "subject": "Add API", "description": "Implement and verify the API." },
+    { "id": "web", "project_id": "web", "team_id": "<lead-b>", "subject": "Use API", "description": "Integrate the accepted API.", "depends_on": ["api"] }
+  ]
+}
+```
+
+Use `team_workspace_batch_plan`, `team_workspace_batch_inspect`, `team_workspace_batch_subscribe`, `team_workspace_batch_inbox`, and `team_workspace_batch_ack` only from that configured operator. A dependent item may be admitted durably, but dispatch remains blocked until every referenced item is accepted. Code items become accepted only after their pinned submission is verified and integrated; non-code items require their immutable reviewed-report acceptance.
+
+Inspection returns `readyWithoutActiveAssignment` for actionable work and bounded item/history data. Large `items` and histories are explicitly truncated by the tool response; use the coordinator's durable records for complete operator investigation. Completion subscriptions create an in-app operator notification intent. Acknowledging it records a durable receipt. If a completed batch reopens before an undelivered intent is acknowledged, that old intent is suppressed; a later completion creates a new completion epoch and notification.
+
+Workspace batch methods are not shipped coordinator Remote/RPC operations and have no browser surface. The current Web panel therefore does not provide a workspace dashboard or batch controls; the broader M8 dashboard remains pending.

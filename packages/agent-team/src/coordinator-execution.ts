@@ -51,7 +51,7 @@ const sameWork = (left: { projectId: string; teamId: string; taskId: string }, r
 
 export type DispatchBlockCode = 'execution-disabled' | 'shutdown' | 'project-unavailable' | 'paused' | 'team-unavailable'
   | 'task-unavailable' | 'task-not-pending' | 'task-owned' | 'dependencies' | 'global-capacity' | 'project-capacity'
-  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required'
+  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required' | 'workspace-batch-dependency'
 export interface DispatchStatus extends DispatchRequest {
   readonly state: 'ready' | 'waiting' | 'assigned' | 'finished' | 'cancelled' | 'accepted'
   readonly blockers: { code: DispatchBlockCode; detail: string }[]
@@ -66,6 +66,8 @@ export class CoordinatorExecution {
   private readonly removePolicy: () => void
   private closing: Promise<void> | undefined
   private shutdownRequested = false
+  /** Coordinator-owned cross-project gate; no model input can loosen it. */
+  private workspaceBatchBlocker: ((work: { projectId: string; teamId: string; taskId: string }) => string | undefined) | undefined
 
   private constructor(
     private readonly ctx: Context,
@@ -161,6 +163,14 @@ export class CoordinatorExecution {
     return { submissions: this.submissions.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
       dispatchStatus: this.queue.list().map(request => this.status(request, views, now)), health: this.health?.listHealth() ?? [], escalations: this.health?.listEscalations() ?? [] }
   }
+
+  /** Install the coordinator's authoritative batch dependency gate. */
+  setWorkspaceBatchBlocker(blocker: (work: { projectId: string; teamId: string; taskId: string }) => string | undefined): void {
+    this.workspaceBatchBlocker = blocker
+  }
+
+  /** Reopen the exact registered Lead for a durable host admission. */
+  async admittedLead(project: ProjectRecord, teamId: string): Promise<Agent> { return await this.leadFor(project, teamId) }
 
   healthInbox(projectId: string, teamId: string): OperatorEscalation[] {
     return this.health?.listEscalations().filter(item => item.work.projectId === projectId && item.work.teamId === teamId) ?? []
@@ -312,6 +322,8 @@ export class CoordinatorExecution {
       const blockedBy = task.blockedBy.filter(id => team.tasks.find(task => task.id === id)?.status !== 'completed')
       if (blockedBy.length) block('dependencies', `Prerequisites require acceptance: ${blockedBy.join(', ')}`)
     }
+    const workspaceBatchBlocker = this.workspaceBatchBlocker?.(request)
+    if (workspaceBatchBlocker !== undefined) block('workspace-batch-dependency', workspaceBatchBlocker)
     const active = records.filter(record => record.phase !== 'terminal')
     if (this.config && active.length >= this.config.maxConcurrent) block('global-capacity', 'Global active capacity is full')
     if (view && active.filter(record => record.projectId === request.projectId).length >= view.project.capacity) block('project-capacity', 'Project active capacity is full')

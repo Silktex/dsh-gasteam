@@ -46,7 +46,7 @@ describe('Team RPC codecs', () => {
     expect(() => createWorkflowSchema.parse({ ...request, templateVersion: 0 })).toThrow()
     expect(workflowQuerySchema.parse({ executionId: 'workflow-1' })).toEqual({ executionId: 'workflow-1' })
     expect(workflowViewSchema.parse({ executionId: 'workflow-1', projectId: 'project', teamId: 'lead', templateId: 'investigation-report', templateVersion: 1,
-      steps: [{ stepId: 'investigate', phase: 'running', taskId: 'workflow-intent' }] })).toMatchObject({ executionId: 'workflow-1' })
+      steps: [{ stepId: 'investigate', phase: 'running', taskId: 'workflow-intent', revision: 1, attempts: 0 }] })).toMatchObject({ executionId: 'workflow-1' })
   })
 
   it('validates revision-fenced health inbox controls', () => {
