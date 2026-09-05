@@ -4,11 +4,16 @@ import { appendFileSync } from 'node:fs'
 
 let [mode] = process.argv.slice(2)
 let input
+if (mode === '--version') {
+  process.stdout.write('codex 0.153.4\n')
+  process.exit(0)
+}
+if (mode === 'login' && process.argv[3] === 'status') process.exit(0)
 if (mode === 'exec') {
   const chunks = []
   for await (const chunk of process.stdin) chunks.push(chunk)
   input = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  mode = input.mode
+  mode = input.mode ?? input.checkpoint?.task?.subject
 }
 if (mode === 'silent') {
   setInterval(() => {}, 1_000)

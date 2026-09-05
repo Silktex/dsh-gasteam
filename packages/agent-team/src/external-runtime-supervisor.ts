@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFile, link, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import z from 'zod'
 import { acquireFileOwnership } from './file-ownership.ts'
@@ -125,9 +126,25 @@ export class ExternalRuntimeSupervisorObserver {
   }
 }
 
-/** Uses this compiled module as the detached helper entrypoint. */
+/**
+ * Finds the separately bundled plain-Node helper. This module can be bundled
+ * into coordinator.js, where import.meta.url is the coordinator bundle rather
+ * than this source file, so never use the importing bundle itself as a helper.
+ */
 export function compiledExternalRuntimeSupervisorClient(): ExternalRuntimeSupervisorClient {
-  return new ExternalRuntimeSupervisorClient({ helperArgs: [fileURLToPath(import.meta.url)] })
+  const entry = fileURLToPath(import.meta.url)
+  const base = dirname(entry)
+  const candidates = [
+    // Installed/bundled coordinator.js and the standalone helper both live in lib.
+    resolve(base, 'external-runtime-supervisor.js'),
+    // Unbundled TypeScript output lives in lib/types.
+    resolve(base, '../external-runtime-supervisor.js'),
+    // Source-mode test execution may use a helper produced by the normal build.
+    resolve(base, '../lib/external-runtime-supervisor.js'),
+  ]
+  const helper = candidates.find(candidate => existsSync(candidate))
+  if (helper === undefined) throw new Error('Compiled external runtime supervisor helper is unavailable; refuse external launch')
+  return new ExternalRuntimeSupervisorClient({ helperArgs: [helper] })
 }
 
 export interface SupervisorIdentityFile {

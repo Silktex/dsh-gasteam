@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import type { VerifiedCodexExecutionPolicy } from './codex-admission.ts'
 import { ExternalRuntimeStore } from './external-runtime.ts'
 import type { ExternalRuntimeRecord } from './external-runtime.ts'
-import { compiledExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, readSupervisorIdentity, requestExternalSupervisorCancellation } from './external-runtime-supervisor.ts'
+import { compiledExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, inspectProcessIdentity, readSupervisorIdentity, requestExternalSupervisorCancellation } from './external-runtime-supervisor.ts'
 import type { ExternalRuntimeSupervisorClient, ExternalSupervisorRequest } from './external-runtime-supervisor.ts'
 
 export interface ExternalAssignmentLaunch {
@@ -57,6 +57,28 @@ export class ExternalAssignmentRuntime {
     const record = await this.store.recordCancellation(attemptId, generation, reason)
     await requestExternalSupervisorCancellation(directory, attemptId, generation, reason)
     return record
+  }
+
+  /**
+   * Read-only active-operation evidence for health patrols. A live helper named
+   * by a directory is insufficient: every persisted identity and the immutable
+   * request must bind this exact external attempt before liveness is reported.
+   */
+  async health(attemptId: string, generation: number, directory: string): Promise<{ availability: 'available' | 'unknown'; execution: 'known-active-operation' | 'unknown' }> {
+    try {
+      const record = this.store.get(attemptId, generation)
+      if (record === undefined || record.terminal !== undefined || (record.phase !== 'running' && record.phase !== 'cancelling')) return unknownHealth()
+      this.assertDirectory(record, directory)
+      const identity = await readSupervisorIdentity(directory)
+      if (identity === undefined || identity.attemptId !== attemptId || identity.generation !== generation || identity.containment?.kind !== 'pid-namespace'
+        || identity.process === undefined || record.process === undefined || record.supervisor === undefined
+        || !sameProcess(identity.process, record.process) || !sameProcess(identity.supervisor, record.supervisor)) return unknownHealth()
+      await this.assertManifest(directory, attemptId, generation, record)
+      const [helper, wrapper] = await Promise.all([inspectProcessIdentity(identity.supervisor), inspectProcessIdentity(identity.process)])
+      return helper === 'owned' && wrapper === 'owned'
+        ? { availability: 'available', execution: 'known-active-operation' }
+        : unknownHealth()
+    } catch { return unknownHealth() }
   }
 
   async observe(attemptId: string, generation: number, directory: string): Promise<ExternalRuntimeRecord> {
@@ -135,6 +157,7 @@ export class ExternalAssignmentRuntime {
 }
 
 function sameProcess(value: unknown, expected: { pid: number; birthId: string }): boolean { return typeof value === 'object' && value !== null && (value as Record<string, unknown>).pid === expected.pid && (value as Record<string, unknown>).birthId === expected.birthId }
+function unknownHealth(): { availability: 'unknown'; execution: 'unknown' } { return { availability: 'unknown', execution: 'unknown' } }
 function sameExit(left: unknown, right: unknown): boolean { return JSON.stringify(left) === JSON.stringify(right) }
 function sameAdmission(left: ExternalRuntimeRecord['admission'], right: VerifiedCodexExecutionPolicy): boolean {
   return left !== undefined && left.executable === right.executable && left.configuredExecutable === right.configuredExecutable && left.version === right.version && left.cwd === right.cwd && left.model === right.model && left.sandbox === right.sandbox && left.executableVerification === right.executableVerification && left.authStatus === right.authStatus

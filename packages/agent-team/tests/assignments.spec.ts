@@ -27,6 +27,41 @@ async function fixture() {
   return { directory, store }
 }
 
+
+
+
+it('bounds recoverable coordinator interruptions while preserving generation and checkpoint context', async () => {
+  const { store } = await fixture()
+  const first = await store.reserve({ ...request, repairLimit: 2 })
+  const firstInterrupted = await store.interrupt(token(first), { runtimeId: first.runtimeId, kind: 'never-started', receipt: 'shutdown-1' })
+  expect(firstInterrupted).toMatchObject({ interruption: { reason: 'coordinator-shutdown', count: 1 }, checkpoint: request.checkpoint })
+  const second = await store.reserve({ ...request, repairLimit: 2, expectedGeneration: 1, runtimeId: 'session-b' })
+  const secondInterrupted = await store.interrupt(token(second), { runtimeId: second.runtimeId, kind: 'never-started', receipt: 'shutdown-2' })
+  expect(secondInterrupted.interruption?.count).toBe(2)
+  await expect(store.reserve({ ...request, repairLimit: 2, expectedGeneration: 2, runtimeId: 'session-c' })).rejects.toThrow(/retry budget/i)
+})
+
+it('replays a legacy external reservation without inventing a verified provider policy', async () => {
+  const { store, directory } = await fixture()
+  await store.close()
+  const index = stores.indexOf(store)
+  if (index >= 0) stores.splice(index, 1)
+  const legacy = { version: 1, sequence: 1, type: 'assignment/reserved', request: { ...request, provider: 'external' } }
+  await appendFile(join(directory, 'assignments.jsonl'), `${JSON.stringify(legacy)}\n`)
+  const restored = await AssignmentStore.open(directory, limits)
+  stores.push(restored)
+  expect(restored.list()).toEqual([expect.objectContaining({ provider: 'external', phase: 'reserved' })])
+  expect(restored.list()[0]?.externalPolicy).toBeUndefined()
+  await expect(restored.reserve({ ...request, provider: 'external', expectedGeneration: 1 })).rejects.toThrow(/immutable verified provider policy/i)
+})
+
+it('requires a complete immutable verified policy before reserving an external attempt', async () => {
+  const { store } = await fixture()
+  await expect(store.reserve({ ...request, provider: 'external' })).rejects.toThrow(/immutable verified provider policy/i)
+  const policy = { projectId: 'alpha', directory: '/tmp/external-policy', admission: { executable: '/usr/bin/codex', configuredExecutable: '/usr/local/bin/codex', version: '0.153.4', executableVerification: 'verified' as const, cwd: '/tmp/project', model: 'gpt-5.6-codex', sandbox: 'workspace-write' as const, authStatus: 'authenticated' as const }, maxSpoolBytes: 1024, terminateGraceMs: 50 }
+  await expect(store.reserve({ ...request, provider: 'external', externalPolicy: policy })).resolves.toMatchObject({ provider: 'external', externalPolicy: policy })
+})
+
 it('reserves exactly one owner under concurrent claims, before runtime activation', async () => {
   const { store, directory } = await fixture()
   const results = await Promise.allSettled([

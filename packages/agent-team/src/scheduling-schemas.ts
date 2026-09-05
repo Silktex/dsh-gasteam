@@ -24,7 +24,7 @@ export const schedulingViewSchema = z.object({
     state: z.enum(['ready', 'waiting', 'assigned', 'finished', 'cancelled', 'accepted']),
     blockers: z.array(z.object({ code: z.enum(['execution-disabled', 'shutdown', 'project-unavailable', 'paused', 'team-unavailable',
       'task-unavailable', 'task-not-pending', 'task-owned', 'dependencies', 'global-capacity', 'project-capacity', 'pacing',
-      'cancelled', 'execution-failure', 'awaiting-acceptance', 'recovery-required', 'workspace-batch-dependency']), detail: z.string() }).strict()),
+      'cancelled', 'execution-failure', 'awaiting-acceptance', 'recovery-required', 'workspace-batch-dependency', 'provider-admission']), detail: z.string() }).strict()),
     cancelReason: z.string().optional(), attemptId: id.optional(), nextDispatchAt: z.number().optional(),
   }).strict()),
 }).strict()

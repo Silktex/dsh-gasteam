@@ -2,7 +2,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -19,6 +19,10 @@ import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationReview
 import { DispatchQueue } from './dispatch-queue.ts'
 import type { DispatchRequest, DispatchWork } from './dispatch-queue.ts'
 import { DshAssignmentRuntime } from './dsh-assignment-runtime.ts'
+import { ExternalNonCodeAssignmentAdapter } from './external-assignment-adapter.ts'
+import { ExternalAssignmentRuntime } from './external-assignment-runtime.ts'
+import { ExternalRuntimeStore } from './external-runtime.ts'
+import { admitCodex } from './codex-admission.ts'
 import { DurableJournal } from './durable-journal.ts'
 import { CandidateRetentionStore } from './candidate-retention.ts'
 import type { CandidateRetentionRecord } from './candidate-retention.ts'
@@ -39,6 +43,13 @@ export const executionConfigSchema = z.object({
   candidateRetention: z.object({ delayMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), commandTimeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(30_000) }).strict().optional(),
   /** Disabled unless an operator explicitly enables durable health observation. */
   health: healthConfigSchema.optional(),
+  /**
+   * Opt-in external Codex execution for explicit non-code tasks in one already
+   * registered project. Example: `{ projectId: 'research', cwd: '/repos/research',
+   * directory: '/var/lib/dsh/external' }`; `cwd` must canonically equal that
+   * project's repository, and every launch field is pinned at reservation.
+   */
+  externalCodex: z.object({ projectId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/), directory: z.string().trim().min(1).max(4096), cwd: z.string().trim().min(1).max(4096), executable: z.string().trim().min(1).max(4096), version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), model: z.string().trim().min(1).max(512), sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']), maxSpoolBytes: z.number().int().positive().max(16 * 1024 * 1024), terminateGraceMs: z.number().int().positive().max(300_000), admissionMaxOutputBytes: z.number().int().positive().max(65_536).default(16_384), admissionTimeoutMs: z.number().int().positive().max(30_000).default(5_000) }).strict().optional(),
   maxConcurrent: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict()
 export type ExecutionConfig = z.input<typeof executionConfigSchema>
@@ -51,7 +62,7 @@ const sameWork = (left: { projectId: string; teamId: string; taskId: string }, r
 
 export type DispatchBlockCode = 'execution-disabled' | 'shutdown' | 'project-unavailable' | 'paused' | 'team-unavailable'
   | 'task-unavailable' | 'task-not-pending' | 'task-owned' | 'dependencies' | 'global-capacity' | 'project-capacity'
-  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required' | 'workspace-batch-dependency'
+  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required' | 'workspace-batch-dependency' | 'provider-admission'
 export interface DispatchStatus extends DispatchRequest {
   readonly state: 'ready' | 'waiting' | 'assigned' | 'finished' | 'cancelled' | 'accepted'
   readonly blockers: { code: DispatchBlockCode; detail: string }[]
@@ -61,6 +72,8 @@ export interface DispatchStatus extends DispatchRequest {
 
 export class CoordinatorExecution {
   private readonly runtime: DshAssignmentRuntime
+  private readonly external: ExternalNonCodeAssignmentAdapter | undefined
+  private readonly externalStore: ExternalRuntimeStore | undefined
   private readonly handles = new Map<string, AgentHandle>()
   private readonly roots = new Map<string, Agent>()
   private readonly removePolicy: () => void
@@ -80,8 +93,12 @@ export class CoordinatorExecution {
     private readonly retention: CandidateRetentionStore,
     private readonly failures: DurableJournal<ExecutionBlock[], { type: 'work/blocked'; block: ExecutionBlock }>,
     private readonly health: HealthStore | undefined,
+    external: ExternalNonCodeAssignmentAdapter | undefined,
+    externalStore: ExternalRuntimeStore | undefined,
   ) {
     this.runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true)
+    this.external = external
+    this.externalStore = externalStore
     this.removePolicy = ctx.agentTeams.registerExecutionPolicy({
       taskMutation: (_caller, root) => {
         if (this.projects().some(project => project.teamIds.includes(root.id))) {
@@ -148,7 +165,52 @@ export class CoordinatorExecution {
                 let health: HealthStore | undefined
                 try {
                   health = validated?.health === undefined ? undefined : await HealthStore.open(directory, validated.health)
-                  return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures, health)
+                  const retainedExternal = assignments.list().filter(record => record.provider === 'external' && record.phase !== 'terminal')
+                  let externalStore: ExternalRuntimeStore | undefined
+                  try {
+                    let external: ExternalNonCodeAssignmentAdapter | undefined
+                    const recoveryPolicy = () => {
+                      const first = retainedExternal[0]?.externalPolicy
+                      if (first === undefined || retainedExternal.some(record => record.externalPolicy === undefined || JSON.stringify(record.externalPolicy) !== JSON.stringify(first))) {
+                        throw new Error('Retained external assignments lack one immutable provider policy; manual recovery is required')
+                      }
+                      return first
+                    }
+                    const recoveryAdapter = async () => {
+                      externalStore ??= await ExternalRuntimeStore.open(directory)
+                      return new ExternalNonCodeAssignmentAdapter(assignments, externalStore, new ExternalAssignmentRuntime(externalStore), recoveryPolicy(), false)
+                    }
+                    if (validated?.externalCodex !== undefined) {
+                      try {
+                        const configured = validated.externalCodex
+                        const project = projects().find(candidate => candidate.id === configured.projectId)
+                        if (project === undefined) throw new Error('External provider policy selects an unregistered project')
+                        const cwd = await realpath(configured.cwd)
+                        if (cwd !== await realpath(project.repository)) throw new Error('External provider cwd must canonically match its selected project repository')
+                        const providerDirectory = await realpath(configured.directory).catch(() => resolve(configured.directory))
+                        if (providerDirectory !== configured.directory || !providerDirectory.startsWith('/')) throw new Error('External provider directory must be canonical and absolute')
+                        const admission = (await admitCodex({
+                          config: { executable: configured.executable, version: configured.version, model: configured.model, sandbox: configured.sandbox },
+                          policy: { executable: configured.executable, version: configured.version, executableVerification: 'configured-unverified', cwd, model: configured.model, sandbox: configured.sandbox },
+                          maxOutputBytes: configured.admissionMaxOutputBytes, timeoutMs: configured.admissionTimeoutMs,
+                        })).policy
+                        externalStore = await ExternalRuntimeStore.open(directory)
+                        const configuredExternal = new ExternalNonCodeAssignmentAdapter(assignments, externalStore, new ExternalAssignmentRuntime(externalStore), {
+                          projectId: configured.projectId, directory: providerDirectory, admission, maxSpoolBytes: configured.maxSpoolBytes, terminateGraceMs: configured.terminateGraceMs,
+                        })
+                        if (retainedExternal.some(record => !configuredExternal.matchesReservation(record))) throw new Error('Configured external provider does not match a retained immutable assignment policy; manual recovery is required')
+                        external = configuredExternal
+                      } catch (error) {
+                        if (retainedExternal.length === 0) throw error
+                        // Read-only recovery does not probe auth or launch a new turn. It
+                        // retains the immutable policy solely to observe/cancel its live helper.
+                        external = await recoveryAdapter()
+                      }
+                    } else if (retainedExternal.length > 0) {
+                      external = await recoveryAdapter()
+                    }
+                    return new CoordinatorExecution(ctx, validated, projects, assignments, queue, submissions, reports, retention, failures, health, external, externalStore)
+                  } catch (error) { await externalStore?.close(); throw error }
                 } catch (error) { await health?.close(); throw error }
               } catch (error) { await retention?.close(); throw error }
             } catch (error) { await reports.close(); throw error }
@@ -303,9 +365,11 @@ export class CoordinatorExecution {
     if (attempt) {
       if (this.submissions.list().some(submission => submission.attemptId === attempt.attemptId && submission.phase === 'accepted')
         || this.reports.list().some(report => report.attemptId === attempt.attemptId && report.phase === 'accepted')) return { ...request, state: 'accepted', attemptId: attempt.attemptId, blockers: [] }
-      if (!repair && attempt.phase === 'terminal' && request.cancelReason === undefined) block(attempt.result && !attempt.stopReason && !failure ? 'awaiting-acceptance' : 'recovery-required',
+      const interruptionExhausted = attempt.interruption !== undefined && attempt.interruption.count >= (attempt.repairLimit ?? 0)
+      if (interruptionExhausted) block('recovery-required', `Coordinator interruption retry budget exhausted (${attempt.repairLimit ?? 0})`)
+      if (!repair && attempt.interruption === undefined && attempt.phase === 'terminal' && request.cancelReason === undefined) block(attempt.result && !attempt.stopReason && !failure ? 'awaiting-acceptance' : 'recovery-required',
         failure?.diagnostic ?? (attempt.result && !attempt.stopReason ? 'Worker report awaits verified task acceptance' : attempt.stopReason ?? 'Attempt stopped; explicit recovery is required'))
-      if (!repair) return { ...request, state: attempt.phase === 'terminal' ? request.cancelReason === undefined ? 'finished' : 'cancelled' : 'assigned', attemptId: attempt.attemptId, blockers }
+      if ((!repair && attempt.interruption === undefined) || interruptionExhausted) return { ...request, state: attempt.phase === 'terminal' ? request.cancelReason === undefined ? 'finished' : 'cancelled' : 'assigned', attemptId: attempt.attemptId, blockers }
     }
     if (this.shutdownRequested) block('shutdown', 'Coordinator shutdown has started')
     if (!this.config) block('execution-disabled', 'Coordinator execution is disabled')
@@ -321,6 +385,9 @@ export class CoordinatorExecution {
       if (task.ownerId !== undefined) block('task-owned', `Task is owned by ${task.ownerId}`)
       const blockedBy = task.blockedBy.filter(id => team.tasks.find(task => task.id === id)?.status !== 'completed')
       if (blockedBy.length) block('dependencies', `Prerequisites require acceptance: ${blockedBy.join(', ')}`)
+      if (task.nonCodeCriteria !== undefined && this.external?.ownsProject(request.projectId) && !this.external.canStartProject(request.projectId)) {
+        block('provider-admission', 'External provider is in recovery-only mode; restore its immutable admitted policy before launching new non-code work')
+      }
     }
     const workspaceBatchBlocker = this.workspaceBatchBlocker?.(request)
     if (workspaceBatchBlocker !== undefined) block('workspace-batch-dependency', workspaceBatchBlocker)
@@ -346,7 +413,7 @@ export class CoordinatorExecution {
       if (!project) continue
       try {
         const lead = this.ctx.agents.get(SessionId(record.teamId)) ?? await this.leadFor(project.project, record.teamId)
-        await this.runtime.cancel(lead, token(record), cancelled.cancelReason!)
+        await this.cancelAttempt(lead, record, cancelled.cancelReason!)
       } catch (error) { await this.block(record, error) }
     }
     if (this.config === undefined) return
@@ -373,8 +440,8 @@ export class CoordinatorExecution {
       if (!project || project.paused) continue
       try {
         const lead = await this.leadFor(project.project, record.teamId)
-        if (record.phase === 'reserved') await this.runtime.start(lead, token(record))
-        else await this.runtime.observe(lead, token(record))
+        if (record.phase === 'reserved') await this.startAttempt(lead, record)
+        else await this.observeAttempt(lead, record)
       } catch (error) { await this.block(record, error) }
     }
     if (this.ctx.agentTeams.integrationEnabled) {
@@ -449,10 +516,11 @@ export class CoordinatorExecution {
       try {
         const previous = this.assignments.list().findLast(record => sameWork(record, work))
         const repair = previous ? this.repairFor(previous) : undefined
-        if (previous && !repair) throw new Error('Previous attempt is not eligible for repair')
+        if (previous && !repair && previous.interruption === undefined) throw new Error('Previous attempt is not eligible for repair')
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
-          workerId: randomUUID(), runtimeId: randomUUID(), provider: 'spawn', expectedGeneration: previous?.generation ?? 0,
+          workerId: randomUUID(), runtimeId: randomUUID(), provider: task.nonCodeCriteria !== undefined && this.external?.ownsProject(view.project.id) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
+          ...(task.nonCodeCriteria !== undefined && this.external?.ownsProject(view.project.id) ? { externalPolicy: this.external.reservationPolicy() } : {}),
           checkpoint: { task: { subject: task.subject, description: task.description,
             ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
             ...(task.workflowBinding === undefined ? {} : { workflowId: task.workflowBinding.executionId, workflowStep: task.workflowBinding.stepId }),
@@ -465,7 +533,7 @@ export class CoordinatorExecution {
         })
         const lead = await this.leadFor(view.project, work.teamId)
         startInvoked = true
-        await this.runtime.start(lead, token(record))
+        await this.startAttempt(lead, record)
       } catch (error) {
         if (record !== undefined && !startInvoked) await this.assignments.retire(token(record), {
           runtimeId: record.runtimeId, kind: 'never-started', receipt: 'coordinator/pre-start-failure',
@@ -514,12 +582,20 @@ export class CoordinatorExecution {
           else state = 'unavailable'
         }
       }
-      const runtime = this.ctx.agents.get(SessionId(attempt.runtimeId))
       const provider = ['spawn', 'fork'].includes(attempt.provider) ? 'dsh' : attempt.provider === 'external' ? 'external' : 'unknown'
+      // An external attempt's runtimeId is an assignment identity, never a
+      // SessionId. Do not let a coincident DSH session manufacture external
+      // liveness or progress; only its supervised store/observer may do that.
+      const runtime = provider === 'dsh' ? this.ctx.agents.get(SessionId(attempt.runtimeId)) : undefined
+      // Fresh read-only supervisor observation is required; historical process
+      // identities in the journal cannot prove that an external effect remains live.
+      const externalOperation = provider === 'external' ? await this.external?.health(attempt) : undefined
       await this.health.assess({ attemptId: attempt.attemptId, generation: attempt.generation, provider,
         work: { projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, state },
         // A resident session and its sequence are evidence of life, not evidence that a tool is active.
-        runtime: execution !== 'unknown' ? { availability: 'available', execution } : runtime ? { availability: 'available', execution: 'unknown' } : { availability: 'unknown', execution: 'unknown' },
+        runtime: execution !== 'unknown' ? { availability: 'available', execution }
+          : externalOperation?.execution === 'known-active-operation' ? { availability: 'available', execution: 'known-active-operation' }
+            : runtime ? { availability: 'available', execution: 'unknown' } : { availability: 'unknown', execution: 'unknown' },
         ...(execution === 'unknown' && runtime ? { progress: { source: 'session-sequence' as const, cursor: String(runtime.session.seq) } } : {}),
         ...(diagnostic === undefined ? {} : { diagnostic }), ...(evidenceRef === undefined ? {} : { evidenceRef }),
       }, now)
@@ -698,6 +774,30 @@ export class CoordinatorExecution {
     }
   }
 
+  private async startAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
+    if (record.provider === 'external') {
+      if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
+      return await this.external.start(record)
+    }
+    return await this.runtime.start(lead, token(record))
+  }
+
+  private async observeAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
+    if (record.provider === 'external') {
+      if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
+      return await this.external.observe(record)
+    }
+    return await this.runtime.observe(lead, token(record))
+  }
+
+  private async cancelAttempt(lead: Agent, record: AttemptRecord, reason: string): Promise<AttemptRecord> {
+    if (record.provider === 'external') {
+      if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
+      return await this.external.cancel(record, reason)
+    }
+    return await this.runtime.cancel(lead, token(record), reason)
+  }
+
   async cancel(lead: Agent, work: DispatchWork, expectedRevision: number, reason: string): Promise<void> {
     if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
     const submissions = this.submissions.list().filter(submission => sameWork(submission, work))
@@ -706,7 +806,7 @@ export class CoordinatorExecution {
     await this.queue.cancel(work, expectedRevision, reason)
     const record = this.assignments.list().findLast(record => sameWork(record, work))
     if (record && record.phase !== 'terminal') {
-      try { await this.runtime.cancel(lead, token(record), reason) }
+      try { await this.cancelAttempt(lead, record, reason) }
       catch (error) { await this.block(work, error); throw error }
     }
   }
@@ -720,9 +820,16 @@ export class CoordinatorExecution {
   close(): Promise<void> {
     this.shutdownRequested = true
     return this.closing ??= (async () => {
+      // The external adapter owns no DSH sessions. It must still drive every
+      // live helper to a positive terminal receipt before this coordinator lock
+      // can be released; uncertainty leaves the stores and ownership intact.
+      await this.external?.drain(this.assignments.list())
       // Keep ownership and policies until all managed child activations are quiescent.
       for (const [teamId, lead] of this.roots) {
-        const ids = this.assignments.list().filter(record => record.teamId === teamId).map(record => SessionId(record.runtimeId))
+        // External helpers have no Team session identity. Their durable intent
+        // and capacity fence remain on disk for the next coordinator instance;
+        // never pass their arbitrary runtime IDs to the DSH drain API.
+        const ids = this.assignments.list().filter(record => record.teamId === teamId && record.provider !== 'external').map(record => SessionId(record.runtimeId))
         await this.runtime.drain(lead, ids)
       }
       for (const handle of this.handles.values()) await handle.dispose()
@@ -733,6 +840,7 @@ export class CoordinatorExecution {
       await this.reports.close()
       await this.retention.close()
       await this.health?.close()
+      await this.externalStore?.close()
       this.removePolicy()
     })().catch((error: unknown) => {
       // A failed observation retains ownership; a later close may rejoin the drain.

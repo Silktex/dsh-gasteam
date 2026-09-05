@@ -14,13 +14,18 @@ export type WorkspaceBatchId = Branded<'WorkspaceBatchId'>
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const text = z.string().trim().min(1).max(16_384)
+const externalPolicySchema = z.object({
+  projectId: id, directory: text,
+  admission: z.object({ executable: text, configuredExecutable: text, version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), executableVerification: z.literal('verified'), cwd: text, model: z.string().trim().min(1).max(512), sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']), authStatus: z.literal('authenticated') }).strict(),
+  maxSpoolBytes: z.number().int().positive().max(16 * 1024 * 1024), terminateGraceMs: z.number().int().positive().max(300_000),
+}).strict()
 const checkpointSchema = z.object({
   task: z.object({ subject: text, description: text, nonCodeCriteria: text.optional() }).strict(),
   workflowId: id.optional(), workflowStep: text.optional(), step: text,
   artifacts: z.array(z.object({ kind: z.enum(['commit', 'file', 'report']), ref: text }).strict()).max(256),
   nextAction: text,
 }).strict()
-const requestSchema = z.object({
+const legacyRequestSchema = z.object({
   projectId: id, teamId: id, taskId: id, workerId: id, runtimeId: id, provider: id,
   repairLimit: z.number().int().min(0).max(10).optional(),
   repair: z.object({ previousAttemptId: id, submissionId: id, integrationId: id,
@@ -28,22 +33,31 @@ const requestSchema = z.object({
     candidateCwd: text, diagnostic: text, round: positive,
   }).strict().optional(),
   expectedGeneration: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER - 1), checkpoint: checkpointSchema,
+  externalPolicy: externalPolicySchema.optional(),
 }).strict()
+const requestSchema = legacyRequestSchema.superRefine((value, ctx) => {
+  if (value.provider === 'external' && value.externalPolicy === undefined) ctx.addIssue({ code: 'custom', message: 'External assignment requires an immutable verified provider policy' })
+  if (value.provider !== 'external' && value.externalPolicy !== undefined) ctx.addIssue({ code: 'custom', message: 'Only external assignments may carry an external provider policy' })
+})
 const tokenSchema = z.object({ attemptId: id, generation: positive, expectedRevision: positive }).strict()
 const stopSchema = z.object({ runtimeId: id, kind: z.enum(['stopped', 'never-started']), receipt: text }).strict()
+const interruptionRequestSchema = z.object({ reason: z.literal('coordinator-shutdown'), receipt: text }).strict()
+const interruptionSchema = interruptionRequestSchema.extend({ count: positive }).strict()
 const envelope = { version: z.literal(1), sequence: positive }
 const eventSchema = z.discriminatedUnion('type', [
-  z.object({ ...envelope, type: z.literal('assignment/reserved'), request: requestSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('assignment/reserved'), request: legacyRequestSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/recovery'), token: tokenSchema, observedSequence: z.number().int().nonnegative(), notBefore: z.number().int().nonnegative(), messageId: id }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/activated'), token: tokenSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/checkpoint'), token: tokenSchema, checkpoint: checkpointSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/reported'), token: tokenSchema, result: text }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/stopping'), token: tokenSchema, reason: text }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/retired'), token: tokenSchema, evidence: stopSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/interrupted'), token: tokenSchema, evidence: stopSchema, interruption: interruptionRequestSchema }).strict(),
 ])
 type Event = z.output<typeof eventSchema>
 type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'sequence'> : never : never
 export type AssignmentCheckpoint = z.input<typeof checkpointSchema>
+export type ExternalProviderPolicy = z.output<typeof externalPolicySchema>
 export type ReserveAssignmentRequest = z.input<typeof requestSchema>
 export type AttemptToken = z.input<typeof tokenSchema>
 export type RuntimeStopEvidence = z.input<typeof stopSchema>
@@ -59,6 +73,8 @@ export interface AttemptRecord extends Omit<ReserveAssignmentRequest, 'expectedG
   readonly result?: string
   readonly stopReason?: string
   readonly stopEvidence?: RuntimeStopEvidence
+  /** A coordinator shutdown is recoverable after a positive provider stop receipt. */
+  readonly interruption?: z.output<typeof interruptionSchema>
 }
 const limitsSchema = z.object({
   globalCapacity: positive, projectCapacities: z.record(id, positive),
@@ -78,6 +94,7 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if ((prior?.generation ?? 0) !== request.expectedGeneration) throw new Error('Stale assignment generation')
     if (prior !== undefined && prior.phase !== 'terminal') throw new Error('Task is already owned')
     if (prior && request.repairLimit !== prior.repairLimit) throw new Error('Repair policy is immutable for accepted work')
+    if (prior?.interruption && prior.interruption.count >= (request.repairLimit ?? 0)) throw new Error('Coordinator interruption retry budget is exhausted')
     if (request.repair) {
       if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.stopReason || !prior.result
         || request.repair.previousAttemptId !== prior.attemptId
@@ -126,6 +143,12 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
       if (event.evidence.kind === 'never-started' && current.phase !== 'reserved') throw new Error('Never-started evidence requires a reserved attempt')
       next = { ...next, phase: 'terminal', stopEvidence: event.evidence }
       break
+    case 'attempt/interrupted':
+      if (event.evidence.runtimeId !== current.runtimeId) throw new Error('Interruption evidence is for a different runtime')
+      if (event.evidence.kind === 'never-started' && current.phase !== 'reserved') throw new Error('Never-started interruption requires a reserved attempt')
+      next = { ...next, phase: 'terminal', stopEvidence: event.evidence,
+        interruption: { ...event.interruption, count: records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId && record.taskId === current.taskId && record.interruption !== undefined).length + 1 } }
+      break
   }
   return records.map((record, position) => position === index ? next : record)
 }
@@ -170,6 +193,9 @@ export class AssignmentStore {
   stop(token: AttemptToken, reason: string): Promise<AttemptRecord> { return this.mutate({ type: 'attempt/stopping', token, reason }) }
   retire(token: AttemptToken, evidence: RuntimeStopEvidence): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/retired', token, evidence })
+  }
+  interrupt(token: AttemptToken, evidence: RuntimeStopEvidence): Promise<AttemptRecord> {
+    return this.mutate({ type: 'attempt/interrupted', token, evidence, interruption: { reason: 'coordinator-shutdown', receipt: evidence.receipt } })
   }
   list(): AttemptRecord[] { return this.journal.snapshot() }
   close(): Promise<void> { return this.journal.close() }
