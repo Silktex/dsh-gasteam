@@ -1,4 +1,4 @@
-##Inspired by Gastown
+#Inspired by Gastown
 I love [gastown](https://github.com/gastownhall/gastown), but I wanted a simple plugin for deepseek. working on animated pixel agents for visual understanding.
 
 # DSH GasTeam
