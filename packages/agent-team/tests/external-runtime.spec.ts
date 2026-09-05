@@ -8,7 +8,7 @@ it('syncs launch intent before a supervisor may create an OS process and preserv
   const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
   try {
     const store = await ExternalRuntimeStore.open(directory)
-    const intent = await store.prepareLaunch({ attemptId: 'attempt-a', generation: 2, provider: 'codex-cli', runtimeIdentity: { provider: 'codex-cli', kind: 'new', attemptId: 'attempt-a', generation: 2, executable: '/opt/codex', version: '0.153.4', cwd: '/worktree', model: 'gpt-5.6-codex', sandbox: 'workspace-write' } }, 0)
+    const intent = await store.prepareLaunch({ attemptId: 'attempt-a', generation: 2, provider: 'codex-cli', runtimeIdentity: { provider: 'codex-cli', kind: 'new', attemptId: 'attempt-a', generation: 2, executable: '/opt/codex', version: '0.153.4', cwd: '/worktree', model: 'gpt-5.6-codex', sandbox: 'workspace-write' }, admission: { executable: '/opt/codex', configuredExecutable: '/configured/codex', version: '0.153.4', cwd: '/worktree', model: 'gpt-5.6-codex', sandbox: 'workspace-write', executableVerification: 'verified', authStatus: 'authenticated' }, inputSha256: 'a'.repeat(64), spool: { directory: '/spool/a', stdout: '/spool/a/out', stderr: '/spool/a/err', maxBytes: 100 }, supervision: { containment: 'pid-namespace', terminateGraceMs: 50 } }, 0)
     expect(intent.phase).toBe('launch-intent')
     await store.close()
     const restored = await ExternalRuntimeStore.open(directory)
@@ -20,6 +20,22 @@ it('syncs launch intent before a supervisor may create an OS process and preserv
     await restored.recordGroupStopped('attempt-a', 2, { receiptId: 'stop-a', process: { pid: 42, birthId: '123' }, groupEmpty: true }, 4)
     expect(restored.get('attempt-a', 2)).toMatchObject({ phase: 'cancelled', terminal: { outcome: 'cancelled' }, retainsCapacity: false })
     await restored.close()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+it('accepts a report only after exact observed thread, result, completed turn, and positive terminal receipt', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
+  try {
+    const store = await ExternalRuntimeStore.open(directory)
+    await store.prepareLaunch({ attemptId: 'attempt-d', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-d', generation: 1 } }, 0)
+    await store.recordProcessStarted('attempt-d', 1, { pid: 44, birthId: '125' }, 1)
+    await store.recordThread('attempt-d', 1, 'thread-d', 2)
+    await store.recordResult('attempt-d', 1, 'bounded fixture report', 3)
+    await store.recordTurnCompleted('attempt-d', 1, 4)
+    await store.recordExit('attempt-d', 1, { code: 0, signal: null }, 5)
+    await store.recordGroupStopped('attempt-d', 1, { receiptId: 'stop-d', process: { pid: 44, birthId: '125' }, groupEmpty: true }, 6, true)
+    expect(store.get('attempt-d', 1)).toMatchObject({ phase: 'completed', threadId: 'thread-d', result: 'bounded fixture report', retainsCapacity: false })
+    await store.close()
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
@@ -48,6 +64,26 @@ it('does not treat a zero CLI leader exit or absent output as completion without
     expect(store.get('attempt-b', 1)).toMatchObject({ phase: 'running', retainsCapacity: true, processExit: { code: 0 } })
     await store.recordGroupStopped('attempt-b', 1, { receiptId: 'stop-b', process: { pid: 43, birthId: '124' }, groupEmpty: true }, 3, false)
     expect(store.get('attempt-b', 1)).toMatchObject({ phase: 'failed', terminal: { outcome: 'failed' }, retainsCapacity: false })
+    await store.close()
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+it('replays exact durable exit and terminal receipts without regressing a completed attempt', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-external-runtime-'))
+  try {
+    const store = await ExternalRuntimeStore.open(directory)
+    await store.prepareLaunch({ attemptId: 'attempt-replay', generation: 1, provider: 'fixture', runtimeIdentity: { provider: 'fixture', kind: 'new', attemptId: 'attempt-replay', generation: 1 } }, 0)
+    await store.recordProcessStarted('attempt-replay', 1, { pid: 45, birthId: '126' }, 1)
+    await store.recordThread('attempt-replay', 1, 'thread-replay', 2)
+    await store.recordResult('attempt-replay', 1, 'replay result', 3)
+    await store.recordTurnCompleted('attempt-replay', 1, 4)
+    await store.recordExit('attempt-replay', 1, { code: 0, signal: null }, 5)
+    const afterExit = store.get('attempt-replay', 1)!
+    await expect(store.recordExit('attempt-replay', 1, { code: 0, signal: null }, 6)).resolves.toMatchObject({ revision: afterExit.revision })
+    const receipt = { receiptId: 'stop-replay', process: { pid: 45, birthId: '126' }, groupEmpty: true as const }
+    await store.recordGroupStopped('attempt-replay', 1, receipt, 7, true)
+    const completed = store.get('attempt-replay', 1)!
+    await expect(store.recordGroupStopped('attempt-replay', 1, receipt, 8, true)).resolves.toMatchObject({ phase: 'completed', revision: completed.revision })
     await store.close()
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

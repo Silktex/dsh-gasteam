@@ -65,6 +65,15 @@ export interface ExternalRuntimeSupervisorClientOptions {
   executable?: string
 }
 
+const cancellationRequestSchema = z.object({ attemptId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/), generation: z.number().int().nonnegative(), reason: z.string().trim().min(1).max(16_384) }).strict()
+
+/** Durable intent consumed only by a helper that still owns its live child handle. */
+export async function requestExternalSupervisorCancellation(directory: string, attemptId: string, generation: number, reason: string): Promise<void> {
+  if (!isAbsolute(directory) || directory !== resolve(directory)) throw new Error('External supervisor cancellation requires a canonical directory')
+  const request = cancellationRequestSchema.parse({ attemptId, generation, reason })
+  await immutableManifest(join(directory, 'cancellation-request.json'), JSON.stringify(request))
+}
+
 /**
  * Coordinator-side launcher. It never owns the lifetime lock or target pipes:
  * those belong to the detached helper, so killing this client cannot orphan a
@@ -121,7 +130,7 @@ export function compiledExternalRuntimeSupervisorClient(): ExternalRuntimeSuperv
   return new ExternalRuntimeSupervisorClient({ helperArgs: [fileURLToPath(import.meta.url)] })
 }
 
-interface SupervisorIdentityFile {
+export interface SupervisorIdentityFile {
   attemptId: string
   generation: number
   supervisor: ProcessBirthIdentity
@@ -180,7 +189,7 @@ export class ExternalRuntimeSupervisor {
         throw new Error('External runtime launch identity is uncertain; preserve capacity')
       }
       child.stdin.end(request.stdin)
-      return supervise(child, identity, request, lock, stdout, stderr, lifecycle)
+      return supervise(child, supervisor, identity, request, lock, stdout, stderr, lifecycle)
     } catch (error) {
       // Once the namespace wrapper inherited the descriptor, the helper must
       // preserve the fence until that wrapper has actually closed. Closing here would
@@ -203,26 +212,40 @@ function observeChild(child: ChildProcess): Promise<{ code: number | null; signa
   })
 }
 
-function supervise(child: ChildProcess, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>): SupervisedProcess {
+function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>): SupervisedProcess {
   let pending = Promise.resolve()
   let bytes = 0
+  let queuedBytes = 0
   let overflowed = false
   let cancellation: Promise<StopProof> | undefined
   let exit: { code: number | null; signal: string | null } | undefined
   const append = (filename: string, chunk: Buffer) => {
+    if (overflowed) return
+    // Reserve synchronously before queueing I/O. This limits closures to the
+    // configured spool budget even if a hostile child emits faster than disk.
+    const remaining = Math.max(0, request.maxSpoolBytes - bytes - queuedBytes)
+    const written = Buffer.from(chunk.subarray(0, remaining))
+    queuedBytes += written.byteLength
     pending = pending.then(async () => {
-      const remaining = Math.max(0, request.maxSpoolBytes - bytes)
-      if (remaining > 0) {
-        const written = chunk.subarray(0, remaining)
-        bytes += written.byteLength
-        await appendFile(filename, written, { mode: 0o600 })
-      }
-      if (chunk.byteLength > remaining && !overflowed) {
-        overflowed = true
-        await appendFile(filename, '\n[external runtime spool limit reached; cancellation requested]\n', { mode: 0o600 })
-        setImmediate(() => { void requestCancellation() })
-      }
+      try {
+        if (written.byteLength > 0) {
+          bytes += written.byteLength
+          await appendFile(filename, written, { mode: 0o600 })
+        }
+      } finally { queuedBytes -= written.byteLength }
     })
+    if (chunk.byteLength > remaining) {
+      overflowed = true
+      // Stop accepting stream chunks now; the kernel pipes are deliberately
+      // destroyed while the live child handle performs bounded cancellation.
+      child.stdout?.pause()
+      child.stderr?.pause()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      const marker = Buffer.from('\n[external runtime spool limit reached; cancellation requested]\n').subarray(0, 1_024)
+      pending = pending.then(async () => { await appendFile(filename, marker, { mode: 0o600 }) })
+      void requestCancellation()
+    }
   }
   child.stdout?.on('data', (chunk: Buffer) => append(stdout, Buffer.from(chunk)))
   child.stderr?.on('data', (chunk: Buffer) => append(stderr, Buffer.from(chunk)))
@@ -231,17 +254,20 @@ function supervise(child: ChildProcess, identity: ProcessBirthIdentity, request:
     await pending
     // `close` arrives only after the wrapper's stdio closes. Namespace teardown
     // is certified separately by the read-only observer after helper exit.
-    await durableWrite(join(request.directory, 'helper-exit.json'), JSON.stringify({ process: identity, exit: result }))
+    const spool = await spoolProof(stdout, stderr)
+    const receipt = { attemptId: request.attemptId, generation: request.generation, supervisor, process: identity, exit: result }
+    await durableWrite(join(request.directory, 'terminal-proof.json'), JSON.stringify({ ...receipt, spool }))
+    await durableWrite(join(request.directory, 'helper-exit.json'), JSON.stringify(receipt))
     await lock.close()
     return result
   }, async error => { await lock.close(); throw error })
-  const requestCancellation = async (): Promise<StopProof> => cancellation ??= cancelNamespacedProcess(child, identity, lifecycle, request.terminateGraceMs, async proof => {
+  async function requestCancellation(): Promise<StopProof> { return cancellation ??= cancelNamespacedProcess(child, identity, lifecycle, request.terminateGraceMs, async proof => {
     if (proof.exit !== undefined) {
       await pending
       proof.spool = await spoolProof(stdout, stderr)
     }
     await writeStopProof(request.directory, proof)
-  })
+  }) }
   return {
     identity,
     finished: closed.then(async result => ({ code: result.code, signal: result.signal, overflowed, ...(cancellation === undefined ? {} : { stopProof: await cancellation }) })),
@@ -436,7 +462,21 @@ async function main(): Promise<void> {
   } else {
     const parsed = JSON.parse(await readFile(requestFile, 'utf8')) as SupervisorCommand
     const supervised = await new ExternalRuntimeSupervisor().launch(parsed.request)
-    await supervised.finished
+    let cancellation: Promise<StopProof> | undefined
+    const poll = setInterval(() => {
+      void (async () => {
+        if (cancellation !== undefined) return
+        try {
+          const request = cancellationRequestSchema.parse(JSON.parse(await readFile(join(parsed.request.directory, 'cancellation-request.json'), 'utf8')))
+          if (request.attemptId !== parsed.request.attemptId || request.generation !== parsed.request.generation) return
+          cancellation = supervised.cancel()
+          await cancellation
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      })().catch(error => { process.stderr.write(`external runtime cancellation observer failed: ${error instanceof Error ? error.message : String(error)}\n`) })
+    }, 20)
+    try { await supervised.finished } finally { clearInterval(poll) }
   }
 }
 

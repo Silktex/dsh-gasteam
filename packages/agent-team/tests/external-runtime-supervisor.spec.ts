@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { durableLink, ExternalRuntimeSupervisor, ExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, inspectProcessIdentity, probePidNamespaceContainment, processBirthIdentity, readSupervisorIdentity } from '../src/external-runtime-supervisor.ts'
+import { durableLink, ExternalRuntimeSupervisor, ExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, inspectProcessIdentity, probePidNamespaceContainment, processBirthIdentity, readSupervisorIdentity, requestExternalSupervisorCancellation } from '../src/external-runtime-supervisor.ts'
 import { acquireFileOwnership } from '../src/file-ownership.ts'
 
 const fsyncEvents = vi.hoisted((): string[] => [])
@@ -94,7 +94,7 @@ it('keeps a child-inherited lifetime lock after the actual supervisor is SIGKILL
   await lock.close()
   expect(await inspectProcessIdentity(identity)).toBe('owned')
   expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toMatchObject({ state: 'uncertain', reason: expect.stringContaining('wrapper remains live') })
-  await waitFor(async () => await inspectProcessIdentity(identity) === 'missing')
+  await waitFor(async () => (await new ExternalRuntimeSupervisorObserver().observe(root)).state === 'stopped')
   live.splice(live.findIndex(item => item.pid === identity.pid), 1)
 })
 
@@ -112,14 +112,14 @@ it('keeps the detached helper and its target alive when the launcher client is S
   const lock = await open(join(root, 'lifetime.lock'), 'a+')
   await expect(acquireFileOwnership(lock)).rejects.toThrow(/already owned/i)
   await lock.close()
-  await waitFor(async () => await inspectProcessIdentity(identity) === 'missing')
+  await waitFor(async () => (await new ExternalRuntimeSupervisorObserver().observe(root)).state === 'stopped')
   live.splice(live.findIndex(item => item.pid === identity.pid), 1)
 })
 
 it('tears down a PID namespace after spool overflow and leaves a host-wrapper receipt for a read-only observer', async () => {
   const root = await directory()
   const requestFile = join(root, 'request.json')
-  await writeFile(requestFile, JSON.stringify({ request: await request(root, 'overflow', { maxSpoolBytes: 128, terminateGraceMs: 50 }) }))
+  await writeFile(requestFile, JSON.stringify({ request: await request(root, 'overflow-storm', { maxSpoolBytes: 128, terminateGraceMs: 50 }) }))
   const helper = spawn(process.execPath, ['--import', 'tsx', resolve('packages/agent-team/src/external-runtime-supervisor.ts'), '--request', requestFile], { detached: true, stdio: 'ignore' })
   const exited = once(helper, 'exit')
   await waitFor(async () => (await readSupervisorIdentity(root))?.process !== undefined)
@@ -131,6 +131,20 @@ it('tears down a PID namespace after spool overflow and leaves a host-wrapper re
   // A stop proof is final only after the ChildProcess close event has drained
   // its pipes; exit alone must not certify the spool.
   expect(proof.exit).toBeDefined()
+  expect(proof.spool.stdout.bytes + proof.spool.stderr.bytes).toBeLessThanOrEqual(128 + 1_024)
+  expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
+})
+
+it('consumes a durable cancellation request only through the live helper handle', async () => {
+  const root = await directory()
+  const requestFile = join(root, 'request.json')
+  await writeFile(requestFile, JSON.stringify({ request: await request(root, 'silent', { terminateGraceMs: 50 }) }))
+  const helper = spawn(process.execPath, ['--import', 'tsx', resolve('packages/agent-team/src/external-runtime-supervisor.ts'), '--request', requestFile], { detached: true, stdio: 'ignore' })
+  const exited = once(helper, 'exit')
+  await waitFor(async () => (await readSupervisorIdentity(root))?.process !== undefined)
+  await requestExternalSupervisorCancellation(root, 'attempt-a', 1, 'operator requested cancellation')
+  await exited
+  expect(JSON.parse(await readFile(join(root, 'stop-proof.json'), 'utf8'))).toMatchObject({ signals: expect.arrayContaining(['SIGTERM']), containment: 'pid-namespace' })
   expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
 })
 
@@ -161,7 +175,7 @@ it('makes a helper launch manifest immutable across altered replays', async () =
   const identity = (await readSupervisorIdentity(root))!.process!
   live.push({ pid: identity.pid })
   await expect(client.launch({ ...first, args: [...first.args, 'changed'] })).rejects.toThrow(/immutable/i)
-  await waitFor(async () => await inspectProcessIdentity(identity) === 'missing')
+  await waitFor(async () => (await new ExternalRuntimeSupervisorObserver().observe(root)).state === 'stopped')
   live.splice(live.findIndex(item => item.pid === identity.pid), 1)
 })
 
