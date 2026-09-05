@@ -30,6 +30,7 @@ import * as Supervisor from '../src/supervisor.ts'
 import { AssignmentStore, type AttemptRecord } from '../src/assignments.ts'
 import { acquireIntegrationOwnership } from '../src/integration-ownership.ts'
 import { DshAssignmentRuntime } from '../src/dsh-assignment-runtime.ts'
+import { RuntimeDrain } from '../src/runtime-drain.ts'
 
 const SIGNAL = new AbortController().signal
 const roots: string[] = []
@@ -426,23 +427,40 @@ describe('Team identity and provisioning', () => {
     const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-assignments-'))
     roots.push(assignmentDirectory)
     const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    let releaseBarrier: (() => void) | undefined
+    let drain: ReturnType<typeof vi.spyOn> | undefined
     try {
       const record = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'cancel-session', provider: 'spawn', expectedGeneration: 0,
         checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Wait for cancellation' } })
-      const runtime = new DshAssignmentRuntime(ctx, assignments, 50)
+      let expireFirst!: () => void
+      let scheduled = 0
+      const joined = Promise.withResolvers<void>()
+      const drains = new RuntimeDrain(50, {
+        set(callback) {
+          scheduled++
+          if (scheduled === 1) expireFirst = callback
+          else if (scheduled === 2) joined.resolve()
+          return scheduled as unknown as ReturnType<typeof setTimeout>
+        },
+        clear() {},
+      })
+      const runtime = new DshAssignmentRuntime(ctx, assignments, 50, false, drains)
       const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
       const other = ctx.agentLoop.create(SessionId('unrelated-runtime-lead'), { provider: 'mock', model: 'mock' })
       await expect(runtime.start(other, token(record))).rejects.toThrow(/authority/)
       const active = await runtime.start(lead, token(record))
       expect(ctx.agents.get(SessionId(record.runtimeId))).toBeDefined()
       const originalDrain = ctx.subagents.drainContinuableChildren.bind(ctx.subagents)
-      let release!: () => void
-      const barrier = new Promise<void>(resolve => { release = resolve })
-      const drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (...args) => {
+      const barrier = new Promise<void>(resolve => { releaseBarrier = resolve })
+      drain = vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockImplementation(async (...args) => {
         await barrier
         return originalDrain(...args)
       })
-      await expect(runtime.cancel(lead, token(active), 'operator cancellation')).rejects.toThrow(/timed out/)
+      const cancellation = runtime.cancel(lead, token(active), 'operator cancellation')
+      const cancellationFailure = expect(cancellation).rejects.toThrow(/timed out/)
+      await vi.waitFor(() => expect(expireFirst).toBeTypeOf('function'))
+      expireFirst()
+      await cancellationFailure
       const stopping = assignments.list()[0]!
       expect(stopping).toMatchObject({ phase: 'stopping', stopReason: 'operator cancellation' })
       expect(stopping.stopEvidence).toBeUndefined()
@@ -450,16 +468,22 @@ describe('Team identity and provisioning', () => {
       await expect(assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: 'another-task', workerId: 'another-worker', runtimeId: 'another-session', provider: 'spawn', expectedGeneration: 0,
         checkpoint: record.checkpoint })).rejects.toThrow(/capacity/)
       const reconciliation = runtime.observe(lead, token(stopping))
-      // Let observation enter the existing pending drain before allowing the provider to finish.
-      await Promise.resolve()
-      release()
+      // The second wait is explicitly known to have joined the same pending
+      // provider drain before this test permits that real drain to finish.
+      await joined.promise
+      releaseBarrier()
       const terminal = await reconciliation
       expect(drain).toHaveBeenCalledTimes(1)
       drain.mockRestore()
+      drain = undefined
       expect(terminal).toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation' })
       expect(ctx.agents.get(SessionId(record.runtimeId))).toBeUndefined()
       await expect(runtime.start(lead, token(record))).rejects.toThrow(/stale|terminal/i)
-    } finally { await assignments.close() }
+    } finally {
+      releaseBarrier?.()
+      drain?.mockRestore()
+      await assignments.close()
+    }
   })
 
   it('flushes the accepted child prompt before committing the active roster edge', async () => {

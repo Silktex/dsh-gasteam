@@ -428,3 +428,12 @@ The adapter derives Codex invocation from verified admission, persists immutable
 Independent clean archive `/tmp/gasteam-m9-adapter-final-1788641851` overlays seven frozen files on `21de9b6`. Manifest `/tmp/gasteam-m9-adapter-final-manifest.sha256` was verified; executable fixture mode is retained. Commands `pnpm install --offline --frozen-lockfile`, `pnpm build`, `pnpm typecheck`, `pnpm test`, `pnpm test:acceptance`, `pnpm check:docs`, and `pnpm test:smoke` passed: 334 regular tests, one explicitly optional local CLI probe skipped, and 17 process scenarios. Logs are `/tmp/gasteam-m9-adapter-final-{install,build,typecheck,regular,acceptance,docs,smoke}.log`.
 
 This is an isolated adapter with start/observe/cancel capability; resume is explicitly unsupported. Coordinator routing, external code worktree integration, and actual authenticated model assignment/cancellation/restart conformance remain open. No external publication, local service restart, or user-data migration occurred.
+
+
+## 2026-09-05 — Deterministic shutdown deadline regression
+
+Adapter checkpoint `08988a91ecd80fb545855458d1b2fc981f82b994` passed full local validation but [GitHub CI](https://github.com/Silktex/dsh-gasteam/actions/runs/33991834788) exposed the existing shutdown regression's 50 ms wall-clock race: the same short budget covered both deliberately blocked cancellation and real provider shutdown. The test now injects the deadline scheduler, explicitly expires the first wait, proves the second wait joined the same drain, and releases the real provider barrier. It still verifies retained capacity, absent stop evidence before termination, one provider drain, and eventual terminal state. Cleanup releases the barrier and restores the spy even on failure. Production deadlines are unchanged.
+
+Independent clean archive `/tmp/gasteam-ci-drain-final-1788642377` overlays only runtime-drain, DSH runtime constructor injection, and the regression test on `08988a9`; manifest `/tmp/gasteam-ci-drain-final-manifest.sha256`. Frozen offline installation, build, types, 88 focused tests, and 334 regular tests (one optional probe skipped) passed. Logs `/tmp/gasteam-ci-drain-final-{install,build,typecheck,focused,regular}.log`. The earlier failed CI is retained as evidence, not represented as passing.
+
+The same frozen archive also passed 17 process acceptance scenarios, documentation checks, and CLI smoke; logs `/tmp/gasteam-ci-drain-final-{acceptance,docs,smoke}.log`.

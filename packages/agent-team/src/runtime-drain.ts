@@ -1,7 +1,12 @@
 /** A deadline bounds observation, never proves runtime termination. */
+export interface RuntimeDrainDeadline {
+  set(callback: () => void, timeoutMs: number): ReturnType<typeof setTimeout>
+  clear(timer: ReturnType<typeof setTimeout>): void
+}
+
 export class RuntimeDrain {
   private readonly pending = new Map<string, Promise<void>>()
-  constructor(private readonly timeoutMs = 30_000) {
+  constructor(private readonly timeoutMs = 30_000, private readonly deadline: RuntimeDrainDeadline = { set: setTimeout, clear: clearTimeout }) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('Drain timeout must be a positive integer')
   }
 
@@ -19,9 +24,9 @@ export class RuntimeDrain {
       await Promise.race([
         operation,
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`Runtime drain timed out for ${identity}; termination is unconfirmed and capacity remains reserved`)), this.timeoutMs)
+          timer = this.deadline.set(() => reject(new Error(`Runtime drain timed out for ${identity}; termination is unconfirmed and capacity remains reserved`)), this.timeoutMs)
         }),
       ])
-    } finally { if (timer !== undefined) clearTimeout(timer) }
+    } finally { if (timer !== undefined) this.deadline.clear(timer) }
   }
 }

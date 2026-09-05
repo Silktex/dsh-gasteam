@@ -17,8 +17,8 @@ const tokenOf = (record: AttemptRecord): AttemptToken => ({
 export class DshAssignmentRuntime {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly drains: RuntimeDrain
-  constructor(private readonly ctx: Context, private readonly assignments: AssignmentStore, drainTimeoutMs = 30_000, private readonly recoverInterrupted = false) {
-    this.drains = new RuntimeDrain(drainTimeoutMs)
+  constructor(private readonly ctx: Context, private readonly assignments: AssignmentStore, drainTimeoutMs = 30_000, private readonly recoverInterrupted = false, drains?: RuntimeDrain) {
+    this.drains = drains ?? new RuntimeDrain(drainTimeoutMs)
   }
 
   /** Host shutdown shares pending drain handles with cancellation/reconciliation. */
