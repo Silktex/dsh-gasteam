@@ -51,15 +51,17 @@ export class TeamRuntimeLifecycle {
    * @param operations - admitted operations captured after the admission cutoff.
    * @param failures - aggregate destination for unexpected rejection or timeout.
    */
-  async settle(operations: readonly Promise<unknown>[], failures: unknown[]): Promise<void> {
-    if (operations.length === 0) return
+  async settle(operations: readonly Promise<unknown>[], failures: unknown[]): Promise<boolean> {
+    if (operations.length === 0) return true
     try {
       const outcomes = await this.withTimeout(Promise.allSettled(operations))
       for (const outcome of outcomes) {
         if (outcome.status === 'rejected' && !this.isCancellation(outcome.reason)) failures.push(outcome.reason)
       }
+      return true
     } catch (error: unknown) {
       failures.push(error)
+      return false
     }
   }
 
