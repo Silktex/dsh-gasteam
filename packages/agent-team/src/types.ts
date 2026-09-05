@@ -311,6 +311,22 @@ export interface TeamTaskReviewBinding {
   readonly reviewGate: string
 }
 
+/** One exact workflow input retained with a host-pinned task. */
+export interface TeamTaskWorkflowInput {
+  readonly name: string
+  readonly artifact: {
+    readonly kind: 'commit' | 'file' | 'report'
+    readonly ref: string
+  }
+}
+
+/** Host-only workflow position and inputs for every coordinator-managed task. */
+export interface TeamTaskWorkflowBinding {
+  readonly executionId: string
+  readonly stepId: string
+  readonly inputs: readonly TeamTaskWorkflowInput[]
+}
+
 /** Whole durable task snapshot; every mutation increments {@link revision}. */
 export interface TeamTaskSnapshot {
   readonly id: TeamTaskId
@@ -321,6 +337,8 @@ export interface TeamTaskSnapshot {
   readonly nonCodeCriteria?: string
   /** Host-only immutable integration gate for a workflow-managed code task. */
   readonly reviewGate?: string
+  /** Host-only immutable workflow checkpoint identity and required inputs. */
+  readonly workflowBinding?: TeamTaskWorkflowBinding
   readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly ownerId?: SessionId
@@ -338,6 +356,7 @@ export interface TeamTaskView {
   readonly description: string
   readonly nonCodeCriteria?: string
   readonly reviewGate?: string
+  readonly workflowBinding?: TeamTaskWorkflowBinding
   readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly blockedBy: TeamTaskId[]
@@ -455,6 +474,8 @@ export interface CreatePinnedTeamTaskRequest {
   readonly admissionKey: string
   readonly subject: string
   readonly description: string
+  /** Required host-only workflow identity and exact inputs, durable before dispatch. */
+  readonly workflowBinding: TeamTaskWorkflowBinding
   readonly nonCodeCriteria?: string
   /** Mutually exclusive with non-code criteria; copied into the durable task event before dispatch. */
   readonly reviewGate?: string

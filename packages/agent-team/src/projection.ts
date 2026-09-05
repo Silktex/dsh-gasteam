@@ -91,6 +91,8 @@ const teamTaskSnapshotSchema = z.object({
   description: z.string(),
   nonCodeCriteria: z.string().min(1).refine(value => value.trim().length > 0).optional(),
   reviewGate: z.string().min(1).max(128).refine(value => value.trim().length > 0).optional(),
+  workflowBinding: z.object({ executionId: z.string().min(1).max(128), stepId: z.string().min(1).max(128),
+    inputs: z.array(z.object({ name: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/), artifact: z.object({ kind: z.enum(['commit', 'file', 'report']), ref: z.string().min(1).max(16_384) }).strict() }).strict()).max(128) }).strict().optional(),
   reviewBinding: z.object({ projectId: z.string().min(1), teamId: z.string().min(1), executionId: z.string().min(1), candidateRound: z.number().int().nonnegative(),
     integrationId: z.string().min(1), sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), targetCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
     candidateCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), reviewGate: z.string().min(1).max(128) }).strict().optional(),
@@ -438,6 +440,9 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       }
       if (prior !== undefined && prior.reviewGate !== task.reviewGate) {
         throw new Error(`team task "${task.id}" changed immutable integration review gate`)
+      }
+      if (prior !== undefined && JSON.stringify(prior.workflowBinding) !== JSON.stringify(task.workflowBinding)) {
+        throw new Error(`team task "${task.id}" changed immutable workflow binding`)
       }
       if (prior !== undefined && JSON.stringify(prior.reviewBinding) !== JSON.stringify(task.reviewBinding)) {
         throw new Error(`team task "${task.id}" changed immutable workflow review binding`)

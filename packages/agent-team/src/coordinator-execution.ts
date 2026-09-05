@@ -182,6 +182,7 @@ export class CoordinatorExecution {
     const lead = await this.leadFor(project, intent.teamId)
     const task = await this.ctx.agentTeams.createPinnedTask(lead, {
       admissionKey: intent.intentId, subject: intent.subject, description: intent.description, nonCodeCriteria: intent.nonCodeCriteria,
+      workflowBinding: { executionId: intent.executionId, stepId: intent.stepId, inputs: intent.inputs ?? [] },
       ...(intent.review === undefined ? {} : { reviewBinding: { projectId: intent.projectId, teamId: intent.teamId, executionId: intent.executionId,
         candidateRound: intent.candidateRound ?? 0, ...intent.review } }),
     })
@@ -193,7 +194,8 @@ export class CoordinatorExecution {
     const project = this.projects().find(project => project.id === intent.projectId && project.teamIds.includes(intent.teamId))
     if (!project) throw new Error('Workflow code task escapes its registered project Lead')
     const lead = await this.leadFor(project, intent.teamId)
-    const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: intent.intentId, subject: intent.subject, description: intent.description, reviewGate: intent.reviewGate })
+    const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: intent.intentId, subject: intent.subject, description: intent.description, reviewGate: intent.reviewGate,
+      workflowBinding: { executionId: intent.executionId, stepId: intent.stepId, inputs: intent.inputs ?? [] } })
     return { taskId: task.id }
   }
 
@@ -441,7 +443,8 @@ export class CoordinatorExecution {
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
           checkpoint: { task: { subject: task.subject, description: task.description,
             ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
-            artifacts: repair ? [{ kind: 'commit', ref: repair.sourceCommit }, { kind: 'file', ref: repair.candidateCwd }] : [],
+            ...(task.workflowBinding === undefined ? {} : { workflowId: task.workflowBinding.executionId, workflowStep: task.workflowBinding.stepId }),
+            artifacts: [...(task.workflowBinding?.inputs.map(input => input.artifact) ?? []), ...(repair ? [{ kind: 'commit' as const, ref: repair.sourceCommit }, { kind: 'file' as const, ref: repair.candidateCwd }] : [])],
             nextAction: repair
               ? 'Repair the failed submission in this new worktree. Inspect the retained candidate and diagnostic; apply the pinned source commit, resolve conflicts against the current target, fix failing checks, commit the repaired artifact, and report evidence. Preserve all previous checkouts.'
               : task.nonCodeCriteria === undefined

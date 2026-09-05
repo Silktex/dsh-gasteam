@@ -7,7 +7,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as CoordinatorTools from '../../tool-agent-team/src/coordinator.ts'
 import { schedulingViewSchema, schedulingControlSchema } from '../src/scheduling-schemas.ts'
-import { remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema } from '../src/remote-schemas.ts'
+import { createTaskSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, updateTaskSchema } from '../src/remote-schemas.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -283,6 +283,7 @@ it('replays a workflow task creation crash through its Team-log admission key wi
     parameters: { question: 'Why is restart safe?' }, executionId: 'workflow-crash-window' })).rejects.toThrow(/crash after Team task side effect/)
   const task = ctx.agentTeams.listTasks(lead).find(task => task.subject === 'Investigate Why is restart safe?')!
   expect(task).toBeDefined()
+  expect(task.workflowBinding).toEqual({ executionId: 'workflow-crash-window', stepId: 'investigate', inputs: [] })
   expect(running.inspectWorkflow(lead, 'workflow-crash-window').steps[0]).toMatchObject({ stepId: 'investigate', phase: 'pending' })
   sideEffect.mockRestore()
   await running.close()
@@ -294,9 +295,24 @@ it('replays a workflow task creation crash through its Team-log admission key wi
   cleanup.push(() => restored.close())
   const restoredLead = restoredCtx.agents.get(SessionId(lead.id))!
   await restored.resumeWorkflow(restoredLead, 'workflow-crash-window')
-  expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(value => value.id === task.id)).toHaveLength(1)
+  const restoredTask = restoredCtx.agentTeams.listTasks(restoredLead).filter(value => value.id === task.id)
+  expect(restoredTask).toHaveLength(1)
+  expect(restoredTask[0]?.workflowBinding).toEqual(task.workflowBinding)
   expect(restored.view().workflows[0]!.steps).toContainEqual(expect.objectContaining({ stepId: 'investigate', taskId: task.id, phase: 'running' }))
-  expect(restored.view().attempts.filter(attempt => attempt.taskId === task.id)).toHaveLength(1)
+  const attempts = restored.view().attempts.filter(attempt => attempt.taskId === task.id)
+  expect(attempts).toHaveLength(1)
+  expect(attempts[0]?.checkpoint).toMatchObject({ workflowId: 'workflow-crash-window', workflowStep: 'investigate', step: 'implement', artifacts: [] })
+})
+
+it('rejects model-facing attempts to forge or mutate a host-only workflow binding', async () => {
+  const { ctx, lead } = await fixture()
+  const binding = { executionId: 'forged-execution', stepId: 'forged-step', inputs: [] }
+  expect(() => createTaskSchema.parse({ subject: 'Forged', description: 'Must be rejected', workflowBinding: binding })).toThrow()
+  expect(() => updateTaskSchema.parse({ taskId: 'task-1', expectedRevision: 1, action: 'edit', workflowBinding: binding })).toThrow()
+  await expect(ctx.agentTeams.createTask(lead, { subject: 'Forged', description: 'Must be rejected', workflowBinding: binding } as never)).rejects.toThrow(/host-only/i)
+  const task = await ctx.agentTeams.createTask(lead, { subject: 'Ordinary', description: 'No workflow authority' })
+  await expect(ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: task.revision, action: 'edit', subject: 'Still ordinary', workflowBinding: binding } as never)).rejects.toThrow(/host-only/i)
+  expect(ctx.agentTeams.getTask(lead, task.id).workflowBinding).toBeUndefined()
 })
 
 it('pins the code review gate in the Team task before the workflow can acknowledge task creation', async () => {
@@ -315,12 +331,35 @@ it('pins the code review gate in the Team task before the workflow can acknowled
     parameters: { subject: 'gate crash fence' }, executionId: 'gated-crash-window' })).rejects.toThrow(/gated Team task side effect/)
   const task = ctx.agentTeams.listTasks(lead).find(value => value.subject === 'Implement gate crash fence')!
   expect(task).toMatchObject({ reviewGate: 'workflow-gated-crash-window-implement', status: 'pending' })
+  expect(task.workflowBinding).toEqual({ executionId: 'gated-crash-window', stepId: 'implement', inputs: [] })
   expect(task.nonCodeCriteria).toBeUndefined()
   expect(running.inspectWorkflow(lead, 'gated-crash-window').steps[0]).toMatchObject({ stepId: 'implement', phase: 'pending' })
   sideEffect.mockRestore()
   await running.resumeWorkflow(lead, 'gated-crash-window')
   expect(ctx.agentTeams.listTasks(lead).filter(value => value.id === task.id)).toHaveLength(1)
   expect(running.inspectWorkflow(lead, 'gated-crash-window').steps[0]).toMatchObject({ taskId: task.id, phase: 'running' })
+  expect(running.view().attempts.find(attempt => attempt.taskId === task.id)?.checkpoint).toMatchObject({ workflowId: 'gated-crash-window', workflowStep: 'implement', step: 'implement', artifacts: [] })
+})
+
+it('carries the exact candidate inputs from a host-pinned reviewer task into its assignment checkpoint', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  const source = 'a'.repeat(40), candidate = 'b'.repeat(40)
+  const host = (running as unknown as { execution: CoordinatorExecution }).execution
+  const created = await host.createPinnedWorkflowTask({ intentId: 'reviewer-binding', projectId: 'project', teamId: lead.id, executionId: 'review-workflow', stepId: 'review',
+    subject: 'Review candidate', description: 'Review the exact verified candidate.', nonCodeCriteria: 'Review candidate evidence.',
+    inputs: [{ name: 'source', artifact: { kind: 'commit', ref: source } }, { name: 'candidate', artifact: { kind: 'commit', ref: candidate } }],
+    review: { integrationId: 'integration-review', sourceCommit: source, targetCommit: source, candidateCommit: candidate, reviewGate: 'review-gate' } })
+  await running.reconcile()
+  const task = ctx.agentTeams.getTask(lead, created.taskId as never)
+  expect(task.workflowBinding).toEqual({ executionId: 'review-workflow', stepId: 'review', inputs: [{ name: 'source', artifact: { kind: 'commit', ref: source } }, { name: 'candidate', artifact: { kind: 'commit', ref: candidate } }] })
+  expect(task.reviewBinding).toMatchObject({ executionId: 'review-workflow', sourceCommit: source, candidateCommit: candidate, reviewGate: 'review-gate' })
+  await vi.waitFor(() => expect(running.view().attempts.find(attempt => attempt.taskId === created.taskId)).toBeDefined())
+  expect(running.view().attempts.find(attempt => attempt.taskId === created.taskId)?.checkpoint).toMatchObject({ workflowId: 'review-workflow', workflowStep: 'review', step: 'implement', artifacts: [{ kind: 'commit', ref: source }, { kind: 'commit', ref: candidate }] })
 })
 
 it('accepts the first workflow report, hands its evidence to a fresh second-step worker, and keeps both concrete task bindings', async () => {
@@ -350,6 +389,9 @@ it('accepts the first workflow report, hands its evidence to a fresh second-step
   await vi.waitFor(() => expect(running.view().attempts.filter(attempt => attempt.taskId === secondTask)).toHaveLength(1))
   const second = running.view().attempts.find(attempt => attempt.taskId === secondTask)!
   expect(second.runtimeId).not.toBe(first.runtimeId)
+  const secondBinding = ctx.agentTeams.getTask(lead, secondTask).workflowBinding
+  expect(secondBinding).toMatchObject({ executionId: 'workflow-handoff', stepId: 'report', inputs: [{ name: 'findings', artifact: { kind: 'report' } }] })
+  expect(second.checkpoint).toMatchObject({ workflowId: 'workflow-handoff', workflowStep: 'report', step: 'implement', artifacts: [secondBinding!.inputs[0]!.artifact] })
   expect(restored.steps).toMatchObject([{ stepId: 'investigate', taskId: firstTask, phase: 'completed' }, { stepId: 'report', taskId: secondTask, phase: 'running' }])
   const prompts = adapter.requests.map(request => request.messages.flatMap(message => message.content.flatMap(block => block.type === 'text' ? [block.text] : [])).join('\n'))
   expect(prompts.some(prompt => prompt.includes('The credential expired at 10:42 UTC.') && prompt.includes('The report identifies a specific expiry time.'))).toBe(true)

@@ -34,6 +34,8 @@ export interface WorkflowTaskCreateIntent {
   readonly subject: string
   readonly description: string
   readonly nonCodeCriteria: string
+  /** Exact completed artifacts required by this workflow step. */
+  readonly inputs: { name: string; artifact: { kind: 'commit' | 'file' | 'report'; ref: string } }[]
   readonly candidateRound?: number | undefined
   readonly review?: { readonly integrationId: string; readonly sourceCommit: string; readonly targetCommit: string; readonly candidateCommit: string; readonly reviewGate: string } | undefined
 }
@@ -63,6 +65,8 @@ export interface WorkflowCodeTaskCreateIntent {
   readonly subject: string
   readonly description: string
   readonly reviewGate: string
+  /** Exact completed artifacts required by this workflow step. */
+  readonly inputs: { name: string; artifact: { kind: 'commit' | 'file' | 'report'; ref: string } }[]
   readonly candidateRound?: number | undefined
 }
 export interface WorkflowCodeStatus {
@@ -105,11 +109,12 @@ export type CreateWorkflowRequest = z.input<typeof createWorkflowRequestSchema>
 const reviewBindingSchema = z.object({ integrationId: id, sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), targetCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
   candidateCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), reviewGate: id }).strict()
 const approvalSchema = reviewBindingSchema.extend({ executionId: id, stepId: id, reviewId: id }).strict()
+const workflowInputSchema = z.object({ name: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/), artifact: z.object({ kind: z.enum(['commit', 'file', 'report']), ref: text }).strict() }).strict()
 const intentSchema = z.object({
-  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, nonCodeCriteria: text, candidateRound: z.number().int().nonnegative().optional(), review: reviewBindingSchema.optional(),
+  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, nonCodeCriteria: text, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(), review: reviewBindingSchema.optional(),
 }).strict()
 const codeIntentSchema = z.object({
-  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, reviewGate: id, candidateRound: z.number().int().nonnegative().optional(),
+  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, reviewGate: id, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(),
 }).strict()
 const creationSchema = z.object({
   executionId: id, projectId: id, teamId: id, template: z.unknown(), parameters: z.record(id, scalar), definition: z.unknown(), publicationGrant: z.object({ teamId: id, authorization: id }).strict().optional(), publicationPublisher: z.object({ identity: id, revision: positive }).strict().optional(),
@@ -576,9 +581,15 @@ export class WorkflowRuntime {
     let value = binding(state, execution.id, stepId)
     if (!value?.intent) {
       const definition = execution.definition.steps.find(step => step.id === stepId)!
-      const evidence = definition.artifacts.requires.map(name => {
+      const inputs = definition.artifacts.requires.map(name => {
         const source = execution.steps.find(step => step.artifacts?.[name] !== undefined)?.artifacts?.[name]
         if (!source) throw new Error(`Workflow input artifact ${name} is missing from completed checkpoints`)
+        if (source.kind !== 'commit' && source.kind !== 'file' && source.kind !== 'report') {
+          throw new Error(`Workflow input artifact ${name} has an unsupported task binding kind`)
+        }
+        return { name, artifact: { kind: source.kind, ref: source.ref } as const }
+      })
+      const evidence = inputs.map(({ name, artifact: source }) => {
         const accepted = source.kind === 'report' ? this.reports.list().find(report => report.phase === 'accepted' && report.id === source.ref) : undefined
         return accepted
           ? `${name}: report:${accepted.id}\n  Accepted report excerpt: ${excerpt(accepted.report, 8_000, `\n[truncated; durable report receipt ${accepted.id}]`)}\n  Review criteria: ${excerpt(accepted.criteria, 2_000, '\n[criteria truncated]')}\n  Lead rationale: ${excerpt(accepted.rationale, 2_000, '\n[rationale truncated]')}`
@@ -587,7 +598,7 @@ export class WorkflowRuntime {
       const code = await this.codeReviewBinding(execution, definition)
       const intent: WorkflowTaskCreateIntent & { review?: z.output<typeof reviewBindingSchema> } = { intentId: `workflow-${randomUUID()}`, projectId: creation.projectId, teamId: creation.teamId, executionId: execution.id, stepId,
         subject: definition.title, description: excerpt(`${definition.title}\n\nPinned workflow ${execution.definition.id}@${execution.definition.version}.\nInput evidence:\n${evidence.length ? evidence.map(item => `- ${item}`).join('\n') : '- none'}${code === undefined ? '' : `\n\nExact candidate review binding:\n- source: ${code.sourceCommit}\n- target: ${code.targetCommit}\n- candidate: ${code.candidateCommit}\n- integration: ${code.integrationId}\n- gate: ${code.reviewGate}`}\n\nProduce an evidence-backed report for Lead review.`, 16_384, '\n[workflow evidence truncated; use durable report receipt IDs above]'),
-        nonCodeCriteria: `Report review: ${definition.title}`, candidateRound: execution.candidateHistory.length,
+        nonCodeCriteria: `Report review: ${definition.title}`, inputs, candidateRound: execution.candidateHistory.length,
         ...(code === undefined ? {} : { review: code }) }
       await this.journal.append(() => ({ type: 'workflow-runtime/task-intended', executionId: execution.id, stepId, intent, sourceRound: execution.sourceHistory.length }))
       state = this.journal.snapshot(); value = binding(state, execution.id, stepId)!
@@ -610,7 +621,7 @@ export class WorkflowRuntime {
       const definition = execution.definition.steps.find(step => step.id === stepId)!
       const intent: WorkflowCodeTaskCreateIntent = { intentId: `workflow-${randomUUID()}`, projectId: creation.projectId, teamId: creation.teamId, executionId: execution.id, stepId,
         subject: definition.title, description: excerpt(`${definition.title}\n\nPinned workflow ${execution.definition.id}@${execution.definition.version}. Commit the implementation and report evidence; the host will submit this exact commit for verification.`, 16_384, '\n[workflow evidence truncated]'),
-        reviewGate: `workflow-${execution.id}-${stepId}`.slice(0, 128), candidateRound: execution.candidateHistory.length }
+        reviewGate: `workflow-${execution.id}-${stepId}`.slice(0, 128), inputs: [], candidateRound: execution.candidateHistory.length }
       await this.journal.append(() => ({ type: 'workflow-runtime/task-intended', executionId: execution.id, stepId, intent, sourceRound: execution.sourceHistory.length }))
       state = this.journal.snapshot(); value = binding(state, execution.id, stepId)!
     }

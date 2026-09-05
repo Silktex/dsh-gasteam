@@ -17,6 +17,7 @@ import type {
   ReportedTaskAcceptance,
   TeamTaskSnapshot,
   TeamTaskReviewBinding,
+  TeamTaskWorkflowBinding,
   TeamTaskView,
   UpdateTeamTaskRequest,
 } from './types.ts'
@@ -45,6 +46,26 @@ function reviewBinding(input: TeamTaskReviewBinding | undefined): TeamTaskReview
     candidateCommit: commit(input.candidateCommit, 'candidate'), reviewGate: requiredText(input.reviewGate, 'pinned review gate', 128) }
 }
 
+function workflowBinding(input: TeamTaskWorkflowBinding): TeamTaskWorkflowBinding {
+  const names = new Set<string>()
+  if (input.inputs.length > 128) throw new TeamError('Pinned workflow has too many input artifacts', 'TEAM_INVALID_ARGUMENT')
+  return {
+    executionId: requiredText(input.executionId, 'pinned workflow execution', 128),
+    stepId: requiredText(input.stepId, 'pinned workflow step', 128),
+    inputs: input.inputs.map(value => {
+      const name = requiredText(value.name, 'pinned workflow artifact name', 128)
+      if (!/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/u.test(name) || names.has(name)) {
+        throw new TeamError('Pinned workflow artifact names must be unique identifiers', 'TEAM_INVALID_ARGUMENT')
+      }
+      names.add(name)
+      if (value.artifact.kind !== 'commit' && value.artifact.kind !== 'file' && value.artifact.kind !== 'report') {
+        throw new TeamError('Pinned workflow artifact kind is invalid', 'TEAM_INVALID_ARGUMENT')
+      }
+      return { name, artifact: { kind: value.artifact.kind, ref: requiredText(value.artifact.ref, 'pinned workflow artifact reference', 16_384) } }
+    }),
+  }
+}
+
 /** Owns Team task limits, authorization, transitions, and derived views. */
 export class TeamTaskBoard {
   /**
@@ -69,6 +90,7 @@ export class TeamTaskBoard {
    */
   async create(membership: TeamMembership, request: CreateTeamTaskRequest): Promise<TeamTaskView> {
     const { root } = membership
+    if ('workflowBinding' in (request as object)) throw new TeamError('Workflow binding is host-only', 'TEAM_MANAGED_TASK')
     if (request.nonCodeCriteria !== undefined && membership.role !== 'lead') throw new TeamError('Non-code acceptance criteria require a Lead', 'TEAM_LEAD_ONLY')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
@@ -114,19 +136,20 @@ export class TeamTaskBoard {
     const nonCodeCriteria = request.nonCodeCriteria === undefined ? undefined : requiredText(request.nonCodeCriteria, 'non-code criteria', 16_384)
     const reviewGate = request.reviewGate === undefined ? undefined : requiredText(request.reviewGate, 'integration review gate', 128)
     const pinnedReview = reviewBinding(request.reviewBinding)
+    const pinnedWorkflow = workflowBinding(request.workflowBinding)
     if (pinnedReview !== undefined && nonCodeCriteria === undefined) throw new TeamError('Pinned candidate review requires non-code criteria', 'TEAM_INVALID_ARGUMENT')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
       const existing = state.tasks.find(task => task.id === taskId)
       if (existing) {
-        if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria || existing.reviewGate !== reviewGate || !isDeepStrictEqual(existing.reviewBinding, pinnedReview)
+        if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria || existing.reviewGate !== reviewGate || !isDeepStrictEqual(existing.workflowBinding, pinnedWorkflow) || !isDeepStrictEqual(existing.reviewBinding, pinnedReview)
           || existing.blockedBy.length !== 0 || existing.writeScopes.length !== 0) throw new TeamError('Pinned task replay has different immutable inputs', 'TEAM_INVALID_ARGUMENT')
         return this.taskView(root, state, existing)
       }
       const active = state.tasks.filter(task => task.status !== 'deleted').length
       if (active >= this.maxTasks) throw new TeamError(`Team task limit ${this.maxTasks} reached`, 'TEAM_TASK_LIMIT')
       const task: TeamTaskSnapshot = { id: taskId, revision: 1, subject, description,
-        ...(nonCodeCriteria === undefined ? {} : { nonCodeCriteria }), ...(reviewGate === undefined ? {} : { reviewGate }), ...(pinnedReview === undefined ? {} : { reviewBinding: pinnedReview }), status: 'pending', blockedBy: [], writeScopes: [] }
+        ...(nonCodeCriteria === undefined ? {} : { nonCodeCriteria }), ...(reviewGate === undefined ? {} : { reviewGate }), workflowBinding: pinnedWorkflow, ...(pinnedReview === undefined ? {} : { reviewBinding: pinnedReview }), status: 'pending', blockedBy: [], writeScopes: [] }
       this.assertTaskGraph(state, task)
       await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
       return this.taskView(root, state, task)
@@ -214,6 +237,7 @@ export class TeamTaskBoard {
     request: UpdateTeamTaskRequest,
   ): Promise<TeamTaskView> {
     const root = membership.root
+    if ('workflowBinding' in (request as object)) throw new TeamError('Workflow binding is host-only', 'TEAM_MANAGED_TASK')
     return this.journal.transact(root.id, async () => {
       this.validateMutation(caller, root, request)
       const state = this.journal.state(root)
@@ -407,6 +431,7 @@ export class TeamTaskBoard {
       description: task.description,
       ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }),
       ...(task.reviewGate === undefined ? {} : { reviewGate: task.reviewGate }),
+      ...(task.workflowBinding === undefined ? {} : { workflowBinding: structuredClone(task.workflowBinding) }),
       ...(task.reviewBinding === undefined ? {} : { reviewBinding: structuredClone(task.reviewBinding) }),
       status: task.status,
       blockedBy: structuredClone(task.blockedBy),

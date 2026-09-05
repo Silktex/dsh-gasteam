@@ -24,7 +24,7 @@ export const createTaskSchema = wireSchema<CreateTeamTaskRequest>(z.object({
   'reviewGate': z.string().readonly().optional(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly().optional(),
   'writeScopes': z.array(z.string()).readonly().optional(),
-}))
+}).strict())
 
 export const reviewReportsRequestSchema = wireSchema<ReviewReportsRequest>(z.object({ 'projectId': z.string().readonly() }).strict())
 export const remoteAcceptReportRequestSchema = wireSchema<RemoteAcceptReportRequest>(z.object({
@@ -75,6 +75,10 @@ export const taskResultSchema = wireSchema<TeamTaskMutationResult>(z.union([z.ob
   'description': z.string().readonly(),
   'nonCodeCriteria': z.string().readonly().optional(),
   'reviewGate': z.string().readonly().optional(),
+  'workflowBinding': z.object({
+    executionId: z.string().readonly(), stepId: z.string().readonly(),
+    inputs: z.array(z.object({ name: z.string().readonly(), artifact: z.object({ kind: z.union([z.literal('commit'), z.literal('file'), z.literal('report')]).readonly(), ref: z.string().readonly() }).strict().readonly() }).strict().readonly()).readonly(),
+  }).strict().readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),
@@ -101,7 +105,7 @@ export const updateTaskSchema = wireSchema<UpdateTeamTaskRequest>(z.object({
   'writeScopes': z.array(z.string()).readonly().optional(),
   'owner': z.string().readonly().optional(),
   'result': z.string().readonly().optional(),
-}))
+}).strict())
 
 export const teamViewSchema = wireSchema<TeamView>(z.object({
   'members': z.array(z.object({
@@ -132,6 +136,10 @@ export const teamViewSchema = wireSchema<TeamView>(z.object({
   'description': z.string().readonly(),
   'nonCodeCriteria': z.string().readonly().optional(),
   'reviewGate': z.string().readonly().optional(),
+  'workflowBinding': z.object({
+    executionId: z.string().readonly(), stepId: z.string().readonly(),
+    inputs: z.array(z.object({ name: z.string().readonly(), artifact: z.object({ kind: z.union([z.literal('commit'), z.literal('file'), z.literal('report')]).readonly(), ref: z.string().readonly() }).strict().readonly() }).strict().readonly()).readonly(),
+  }).strict().readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),

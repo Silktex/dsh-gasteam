@@ -217,6 +217,16 @@ describe('Agent Teams projection events', () => {
     expect(completed.tasks[0]?.result).toBe('Verified output.')
   })
 
+  it('round-trips and fences immutable host workflow bindings in the Team JSONL projection', () => {
+    const binding = { executionId: 'workflow-1', stepId: 'review', inputs: [{ name: 'candidate', artifact: { kind: 'commit' as const, ref: 'a'.repeat(40) } }] }
+    const first = event('team/task', { version: 1, teamId: TEAM, task: task({ workflowBinding: binding }) }, 0)
+    const restored = projectTeam(ROOT, JSON.parse(JSON.stringify([first])))
+    expect(restored.tasks[0]?.workflowBinding).toEqual(binding)
+    expect(() => projectTeam(ROOT, [first, event('team/task', { version: 1, teamId: TEAM,
+      task: task({ revision: 2, workflowBinding: { ...binding, stepId: 'forged-step' } }),
+    }, 1)])).toThrow(/immutable workflow binding/u)
+  })
+
   it('rejects every invalid persisted task dependency relation', () => {
     const first = event('team/task', { version: 1, teamId: TEAM, task: task() }, 0)
     const second = event('team/task', {
