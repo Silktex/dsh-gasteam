@@ -16,6 +16,8 @@ const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const text = z.string().trim().min(1).max(16_384)
 const externalPolicySchema = z.object({
   projectId: id, directory: text,
+  /** Optional explicit opt-in for code tasks; distinct from the runtime spool root. */
+  codeWorktreeDirectory: text.optional(),
   admission: z.object({ executable: text, configuredExecutable: text, version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), executableVerification: z.literal('verified'), cwd: text, model: z.string().trim().min(1).max(512), sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']), authStatus: z.literal('authenticated') }).strict(),
   maxSpoolBytes: z.number().int().positive().max(16 * 1024 * 1024), terminateGraceMs: z.number().int().positive().max(300_000),
 }).strict()

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import type { VerifiedCodexExecutionPolicy } from './codex-admission.ts'
 import { ExternalRuntimeStore } from './external-runtime.ts'
 import type { ExternalRuntimeRecord } from './external-runtime.ts'
+import type { ExternalCodeWorktreeReceipt } from './external-code-worktree.ts'
 import { compiledExternalRuntimeSupervisorClient, ExternalRuntimeSupervisorObserver, inspectProcessIdentity, readSupervisorIdentity, requestExternalSupervisorCancellation } from './external-runtime-supervisor.ts'
 import type { ExternalRuntimeSupervisorClient, ExternalSupervisorRequest } from './external-runtime-supervisor.ts'
 
@@ -15,6 +16,8 @@ export interface ExternalAssignmentLaunch {
   readonly prompt: object
   readonly maxSpoolBytes: number
   readonly terminateGraceMs: number
+  /** A provisioned, immutable external code checkout; omitted for report-only turns. */
+  readonly worktree?: ExternalCodeWorktreeReceipt
 }
 
 export interface ExternalAssignmentCapabilities { readonly start: true; readonly observe: true; readonly cancel: true; readonly resume: false }
@@ -28,21 +31,24 @@ export class ExternalAssignmentRuntime {
     const prior = this.store.get(launch.attemptId, launch.generation)
     const input = `${JSON.stringify(launch.prompt)}\n`
     const inputSha256 = createHash('sha256').update(input).digest('hex')
+    const workingDirectory = launch.worktree?.cwd ?? launch.verifiedAdmission.cwd
+    if (launch.worktree !== undefined && (launch.worktree.attemptId !== launch.attemptId || launch.worktree.generation !== launch.generation || launch.worktree.runtimeId === '')) throw new Error('External code worktree does not bind this launch')
     if (prior !== undefined) {
       this.assertDirectory(prior, launch.directory)
       if (!sameAdmission(prior.admission, launch.verifiedAdmission)) throw new Error('External runtime replay admission does not match verified launch policy')
       if (prior.spool?.maxBytes !== launch.maxSpoolBytes) throw new Error('External runtime replay spool limit does not match immutable launch intent')
       if (prior.supervision?.containment !== 'pid-namespace' || prior.supervision.terminateGraceMs !== launch.terminateGraceMs) throw new Error('External runtime replay termination policy does not match immutable launch intent')
       if (prior.inputSha256 !== inputSha256) throw new Error('External runtime replay prompt does not match immutable launch intent')
+      if (prior.runtimeIdentity.cwd !== workingDirectory || JSON.stringify(prior.worktree) !== JSON.stringify(launch.worktree)) throw new Error('External runtime replay worktree does not match immutable launch intent')
       return await this.observe(launch.attemptId, launch.generation, launch.directory)
     }
     const policy = launch.verifiedAdmission
     const runtimeIdentity = { provider: 'codex-cli', kind: 'new' as const, attemptId: launch.attemptId, generation: launch.generation,
-      executable: policy.executable, version: policy.version, cwd: policy.cwd, model: policy.model, sandbox: policy.sandbox }
+      executable: policy.executable, version: policy.version, cwd: workingDirectory, model: policy.model, sandbox: policy.sandbox }
     await this.store.prepareLaunch({ attemptId: launch.attemptId, generation: launch.generation, provider: 'codex-cli', runtimeIdentity,
-      admission: policy, inputSha256, spool: { directory: launch.directory, stdout: `${launch.directory}/stdout.log`, stderr: `${launch.directory}/stderr.log`, maxBytes: launch.maxSpoolBytes }, supervision: { containment: 'pid-namespace', terminateGraceMs: launch.terminateGraceMs } })
+      admission: policy, inputSha256, spool: { directory: launch.directory, stdout: `${launch.directory}/stdout.log`, stderr: `${launch.directory}/stderr.log`, maxBytes: launch.maxSpoolBytes }, supervision: { containment: 'pid-namespace', terminateGraceMs: launch.terminateGraceMs }, ...(launch.worktree === undefined ? {} : { worktree: launch.worktree }) })
     const request: ExternalSupervisorRequest = { attemptId: launch.attemptId, generation: launch.generation, directory: launch.directory,
-      command: policy.executable, args: ['exec', '--json', '--config', 'approval_policy="never"', '--cd', policy.cwd, '--model', policy.model, '--sandbox', policy.sandbox, '-'], cwd: policy.cwd, stdin: input, maxSpoolBytes: launch.maxSpoolBytes,
+      command: policy.executable, args: ['exec', '--json', '--config', 'approval_policy="never"', '--cd', workingDirectory, '--model', policy.model, '--sandbox', policy.sandbox, '-'], cwd: workingDirectory, stdin: input, maxSpoolBytes: launch.maxSpoolBytes,
       terminateGraceMs: launch.terminateGraceMs, containment: 'pid-namespace' }
     await this.client.launch(request)
     const identity = await waitForIdentity(launch.directory)
@@ -150,8 +156,8 @@ export class ExternalAssignmentRuntime {
   private async assertManifest(directory: string, attemptId: string, generation: number, record: ExternalRuntimeRecord): Promise<void> {
     const parsed = JSON.parse(await readFile(`${directory}/supervisor-request.json`, 'utf8')) as { request?: ExternalSupervisorRequest }
     const request = parsed.request
-    if (!request || request.attemptId !== attemptId || request.generation !== generation || request.directory !== directory || request.command !== record.admission?.executable || request.cwd !== record.admission?.cwd || request.maxSpoolBytes !== record.spool?.maxBytes || request.containment !== record.supervision?.containment || request.terminateGraceMs !== record.supervision?.terminateGraceMs || record.inputSha256 !== createHash('sha256').update(request.stdin).digest('hex')) throw new Error('supervisor manifest does not bind durable external intent')
-    const expected = ['exec', '--json', '--config', 'approval_policy="never"', '--cd', record.admission.cwd, '--model', record.admission.model, '--sandbox', record.admission.sandbox, '-']
+    if (!request || request.attemptId !== attemptId || request.generation !== generation || request.directory !== directory || request.command !== record.admission?.executable || request.cwd !== record.runtimeIdentity.cwd || request.maxSpoolBytes !== record.spool?.maxBytes || request.containment !== record.supervision?.containment || request.terminateGraceMs !== record.supervision?.terminateGraceMs || record.inputSha256 !== createHash('sha256').update(request.stdin).digest('hex')) throw new Error('supervisor manifest does not bind durable external intent')
+    const expected = ['exec', '--json', '--config', 'approval_policy="never"', '--cd', record.runtimeIdentity.cwd, '--model', record.admission.model, '--sandbox', record.admission.sandbox, '-']
     if (JSON.stringify(request.args) !== JSON.stringify(expected)) throw new Error('supervisor manifest command does not match verified Codex policy')
   }
 }

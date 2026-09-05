@@ -1,4 +1,4 @@
-import type { TeamIntegrationAdmission, IntegratedTaskAcceptance, ReportedTaskAcceptance, TeamIntegrationReviewReceipt } from './types.ts'
+import type { TeamExternalIntegrationWorktree, TeamIntegrationAdmission, IntegratedTaskAcceptance, ReportedTaskAcceptance, TeamIntegrationReviewReceipt } from './types.ts'
 import type {} from './coordinator.ts'
 import type { SchedulingQuery, SchedulingControl, SchedulingView } from './scheduling-schemas.ts'
 import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
@@ -378,6 +378,11 @@ export class TeamService extends TypertRemoteService {
   async enqueuePinnedIntegration(caller: Agent, target: string, admission: TeamIntegrationAdmission, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
     const snapshot = structuredClone(admission)
     return this.runOperation(signal, cancellation => this.integrations.enqueue(this.roster.membership(caller), target, cancellation, snapshot))
+  }
+
+  /** Host-only integration admission for a durably bound external provider checkout. */
+  async enqueueExternalPinnedIntegration(caller: Agent, worktree: TeamExternalIntegrationWorktree, admission: TeamIntegrationAdmission, signal: AbortSignal): Promise<TeamIntegrationSnapshot> {
+    return this.runOperation(signal, cancellation => this.integrations.enqueueExternal(this.roster.membership(caller), structuredClone(worktree), cancellation, structuredClone(admission)))
   }
 
   /** Host-only durable authorization of one workflow-gated verified candidate. */

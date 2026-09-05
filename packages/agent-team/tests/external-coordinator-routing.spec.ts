@@ -11,6 +11,7 @@ import SubagentService from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import TeamService from '../src/index.ts'
 import * as GitWorktrees from '../src/git-worktrees.ts'
+import { GitIntegrationProvider } from '../src/git-integration-provider.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
 import { AssignmentStore } from '../src/assignments.ts'
 import { gitFixture } from './git-fixture.ts'
@@ -36,15 +37,16 @@ async function setup(Coordinator: typeof WorkspaceCoordinator = WorkspaceCoordin
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentService)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
-  await ctx.plugin(TeamService, { worktreeProvider: 'git' })
+  await ctx.plugin(TeamService, { worktreeProvider: 'git', integrationProvider: 'git' })
   await ctx.plugin(GitWorktrees, { directory: join(repo.root, 'workers') })
+  ctx.agentTeams.registerIntegrationProvider(new GitIntegrationProvider({ providerName: 'git', targetBranch: 'main', verification: [{ command: 'node', args: ['--version'] }], commandTimeoutMs: 5_000, verificationTimeoutMs: 5_000 }))
   const lead = ctx.agentLoop.create(SessionId('external-team'), { provider: 'mock', model: 'mock' }, { cwd: repo.repository })
   const config = { directory: join(repo.root, 'coordinator') }
   const coordinator = await Coordinator.open(ctx, config)
   cleanup.push(() => coordinator.close())
   const project = { id: 'project', repository: repo.repository, teamIds: [lead.id], targetBranch: 'main', capacity: 1, verification: { revision: 1, commands: [{ command: 'node', args: ['--version'] }] } }
   await coordinator.register(lead, project)
-  return { repo, ctx, lead, config, coordinator }
+  return { repo, ctx, lead, config, coordinator, project }
 }
 
 function execution(root: string, cwd: string, projectId = 'project') {
@@ -52,6 +54,10 @@ function execution(root: string, cwd: string, projectId = 'project') {
     projectId, directory: join(root, 'external-runtime'), cwd, executable: resolve('packages/agent-team/tests/fixtures/external-runtime-fixture.mjs'), version: '0.153.4', model: 'gpt-5.6-codex', sandbox: 'workspace-write' as const,
     maxSpoolBytes: 65_536, terminateGraceMs: 50,
   } }
+}
+
+function codeExecution(root: string, cwd: string) {
+  return { ...execution(root, cwd), externalCodex: { ...execution(root, cwd).externalCodex, codeWorktreeDirectory: join(root, 'external-code-worktrees') } }
 }
 
 async function exerciseRoute(Coordinator: typeof WorkspaceCoordinator): Promise<void> {
@@ -135,6 +141,34 @@ it('blocks new selected-project non-code work during recovery-only admission wit
   expect(restored.view().attempts[0]).toMatchObject({ attemptId: 'attempt-1', provider: 'external', taskId: retainedTask.id })
   expect(ctx.agents.get(SessionId('retained-runtime'))).toBeUndefined()
   await expect(readFile(join(providerDirectory, 'attempt-1', 'manifest.json'), 'utf8')).rejects.toThrow()
+})
+
+it('routes an explicit external code worktree through quiescent commit and verified integration acceptance', async () => {
+  const { repo, ctx, lead, config, coordinator } = await setup()
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'codex-code-commit', description: 'Commit the controlled external fixture change' })
+  await coordinator.close()
+  const routed = await WorkspaceCoordinator.open(ctx, { ...config, execution: codeExecution(repo.root, repo.repository) })
+  cleanup.push(() => routed.close())
+  await waitFor(async () => {
+    await routed.reconcile()
+    const view = routed.view()
+    const block = view.executionBlocks.find(item => item.taskId === task.id)
+    if (block !== undefined) throw new Error(block.diagnostic)
+    return view.attempts.some(item => item.taskId === task.id && item.provider === 'external' && item.phase === 'terminal' && !!item.result)
+  }, 12_000)
+  const attempt = routed.view().attempts.find(item => item.taskId === task.id)!
+  expect(attempt).toMatchObject({ provider: 'external', phase: 'terminal', externalPolicy: { codeWorktreeDirectory: join(repo.root, 'external-code-worktrees') } })
+  expect(ctx.agents.get(SessionId(attempt.runtimeId))).toBeUndefined()
+  await expect(routed.submit(lead, 'project', { attemptId: attempt.attemptId, generation: attempt.generation + 1, expectedRevision: attempt.revision, sourceCommit: 'a'.repeat(40), evidence: 'stale external receipt' })).rejects.toThrow(/stale|unauthorized/i)
+  await waitFor(async () => {
+    await routed.reconcile()
+    const view = routed.view()
+    return view.submissions.some(item => item.attemptId === attempt.attemptId && item.phase === 'accepted')
+  }, 12_000)
+  const submission = routed.view().submissions.find(item => item.attemptId === attempt.attemptId)!
+  const integration = ctx.agentTeams.listIntegrations(lead).find(item => item.id === submission.integrationId)!
+  expect(integration).toMatchObject({ phase: 'merged', externalOwner: { runtimeId: attempt.runtimeId, cwd: join(repo.root, 'external-code-worktrees', attempt.attemptId) } })
+  expect(ctx.agentTeams.getTask(lead, task.id).status).toBe('completed')
 })
 
 it.runIf((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.GASTEAM_COMPILED_ROUTE === '1')('runs the same route through the plain-Node compiled coordinator bundle', async () => {

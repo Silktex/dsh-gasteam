@@ -116,7 +116,15 @@ export class ExternalRuntimeSupervisorObserver {
     const identity = await readSupervisorIdentity(directory)
     if (identity?.process === undefined || identity.containment?.kind !== 'pid-namespace') return { state: 'uncertain', reason: 'missing strict namespace identity' }
     const helper = await inspectProcessIdentity(identity.supervisor)
-    if (helper === 'owned') return { state: 'running' }
+    if (helper === 'owned') {
+      // The helper writes this receipt only after the namespace wrapper's
+      // actual `close` and spool fsync. A detached helper can briefly remain
+      // alive while its already-dead wrapper is reaped; do not hold capacity
+      // forever on that implementation detail. The runtime validates every
+      // receipt identity/digest before accepting this as terminal.
+      if (await readFile(join(directory, 'helper-exit.json')).then(() => true).catch(() => false)) return { state: 'stopped' }
+      return { state: 'running' }
+    }
     if (helper !== 'missing') return { state: 'uncertain', reason: 'helper identity cannot be verified as absent' }
     const wrapper = await inspectProcessIdentity(identity.process)
     // Never signal a historical PID/PGID. With --kill-child the host wrapper's
@@ -354,6 +362,12 @@ async function spoolProof(stdout: string, stderr: string): Promise<NonNullable<S
 
 export async function inspectProcessIdentity(identity: ProcessBirthIdentity): Promise<ProcessIdentityStatus> {
   try {
+    // A zombie has already exited. Treating its retained /proc identity as a
+    // live helper can permanently fence a completed namespace after the
+    // detached client has not yet reaped it.
+    const stat = await readFile(`/proc/${identity.pid}/stat`, 'utf8')
+    const close = stat.lastIndexOf(')')
+    if (close >= 0 && stat.slice(close + 1).trimStart().startsWith('Z ')) return 'missing'
     const current = await processBirthIdentity(identity.pid)
     return current.birthId === identity.birthId ? 'owned' : 'mismatch'
   } catch (error) {

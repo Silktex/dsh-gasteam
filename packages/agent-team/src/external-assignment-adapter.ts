@@ -5,6 +5,8 @@ import type { AssignmentStore, AttemptRecord, AttemptToken, ExternalProviderPoli
 import type { ExternalRuntimeRecord, ExternalRuntimeStore } from './external-runtime.ts'
 import { ExternalAssignmentRuntime } from './external-assignment-runtime.ts'
 import { RuntimeDrain } from './runtime-drain.ts'
+import { ExternalCodeWorktreeProvider } from './external-code-worktree.ts'
+import type { ExternalCodeWorktreeReceipt } from './external-code-worktree.ts'
 
 export interface ExternalNonCodeProviderPolicy extends ExternalProviderPolicy {
   readonly admission: VerifiedCodexExecutionPolicy
@@ -13,11 +15,13 @@ export interface ExternalNonCodeProviderPolicy extends ExternalProviderPolicy {
 const token = (record: AttemptRecord): AttemptToken => ({ attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })
 
 /**
- * This adapter never creates a Team member or worktree. It is deliberately
- * limited to tasks with explicit non-code criteria, and it leaves capacity
- * reserved whenever the external runtime cannot prove terminal ownership.
+ * This adapter never creates a Team member. Report work has no checkout;
+ * explicitly opted-in code work receives a provider-owned immutable checkout.
+ * It leaves capacity reserved whenever the external runtime cannot prove
+ * terminal ownership.
  */
 export class ExternalNonCodeAssignmentAdapter {
+  private readonly worktrees = new ExternalCodeWorktreeProvider()
   constructor(
     private readonly assignments: AssignmentStore,
     private readonly externalStore: ExternalRuntimeStore,
@@ -29,22 +33,43 @@ export class ExternalNonCodeAssignmentAdapter {
 
   /** This policy owns non-code work for its selected project even while recovery-only. */
   ownsProject(projectId: string): boolean { return this.policy.projectId === projectId }
+  /** Code routing is an additional explicit project policy, never a fallback. */
+  ownsCodeProject(projectId: string): boolean { return this.ownsProject(projectId) && this.policy.codeWorktreeDirectory !== undefined }
+  ownsTask(projectId: string, nonCode: boolean): boolean { return nonCode ? this.ownsProject(projectId) : this.ownsCodeProject(projectId) }
   /** A recovery-only adapter may observe/cancel retained work but must never launch new work. */
   canStartProject(projectId: string): boolean { return this.startEnabled && this.ownsProject(projectId) }
   reservationPolicy(): ExternalProviderPolicy { return structuredClone(this.policy) }
   matchesReservation(record: AttemptRecord): boolean {
     try { this.assertRecord(record); return true } catch { return false }
   }
+  isCodeAssignment(record: AttemptRecord): boolean {
+    try { this.assertRecord(record); return this.isCode(record) } catch { return false }
+  }
+  /** Positive terminal code receipt plus the exact provider-owned checkout. */
+  async submissionWorktree(record: AttemptRecord): Promise<ExternalCodeWorktreeReceipt> {
+    this.assertRecord(record)
+    if (!this.isCode(record)) throw new Error('External report work has no Git submission capability')
+    const external = this.externalStore.get(record.attemptId, record.generation)
+    if (record.phase !== 'terminal' || record.stopReason || external?.terminal?.outcome !== 'completed' || external.result === undefined) {
+      throw new Error('External code submission requires a positive completed runtime receipt')
+    }
+    return await this.worktrees.restore(this.worktreeIntent(record))
+  }
 
   async start(record: AttemptRecord): Promise<AttemptRecord> {
     this.assertRecord(record)
     if (!this.startEnabled) throw new Error('External provider recovery mode cannot launch a new effect; restore the immutable admitted policy')
-    const observed = await this.runtime.start(this.launch(record))
+    // Git provisioning receives its own immutable receipt before it creates a
+    // checkout. A crash between receipt and runtime intent re-enters ensure()
+    // and only restores this exact checkout; it never deletes an ambiguous path.
+    const worktree = this.isCode(record) ? await this.worktrees.ensure(this.worktreeIntent(record)) : undefined
+    const observed = await this.runtime.start(this.launch(record, worktree))
     return await this.reconcile(record, observed)
   }
 
   async observe(record: AttemptRecord): Promise<AttemptRecord> {
     this.assertRecord(record)
+    if (this.isCode(record)) await this.worktrees.restore(this.worktreeIntent(record))
     // A restart may find a durable reservation before the first external launch
     // intent. That edge has no OS effect yet, so re-enter the idempotent start
     // path; an active record without intent remains fenced instead.
@@ -141,12 +166,15 @@ export class ExternalNonCodeAssignmentAdapter {
     })
   }
 
-  private launch(record: AttemptRecord) {
+  private launch(record: AttemptRecord, worktree?: ExternalCodeWorktreeReceipt) {
     const pinned = this.pinned(record)
     return { attemptId: record.attemptId, generation: record.generation, directory: this.directory(record), verifiedAdmission: pinned.admission,
       prompt: { assignment: { assignmentId: record.assignmentId, attemptId: record.attemptId, generation: record.generation, projectId: record.projectId, teamId: record.teamId, taskId: record.taskId, workerId: record.workerId }, checkpoint: record.checkpoint,
-        instruction: 'Produce an evidence-backed report satisfying the pinned non-code criteria. Do not create a Git submission or send external messages.' },
-      maxSpoolBytes: pinned.maxSpoolBytes, terminateGraceMs: pinned.terminateGraceMs }
+        instruction: this.isCode(record)
+          ? 'Perform the pinned code task in this isolated external worktree. Commit the completed changes and report concise verification evidence. Do not send external messages.'
+          : 'Produce an evidence-backed report satisfying the pinned non-code criteria. Do not create a Git submission or send external messages.' },
+      maxSpoolBytes: pinned.maxSpoolBytes, terminateGraceMs: pinned.terminateGraceMs,
+      ...(worktree === undefined ? {} : { worktree }) }
   }
 
   private directory(record: AttemptRecord): string { return join(this.pinned(record).directory, record.attemptId) }
@@ -156,14 +184,21 @@ export class ExternalNonCodeAssignmentAdapter {
   }
   private assertRecord(record: AttemptRecord): void {
     if (record.provider !== 'external') throw new Error('External adapter requires an external-provider assignment')
-    if (record.checkpoint.task.nonCodeCriteria === undefined) throw new Error('External provider is limited to explicitly non-code work')
+    if (this.isCode(record) && record.externalPolicy?.codeWorktreeDirectory === undefined) throw new Error('External provider remains non-code only without an immutable code worktree policy')
     const pinned = this.pinned(record)
     if (pinned.projectId !== record.projectId || !samePolicy(pinned, this.policy)) throw new Error('External provider configuration does not match the immutable assignment policy; manual recovery is required')
+  }
+  private isCode(record: AttemptRecord): boolean { return record.checkpoint.task.nonCodeCriteria === undefined }
+  private worktreeIntent(record: AttemptRecord) {
+    const directory = this.pinned(record).codeWorktreeDirectory
+    if (directory === undefined) throw new Error('External code task lacks immutable worktree directory')
+    return { attemptId: record.attemptId, generation: record.generation, runtimeId: record.runtimeId, repository: this.pinned(record).admission.cwd, directory }
   }
 }
 
 function validate(policy: ExternalNonCodeProviderPolicy): void {
   if (!isAbsolute(policy.directory) || policy.directory !== resolve(policy.directory)) throw new Error('External provider requires a canonical absolute directory')
+  if (policy.codeWorktreeDirectory !== undefined && (!isAbsolute(policy.codeWorktreeDirectory) || policy.codeWorktreeDirectory !== resolve(policy.codeWorktreeDirectory))) throw new Error('External code worktree directory requires a canonical absolute path')
   if (!Number.isSafeInteger(policy.maxSpoolBytes) || policy.maxSpoolBytes < 1 || policy.maxSpoolBytes > 16 * 1024 * 1024) throw new Error('Invalid external provider spool limit')
   if (!Number.isSafeInteger(policy.terminateGraceMs) || policy.terminateGraceMs < 1 || policy.terminateGraceMs > 300_000) throw new Error('Invalid external provider termination grace')
 }

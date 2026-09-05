@@ -10,7 +10,7 @@ import type { TeamMembership } from './roster.ts'
 import { acquireIntegrationOwnership } from './integration-ownership.ts'
 import { TeamError, errorMessage } from './error.ts'
 import { TeamId } from './types.ts'
-import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationReviewReceipt, TeamIntegrationSnapshot, TeamIntegrationSpec } from './types.ts'
+import type { TeamExternalIntegrationWorktree, TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationProvider, TeamIntegrationReviewReceipt, TeamIntegrationSnapshot, TeamIntegrationSpec, TeamWorktreeSnapshot } from './types.ts'
 
 const admissionSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/),
@@ -94,6 +94,36 @@ export class TeamIntegrations {
       if (admission !== undefined && !matchesAdmissionInputs(spec, admission)) throw new TeamError('Resolved worker commit or integration policy differs from the submission', 'TEAM_INTEGRATION_CONFLICT')
       const job: TeamIntegrationSnapshot = { ...spec, id, memberId: member.id, provider: provider.name, phase: 'queued',
         ...(admission?.reviewGate === undefined ? {} : { reviewGate: admission.reviewGate }) }
+      await this.journal.appendAndFlush(membership.root, 'team/integration', { version: 1, teamId: membership.id, integration: job })
+      return structuredClone(job)
+    })
+  }
+
+  /**
+   * Host-only admission for a provider-owned checkout. This deliberately does
+   * not relax member lookup in `enqueue`: the external receipt is explicit,
+   * immutable, and carried into the integration journal for later acceptance.
+   */
+  async enqueueExternal(membership: TeamMembership, external: TeamExternalIntegrationWorktree, signal: AbortSignal, admission: TeamIntegrationAdmission): Promise<TeamIntegrationSnapshot> {
+    this.assertLead(membership)
+    admissionSchema.parse(admission)
+    if (external.repository !== admission.repository || external.runtimeId.trim() === '') throw new TeamError('External integration receipt disagrees with pinned admission', 'TEAM_INTEGRATION_CONFLICT')
+    return await this.journal.transact(membership.root.id, async () => {
+      signal.throwIfAborted()
+      const state = this.journal.state(membership.root)
+      const existing = state.integrations.find(job => job.id === admission.id)
+      if (existing !== undefined) {
+        if (!matchesAdmission(existing, admission) || !isDeepStrictEqual(existing.externalOwner, external)) throw new TeamError('External integration identity has different pinned inputs', 'TEAM_INTEGRATION_CONFLICT')
+        await this.ctx.sessions.flush(membership.root.session)
+        return structuredClone(existing)
+      }
+      if (state.integrations.filter(job => job.phase !== 'merged' && job.phase !== 'failed').length >= this.maxPending) throw new TeamError('Team integration queue limit reached', 'TEAM_INTEGRATION_LIMIT')
+      const provider = this.provider(this.providerName)
+      const id = admission.id
+      const worktree: TeamWorktreeSnapshot = { memberId: external.runtimeId as SessionId, provider: 'external-provider', phase: 'ready', repository: external.repository, cwd: external.cwd, branch: external.branch, baseCommit: external.baseCommit }
+      const spec = await provider.resolve(worktree, id, signal)
+      if (!matchesAdmissionInputs(spec, admission)) throw new TeamError('Resolved external commit or integration policy differs from the submission', 'TEAM_INTEGRATION_CONFLICT')
+      const job: TeamIntegrationSnapshot = { ...spec, id, memberId: external.runtimeId as SessionId, externalOwner: structuredClone(external), provider: provider.name, phase: 'queued', ...(admission.reviewGate === undefined ? {} : { reviewGate: admission.reviewGate }) }
       await this.journal.appendAndFlush(membership.root, 'team/integration', { version: 1, teamId: membership.id, integration: job })
       return structuredClone(job)
     })

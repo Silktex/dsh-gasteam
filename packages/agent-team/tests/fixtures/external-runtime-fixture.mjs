@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 
 let [mode] = process.argv.slice(2)
 let input
@@ -44,6 +45,13 @@ if (mode === 'silent') {
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-thread"}\n')
   process.stdout.write('{"type":"item.completed","item":{"id":"progress-item","type":"agent_message","text":"fixture progress"}}\n')
   process.stdout.write('{"type":"item.completed","item":{"id":"final-item","type":"agent_message","text":"fixture final report"}}\n')
+  process.stdout.write('{"type":"turn.completed"}\n')
+} else if (mode === 'codex-code-commit') {
+  appendFileSync('external-code.txt', 'external provider committed evidence\n')
+  execFileSync('git', ['add', 'external-code.txt'])
+  execFileSync('git', ['-c', 'user.name=External Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'external provider change'])
+  process.stdout.write('{"type":"thread.started","thread_id":"fixture-code-thread"}\n')
+  process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"Committed external-code.txt and verified the pinned checkout"}}\n')
   process.stdout.write('{"type":"turn.completed"}\n')
 } else if (mode === 'side-effect') {
   const counter = input?.counter ?? process.argv[3]

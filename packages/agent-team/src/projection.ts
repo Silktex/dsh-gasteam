@@ -355,7 +355,16 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
     case 'team/integration': {
       const integration = event.data.integration
       const index = state.integrations.findIndex(candidate => candidate.id === integration.id)
-      if (!state.worktrees.some(worktree => worktree.memberId === integration.memberId
+      if (integration.externalOwner !== undefined) {
+        // External provider checkout admission is an explicit host-only
+        // capability. It never manufactures a Team member or relaxes the
+        // ordinary member-worktree requirement below.
+        if (integration.memberId !== integration.externalOwner.runtimeId
+          || integration.repository !== integration.externalOwner.repository
+          || integration.sourceBranch !== integration.externalOwner.branch) {
+          throw new Error('External integration has no matching immutable provider workspace receipt')
+        }
+      } else if (!state.worktrees.some(worktree => worktree.memberId === integration.memberId
         && worktree.repository === integration.repository && worktree.branch === integration.sourceBranch)) {
         throw new Error('Team integration has no matching worker workspace')
       }

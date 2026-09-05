@@ -192,6 +192,19 @@ export interface TeamIntegrationAdmission {
   readonly reviewGate?: string
 }
 
+/**
+ * Host-authorized external provider checkout. It is intentionally distinct
+ * from a Team member worktree: callers must use the dedicated pinned external
+ * admission path and bind its runtime identity and immutable Git receipt.
+ */
+export interface TeamExternalIntegrationWorktree {
+  readonly runtimeId: string
+  readonly repository: string
+  readonly cwd: string
+  readonly branch: TeamBranchName
+  readonly baseCommit: TeamCommitId
+}
+
 /** Durable external review authorization bound to one exact verified candidate. */
 export interface TeamIntegrationReviewReceipt {
   readonly integrationId: TeamIntegrationId
@@ -218,6 +231,8 @@ export interface TeamIntegrationSnapshot extends TeamIntegrationSpec {
   readonly id: TeamIntegrationId
   readonly memberId: SessionId
   readonly provider: string
+  /** Present only for the dedicated host-authorized external checkout path. */
+  readonly externalOwner?: TeamExternalIntegrationWorktree
   /** Immutable opt-in workflow review gate set only by pinned admission. */
   readonly reviewGate?: string
   /** Durable authorization for the current exact verified candidate. */

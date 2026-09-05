@@ -15,7 +15,7 @@ import type { SubmitRequest, SubmissionRecord } from './submissions.ts'
 import { ReportStore, acceptReportRequestSchema } from './reports.ts'
 import type { AcceptReportRequest, ReportAcceptanceRecord } from './reports.ts'
 import { TeamTaskId } from './types.ts'
-import type { TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationReviewReceipt } from './types.ts'
+import type { TeamExternalIntegrationWorktree, TeamIntegrationAdmission, TeamIntegrationId, TeamIntegrationReviewReceipt } from './types.ts'
 import { DispatchQueue } from './dispatch-queue.ts'
 import type { DispatchRequest, DispatchWork } from './dispatch-queue.ts'
 import { DshAssignmentRuntime } from './dsh-assignment-runtime.ts'
@@ -45,12 +45,12 @@ export const executionConfigSchema = z.object({
   /** Disabled unless an operator explicitly enables durable health observation. */
   health: healthConfigSchema.optional(),
   /**
-   * Opt-in external Codex execution for explicit non-code tasks in one already
+   * Opt-in external Codex execution in one already
    * registered project. Example: `{ projectId: 'research', cwd: '/repos/research',
    * directory: '/var/lib/dsh/external' }`; `cwd` must canonically equal that
    * project's repository, and every launch field is pinned at reservation.
    */
-  externalCodex: z.object({ projectId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/), directory: z.string().trim().min(1).max(4096), cwd: z.string().trim().min(1).max(4096), executable: z.string().trim().min(1).max(4096), version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), model: z.string().trim().min(1).max(512), sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']), maxSpoolBytes: z.number().int().positive().max(16 * 1024 * 1024), terminateGraceMs: z.number().int().positive().max(300_000), admissionMaxOutputBytes: z.number().int().positive().max(65_536).default(16_384), admissionTimeoutMs: z.number().int().positive().max(30_000).default(5_000) }).strict().optional(),
+  externalCodex: z.object({ projectId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/), directory: z.string().trim().min(1).max(4096), codeWorktreeDirectory: z.string().trim().min(1).max(4096).optional(), cwd: z.string().trim().min(1).max(4096), executable: z.string().trim().min(1).max(4096), version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), model: z.string().trim().min(1).max(512), sandbox: z.enum(['read-only', 'workspace-write', 'danger-full-access']), maxSpoolBytes: z.number().int().positive().max(16 * 1024 * 1024), terminateGraceMs: z.number().int().positive().max(300_000), admissionMaxOutputBytes: z.number().int().positive().max(65_536).default(16_384), admissionTimeoutMs: z.number().int().positive().max(30_000).default(5_000) }).strict().optional(),
   maxConcurrent: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict()
 export type ExecutionConfig = z.input<typeof executionConfigSchema>
@@ -114,12 +114,12 @@ export class CoordinatorExecution {
         const project = this.projects().find(project => project.id === submission.projectId && project.teamIds.includes(root.id))
         const attempt = this.assignments.list().findLast(record => sameWork(record, submission))
         const job = this.ctx.agentTeams.listIntegrations(root).find(job => job.id === submission.integrationId)
-        return project !== undefined && attempt?.attemptId === submission.attemptId && attempt.phase === 'terminal' && !attempt.stopReason
+        return !!(project !== undefined && attempt?.attemptId === submission.attemptId && attempt.phase === 'terminal' && !attempt.stopReason
           && !this.queue.list().some(request => sameWork(request, submission) && request.cancelReason !== undefined)
-          && job?.memberId === submission.runtimeId && job.sourceCommit === submission.sourceCommit
+          && (job?.memberId === submission.runtimeId || (attempt !== undefined && this.external?.isCodeAssignment(attempt) && job?.externalOwner?.runtimeId === submission.runtimeId)) && job.sourceCommit === submission.sourceCommit
           && job.repository === submission.repository && job.targetBranch === submission.targetBranch
           && isDeepStrictEqual(job.verification, submission.verification.commands)
-          && isDeepStrictEqual(project.verification, submission.verification)
+          && isDeepStrictEqual(project.verification, submission.verification))
       },
       reportAcceptance: (root, request) => {
         const report = this.reports.list().find(record => record.id === request.reportId)
@@ -192,6 +192,11 @@ export class CoordinatorExecution {
                         if (cwd !== await realpath(project.repository)) throw new Error('External provider cwd must canonically match its selected project repository')
                         const providerDirectory = await realpath(configured.directory).catch(() => resolve(configured.directory))
                         if (providerDirectory !== configured.directory || !providerDirectory.startsWith('/')) throw new Error('External provider directory must be canonical and absolute')
+                        const configuredWorktreeDirectory = configured.codeWorktreeDirectory
+                        const codeWorktreeDirectory = configuredWorktreeDirectory === undefined ? undefined : await realpath(configuredWorktreeDirectory).catch(() => resolve(configuredWorktreeDirectory))
+                        if (codeWorktreeDirectory !== undefined && (codeWorktreeDirectory !== configured.codeWorktreeDirectory || !codeWorktreeDirectory.startsWith('/') || codeWorktreeDirectory === cwd || codeWorktreeDirectory.startsWith(`${cwd}/`))) {
+                          throw new Error('External code worktree directory must be canonical, absolute, and outside its project repository')
+                        }
                         const admission = (await admitCodex({
                           config: { executable: configured.executable, version: configured.version, model: configured.model, sandbox: configured.sandbox },
                           policy: { executable: configured.executable, version: configured.version, executableVerification: 'configured-unverified', cwd, model: configured.model, sandbox: configured.sandbox },
@@ -199,7 +204,7 @@ export class CoordinatorExecution {
                         })).policy
                         externalStore = await ExternalRuntimeStore.open(directory)
                         const configuredExternal = new ExternalNonCodeAssignmentAdapter(assignments, externalStore, new ExternalAssignmentRuntime(externalStore), {
-                          projectId: configured.projectId, directory: providerDirectory, admission, maxSpoolBytes: configured.maxSpoolBytes, terminateGraceMs: configured.terminateGraceMs,
+                          projectId: configured.projectId, directory: providerDirectory, ...(codeWorktreeDirectory === undefined ? {} : { codeWorktreeDirectory }), admission, maxSpoolBytes: configured.maxSpoolBytes, terminateGraceMs: configured.terminateGraceMs,
                         })
                         if (retainedExternal.some(record => !configuredExternal.matchesReservation(record))) throw new Error('Configured external provider does not match a retained immutable assignment policy; manual recovery is required')
                         external = configuredExternal
@@ -388,8 +393,8 @@ export class CoordinatorExecution {
       if (task.ownerId !== undefined) block('task-owned', `Task is owned by ${task.ownerId}`)
       const blockedBy = task.blockedBy.filter(id => team.tasks.find(task => task.id === id)?.status !== 'completed')
       if (blockedBy.length) block('dependencies', `Prerequisites require acceptance: ${blockedBy.join(', ')}`)
-      if (task.nonCodeCriteria !== undefined && this.external?.ownsProject(request.projectId) && !this.external.canStartProject(request.projectId)) {
-        block('provider-admission', 'External provider is in recovery-only mode; restore its immutable admitted policy before launching new non-code work')
+      if (this.external?.ownsTask(request.projectId, task.nonCodeCriteria !== undefined) && !this.external.canStartProject(request.projectId)) {
+        block('provider-admission', 'External provider is in recovery-only mode; restore its immutable admitted policy before launching new selected-project work')
       }
     }
     const workspaceBatchBlocker = this.workspaceBatchBlocker?.(request)
@@ -459,9 +464,11 @@ export class CoordinatorExecution {
           const lead = await this.leadFor(project.project, record.teamId)
           const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(record.taskId))
           if (task.nonCodeCriteria !== undefined) continue
-          const member = this.ctx.agentTeams.listMembers(lead).find(member => member.id === record.runtimeId && member.name === record.attemptId)
-          if (member?.worktree?.phase !== 'ready') throw new Error('Reported attempt has no ready worktree for submission')
-          const sourceCommit = await runGit(member.worktree.cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], new AbortController().signal, 30_000)
+          const externalWorktree = record.provider === 'external' ? await this.external?.submissionWorktree(record) : undefined
+          const cwd = externalWorktree?.cwd ?? this.ctx.agentTeams.listMembers(lead).find(member => member.id === record.runtimeId && member.name === record.attemptId)?.worktree?.cwd
+          if (cwd === undefined) throw new Error('Reported attempt has no ready provider-owned worktree for submission')
+          if (externalWorktree !== undefined && externalWorktree.repository !== project.project.repository) throw new Error('External worktree receipt repository does not match the selected project')
+          const sourceCommit = await runGit(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], new AbortController().signal, 30_000)
           await this.submit(lead, project.project, { ...token(record), sourceCommit, evidence: record.result })
         } catch (error) { await this.block(record, error) }
       }
@@ -521,9 +528,9 @@ export class CoordinatorExecution {
         const repair = previous ? this.repairFor(previous) : undefined
         if (previous && !repair && previous.interruption === undefined) throw new Error('Previous attempt is not eligible for repair')
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
-          workerId: randomUUID(), runtimeId: randomUUID(), provider: task.nonCodeCriteria !== undefined && this.external?.ownsProject(view.project.id) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
+          workerId: randomUUID(), runtimeId: randomUUID(), provider: this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
-          ...(task.nonCodeCriteria !== undefined && this.external?.ownsProject(view.project.id) ? { externalPolicy: this.external.reservationPolicy() } : {}),
+          ...(this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? { externalPolicy: this.external.reservationPolicy() } : {}),
           checkpoint: { task: { subject: task.subject, description: task.description,
             ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
             ...(task.workflowBinding === undefined ? {} : { workflowId: task.workflowBinding.executionId, workflowStep: task.workflowBinding.stepId }),
@@ -698,7 +705,13 @@ export class CoordinatorExecution {
     const admission = { id: submission.integrationId, sourceCommit: submission.sourceCommit, repository: submission.repository,
       targetBranch: submission.targetBranch, verification: submission.verification.commands,
       ...(submission.reviewGate === undefined ? {} : { reviewGate: submission.reviewGate }) } as TeamIntegrationAdmission
-    await this.ctx.agentTeams.enqueuePinnedIntegration(lead, submission.attemptId, admission, new AbortController().signal)
+    if (attempt.provider === 'external') {
+      const receipt = await this.external?.submissionWorktree(attempt)
+      if (receipt === undefined) throw new Error('External submission has no explicit provider-owned worktree capability')
+      const external: TeamExternalIntegrationWorktree = { runtimeId: attempt.runtimeId, repository: receipt.repository, cwd: receipt.cwd,
+        branch: receipt.branch as TeamExternalIntegrationWorktree['branch'], baseCommit: receipt.baseCommit as TeamExternalIntegrationWorktree['baseCommit'] }
+      await this.ctx.agentTeams.enqueueExternalPinnedIntegration(lead, external, admission, new AbortController().signal)
+    } else await this.ctx.agentTeams.enqueuePinnedIntegration(lead, submission.attemptId, admission, new AbortController().signal)
     return this.submissions.queued(submission.id)
   }
 

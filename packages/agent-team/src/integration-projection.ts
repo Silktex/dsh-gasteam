@@ -23,6 +23,7 @@ export const integrationSchema = z.object({
   id: z.string().min(1).transform(value => brandString<TeamIntegrationId>(value)),
   memberId: z.string().min(1).transform(value => brandString<SessionId>(value)),
   provider: z.string().min(1),
+  externalOwner: z.object({ runtimeId: z.string().min(1), repository: z.string().refine(isAbsolute), cwd: z.string().refine(isAbsolute), branch, baseCommit: commit }).strict().optional(),
   repository: z.string().refine(isAbsolute),
   cwd: z.string().refine(isAbsolute),
   sourceBranch: branch,
@@ -58,6 +59,7 @@ export function assertIntegrationTransition(prior: TeamIntegrationSnapshot | und
     for (const key of ['id', 'memberId', 'provider', 'repository', 'sourceBranch', 'sourceCommit', 'targetBranch', 'reviewGate'] as const) {
       if (prior[key] !== next[key]) throw new Error('Team integration changed immutable inputs')
     }
+    if (!isDeepStrictEqual(prior.externalOwner, next.externalOwner)) throw new Error('Team integration changed external checkout ownership')
     if (retry) {
       const history = prior.previousCandidates ?? []
       const expected = [...history, { cwd: prior.cwd, targetCommit: prior.targetCommit, candidateCommit: prior.candidateCommit,
