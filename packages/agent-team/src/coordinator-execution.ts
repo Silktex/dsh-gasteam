@@ -32,6 +32,7 @@ import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { DshHealthRuntimeObserver } from './health-runtime-observation.ts'
 import { HealthRecoveryExecutor, HealthRecoveryStore } from './health-recovery.ts'
 import { TeamError } from './error.ts'
+import { assignmentRetryPolicySchema } from './assignment-retry-policy.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
 import type {} from './index.ts'
@@ -40,6 +41,8 @@ import type { WorkflowCodeStatus, WorkflowCodeTaskCreateIntent, WorkflowIntegrat
 export const executionConfigSchema = z.object({
   modelProvider: z.string().trim().min(1), model: z.string().trim().min(1),
   maxRepairAttempts: z.number().int().min(0).max(10).optional(),
+  /** Recovery deliveries after the initial worker generation. */
+  retryPolicy: assignmentRetryPolicySchema.optional(),
   dispatchIntervalMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   /** Disabled unless explicitly set. The delay is pinned when a merged candidate is first observed. */
   candidateRetention: z.object({ delayMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), commandTimeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(30_000) }).strict().optional(),
@@ -173,6 +176,7 @@ export class CoordinatorExecution {
                 try {
                   health = validated?.health === undefined ? undefined : await HealthStore.open(directory, validated.health)
                   healthRecovery = validated?.health?.recovery === undefined ? undefined : await HealthRecoveryStore.open(directory)
+                  if (healthRecovery !== undefined) await assignments.attributeLegacyHealthRecoveries(healthRecovery.list())
                   const retainedExternal = assignments.list().filter(record => record.provider === 'external' && record.phase !== 'terminal')
                   let externalStore: ExternalRuntimeStore | undefined
                   try {
@@ -535,6 +539,7 @@ export class CoordinatorExecution {
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
           workerId: randomUUID(), runtimeId: randomUUID(), provider: this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
+          retryPolicy: previous?.retryPolicy ?? this.config.retryPolicy,
           ...(this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? { externalPolicy: this.external.reservationPolicy() } : {}),
           checkpoint: { task: { subject: task.subject, description: task.description,
             ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
@@ -680,7 +685,7 @@ export class CoordinatorExecution {
     const executor = new HealthRecoveryExecutor(this.healthRecovery, {
       current,
       reserve: async ({ attemptId, generation, assignmentRevision, observedSequence, notBefore, messageId }) => {
-        await this.assignments.recover({ attemptId, generation, expectedRevision: assignmentRevision }, observedSequence, notBefore, messageId)
+        await this.assignments.recoverHealth({ attemptId, generation, expectedRevision: assignmentRevision }, observedSequence, notBefore, messageId)
       },
       deliver: async ({ attemptId, generation, messageId }) => {
         // Re-read every authority and liveness fact immediately before the host

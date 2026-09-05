@@ -382,13 +382,13 @@ it('nudges one exact stale live tool only after its durable provider deadline', 
     expect(running.view().attempts[0]?.recovery).toBeUndefined()
     await running.pause(lead, 'project', 1, false)
     await running.reconcile()
-    await vi.waitFor(() => expect(running.view().attempts[0]?.recovery).toMatchObject({ count: 1, messageId: expect.stringMatching(/^health-nudge-/) }))
+    await vi.waitFor(() => expect(running.view().attempts[0]?.healthRecovery).toMatchObject({ count: 1, messageId: expect.stringMatching(/^health-nudge-/) }))
     const recovered = running.view().attempts[0]!
-    const messages = lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.recovery!.messageId)
+    const messages = lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.healthRecovery!.messageId)
     expect(messages).toHaveLength(1)
     await running.reconcile()
-    expect(running.view().attempts[0]?.recovery).toEqual(recovered.recovery)
-    expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.recovery!.messageId)).toHaveLength(1)
+    expect(running.view().attempts[0]?.healthRecovery).toEqual(recovered.healthRecovery)
+    expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === recovered.healthRecovery!.messageId)).toHaveLength(1)
   } finally { clock.mockRestore(); release?.() }
 })
 
@@ -419,7 +419,7 @@ it('keeps scanning independent projects when a later stale revision exhausts the
     await entered
     now = 6
     await running.reconcile()
-    await vi.waitFor(() => expect(running.view().attempts.find(attempt => attempt.projectId === 'project')?.recovery).toMatchObject({
+    await vi.waitFor(() => expect(running.view().attempts.find(attempt => attempt.projectId === 'project')?.healthRecovery).toMatchObject({
       count: 1, messageId: expect.stringMatching(/^health-nudge-/),
     }))
     const first = running.view().attempts.find(attempt => attempt.projectId === 'project')!

@@ -41,6 +41,80 @@ it('bounds recoverable coordinator interruptions while preserving generation and
   await expect(store.reserve({ ...request, repairLimit: 2, expectedGeneration: 2, runtimeId: 'session-c' })).rejects.toThrow(/retry budget/i)
 })
 
+it('pins recovery deliveries separately from health nudges and preserves the policy on reopen', async () => {
+  const { store, directory } = await fixture()
+  const policy = { maxAttempts: 1, initialDelayMs: 7, multiplier: 3, maxDelayMs: 99 }
+  const active = await store.activate(token(await store.reserve({ ...request, retryPolicy: policy })))
+  const health = await store.recoverHealth(token(active), 4, 20, 'health-nudge-a')
+  expect(health).toMatchObject({ retryPolicy: policy, healthRecovery: { count: 1, messageId: 'health-nudge-a' } })
+  expect(health.recovery).toBeUndefined()
+  const runtime = await store.recover(token(health), 5, 30, 'runtime-retry-a')
+  await expect(store.recover(token(runtime), 6, 40, 'runtime-retry-b')).rejects.toThrow(/remaining budget/)
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  expect(reopened.list()[0]).toMatchObject({ retryPolicy: policy, recovery: { count: 1 }, healthRecovery: { count: 1 } })
+})
+
+it('normalizes a legacy reservation and adds an immutable health attribution receipt', async () => {
+  const { store, directory } = await fixture()
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const reservation = { version: 1, sequence: 1, type: 'assignment/reserved', request }
+  const active = { version: 1, sequence: 2, type: 'attempt/activated', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 1 } }
+  const legacy = { version: 1, sequence: 3, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 2 }, observedSequence: 5, notBefore: 10, messageId: 'health-nudge-old' }
+  await appendFile(join(directory, 'assignments.jsonl'), `${JSON.stringify(reservation)}\n${JSON.stringify(active)}\n${JSON.stringify(legacy)}\n`)
+  const reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  expect(reopened.list()[0]?.retryPolicy.maxAttempts).toBe(3)
+  await reopened.attributeLegacyHealthRecoveries([{ attemptId: 'attempt-1', generation: 1, messageId: 'health-nudge-old' }])
+  expect(reopened.list()[0]).toMatchObject({ healthRecovery: { messageId: 'health-nudge-old' } })
+  expect(reopened.list()[0]?.recovery).toBeUndefined()
+  expect((await readFile(join(directory, 'assignments.jsonl'), 'utf8')).split('\n').filter(Boolean).at(-1)).toContain('attempt/recovery-attributed')
+})
+
+it('chronologically attributes realistic mixed legacy recovery history without spending runtime deliveries', async () => {
+  const { store, directory } = await fixture()
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const header = [
+    { version: 1, sequence: 1, type: 'assignment/reserved', request },
+    { version: 1, sequence: 2, type: 'attempt/activated', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 1 } },
+  ]
+  const recoveries = [
+    ['runtime-a', 3, 10], ['health-nudge-one', 4, 20], ['runtime-b', 5, 30],
+  ].map(([messageId, observedSequence, notBefore], index) => ({ version: 1, sequence: index + 3, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: index + 2 }, messageId, observedSequence, notBefore }))
+  await appendFile(join(directory, 'assignments.jsonl'), [...header, ...recoveries].map(event => JSON.stringify(event)).join('\n') + '\n')
+  let reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  await reopened.attributeLegacyHealthRecoveries([
+    { attemptId: 'attempt-1', generation: 1, messageId: 'health-nudge-one' },
+  ])
+  expect(reopened.list()[0]).toMatchObject({ recovery: { count: 2, messageId: 'runtime-b', notBefore: 30 }, healthRecovery: { count: 1, messageId: 'health-nudge-one', notBefore: 20 } })
+  await reopened.close(); stores.splice(stores.indexOf(reopened), 1)
+  reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  await reopened.attributeLegacyHealthRecoveries([
+    { attemptId: 'attempt-1', generation: 1, messageId: 'health-nudge-one' },
+  ])
+  expect(reopened.list()[0]).toMatchObject({ recovery: { count: 2, messageId: 'runtime-b' }, healthRecovery: { count: 1, messageId: 'health-nudge-one' } })
+  expect((await readFile(join(directory, 'assignments.jsonl'), 'utf8')).match(/attempt\/recovery-attributed/g)).toHaveLength(1)
+})
+
+it('deduplicates same-ID legacy replay while retaining multiple exact health bindings', async () => {
+  const { store, directory } = await fixture()
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const events = [
+    { version: 1, sequence: 1, type: 'assignment/reserved', request },
+    { version: 1, sequence: 2, type: 'attempt/activated', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 1 } },
+    { version: 1, sequence: 3, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 2 }, observedSequence: 3, notBefore: 10, messageId: 'health-nudge-one' },
+    { version: 1, sequence: 4, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 3 }, observedSequence: 3, notBefore: 10, messageId: 'health-nudge-one' },
+    { version: 1, sequence: 5, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 3 }, observedSequence: 4, notBefore: 20, messageId: 'health-nudge-two' },
+  ]
+  await appendFile(join(directory, 'assignments.jsonl'), events.map(event => JSON.stringify(event)).join('\n') + '\n')
+  const reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  await reopened.attributeLegacyHealthRecoveries([
+    { attemptId: 'attempt-1', generation: 1, messageId: 'health-nudge-one' },
+    { attemptId: 'attempt-1', generation: 1, messageId: 'health-nudge-two' },
+  ])
+  expect(reopened.list()[0]).toMatchObject({ healthRecovery: { count: 2, messageId: 'health-nudge-two', notBefore: 20 } })
+  expect(reopened.list()[0]?.recovery).toBeUndefined()
+})
+
 it('replays a legacy external reservation without inventing a verified provider policy', async () => {
   const { store, directory } = await fixture()
   await store.close()

@@ -399,6 +399,36 @@ describe('Team identity and provisioning', () => {
     } finally { await assignments.close() }
   })
 
+  it('persists a custom interrupted-runtime deadline and wakes exactly once at that fake-clock deadline after reopen', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Resume work', description: 'Prove bounded delayed continuation' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-retry-clock-'))
+    roots.push(assignmentDirectory)
+    let assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    try {
+      const reserved = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'worker', runtimeId: 'retry-clock-session', provider: 'spawn', expectedGeneration: 0,
+        retryPolicy: { maxAttempts: 2, initialDelayMs: 50, multiplier: 2, maxDelayMs: 80 },
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Continue after interruption' } })
+      let now = 1_000
+      const runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true, undefined, () => now)
+      const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+      const active = await runtime.start(lead, token(reserved))
+      await ctx.subagents.drainContinuableChildren(lead, [SessionId(reserved.runtimeId)])
+      const delayed = await runtime.observe(lead, token(active))
+      expect(delayed.recovery).toMatchObject({ count: 1, notBefore: 1_050 })
+      expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued')).toHaveLength(0)
+      await assignments.close()
+      assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+      const reopened = new DshAssignmentRuntime(ctx, assignments, 30_000, true, undefined, () => now)
+      const persisted = assignments.list()[0]!
+      await reopened.observe(lead, token(persisted))
+      expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued')).toHaveLength(0)
+      now = 1_050
+      await reopened.observe(lead, token(assignments.list()[0]!))
+      expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued')).toHaveLength(1)
+    } finally { await assignments.close() }
+  })
+
   it('fences DSH cancellation with awaited runtime shutdown and rejects unrelated Lead authority', async () => {
     const { ctx, lead } = await setupWorkers(['hang'], {})
     const task = await ctx.agentTeams.createTask(lead, { subject: 'Cancel work', description: 'Must stop before retiring' })

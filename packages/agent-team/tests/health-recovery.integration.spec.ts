@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
@@ -73,7 +73,7 @@ it('reopens an assignment recovery after a post-delivery crash without duplicati
       }
     },
     reserve: async ({ attemptId, generation, assignmentRevision, observedSequence, notBefore, messageId }: { attemptId: string; generation: number; assignmentRevision: number; observedSequence: number; notBefore: number; messageId: string }) => {
-      await assignments.recover({ attemptId, generation, expectedRevision: assignmentRevision }, observedSequence, notBefore, messageId)
+      await assignments.recoverHealth({ attemptId, generation, expectedRevision: assignmentRevision }, observedSequence, notBefore, messageId)
     },
     deliver: async ({ attemptId, generation, messageId }: { attemptId: string; generation: number; messageId: string }) => {
       const record = assignments.list().find(candidate => candidate.attemptId === attemptId && candidate.generation === generation)
@@ -89,7 +89,8 @@ it('reopens an assignment recovery after a post-delivery crash without duplicati
   const input = { attemptId: active.attemptId, generation: active.generation, healthRevision: 1, condition: 'stale' as const, maxNudges: 1 }
   await expect(new HealthRecoveryExecutor(recovery, capabilities()).nudge(input)).rejects.toThrow('simulated crash')
   const messageId = recovery.list()[0]!.messageId
-  expect(assignments.list()[0]!.recovery).toMatchObject({ count: 1, messageId })
+  expect(assignments.list()[0]!.healthRecovery).toMatchObject({ count: 1, messageId })
+  expect(assignments.list()[0]!.recovery).toBeUndefined()
   expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === messageId)).toHaveLength(1)
 
   await assignments.close(); await recovery.close()
@@ -100,7 +101,40 @@ it('reopens an assignment recovery after a post-delivery crash without duplicati
   expect(completed).toMatchObject({ phase: 'receipt', messageId })
   expect(deliveries).toBe(2)
   expect(assignments.list()).toHaveLength(1)
-  expect(assignments.list()[0]!.recovery).toMatchObject({ count: 1, messageId })
+  expect(assignments.list()[0]!.healthRecovery).toMatchObject({ count: 1, messageId })
+  expect(assignments.list()[0]!.recovery).toBeUndefined()
   expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === messageId)).toHaveLength(1)
+  await assignments.close(); await recovery.close()
+})
+
+it('upgrades a pending published health ledger recovery without duplicating its already delivered Team mailbox message', async () => {
+  const { ctx, lead, root } = await fixture()
+  const teammate = await ctx.agentTeams.spawnTeammate(lead, { name: 'upgrade-worker', description: 'published M6 worker', prompt: content('wait'), context: 'fresh', provider: 'spawn', signal: new AbortController().signal })
+  const task = await ctx.agentTeams.createTask(lead, { subject: 'Upgrade health', description: 'preserve durable delivery identity' })
+  const recoveryDirectory = join(root, 'pending-health')
+  const recovery = await HealthRecoveryStore.open(recoveryDirectory)
+  const intent = await recovery.intent({ attemptId: 'attempt-1', generation: 1, healthRevision: 7, condition: 'stale', maxNudges: 2 })
+  await recovery.revalidate({ attemptId: 'attempt-1', generation: 1, healthRevision: 7, condition: 'stale' })
+  await recovery.request({ attemptId: 'attempt-1', generation: 1, healthRevision: 7, condition: 'stale' })
+  const assignmentDirectory = join(root, 'published-assignments')
+  const legacyEvents = [
+    { version: 1, sequence: 1, type: 'assignment/reserved', request: { projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'upgrade-worker', runtimeId: teammate.member.id, provider: 'spawn', expectedGeneration: 0, checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'resume' } } },
+    { version: 1, sequence: 2, type: 'attempt/activated', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 1 } },
+    { version: 1, sequence: 3, type: 'attempt/recovery', token: { attemptId: 'attempt-1', generation: 1, expectedRevision: 2 }, observedSequence: 11, notBefore: 12, messageId: intent.messageId },
+  ]
+  await appendFile(join(assignmentDirectory, '..', 'published-assignments', 'assignments.jsonl'), legacyEvents.map(event => JSON.stringify(event)).join('\n') + '\n').catch(async () => {
+    // AssignmentStore normally creates this directory; create its journal first without adding evidence.
+    const bootstrap = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } }); await bootstrap.close()
+    await appendFile(join(assignmentDirectory, 'assignments.jsonl'), legacyEvents.map(event => JSON.stringify(event)).join('\n') + '\n')
+  })
+  const old = await ctx.agentTeams.sendReservedMessage(lead, { target: 'upgrade-worker', delivery: 'quiet', content: content('Published health nudge'), signal: new AbortController().signal }, intent.messageId)
+  let assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+  await assignments.attributeLegacyHealthRecoveries(recovery.list())
+  const attributed = assignments.list()[0]!
+  expect(attributed).toMatchObject({ healthRecovery: { count: 1, messageId: intent.messageId } })
+  await assignments.recoverHealth(token(attributed), 11, 12, intent.messageId)
+  const replay = await ctx.agentTeams.sendReservedMessage(lead, { target: 'upgrade-worker', delivery: 'quiet', content: content('Published health nudge'), signal: new AbortController().signal }, intent.messageId)
+  expect(replay.messageId).toBe(old.messageId)
+  expect(lead.session.snapshotEvents().filter(event => event.type === 'team/message/queued' && event.data.message.id === intent.messageId)).toHaveLength(1)
   await assignments.close(); await recovery.close()
 })

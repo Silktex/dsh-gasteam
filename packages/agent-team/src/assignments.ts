@@ -1,9 +1,12 @@
 /** Durable reservations and execution attempts, separate from worker and session identities. */
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import z from 'zod'
 import { DurableJournal } from './durable-journal.ts'
 import type { ProjectId } from './projects.ts'
+import { assignmentRetryPolicySchema, legacyAssignmentRetryPolicy } from './assignment-retry-policy.ts'
+import type { AssignmentRetryPolicy } from './assignment-retry-policy.ts'
 
 export type WorkerId = Branded<'WorkerId'>
 export type AttemptId = Branded<'AttemptId'>
@@ -35,6 +38,8 @@ const legacyRequestSchema = z.object({
     candidateCwd: text, diagnostic: text, round: positive,
   }).strict().optional(),
   expectedGeneration: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER - 1), checkpoint: checkpointSchema,
+  /** Pinned at initial reservation and inherited by every replacement. */
+  retryPolicy: assignmentRetryPolicySchema.optional(),
   externalPolicy: externalPolicySchema.optional(),
 }).strict()
 const requestSchema = legacyRequestSchema.superRefine((value, ctx) => {
@@ -49,6 +54,8 @@ const envelope = { version: z.literal(1), sequence: positive }
 const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('assignment/reserved'), request: legacyRequestSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/recovery'), token: tokenSchema, observedSequence: z.number().int().nonnegative(), notBefore: z.number().int().nonnegative(), messageId: id }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/health-recovery'), token: tokenSchema, observedSequence: z.number().int().nonnegative(), notBefore: z.number().int().nonnegative(), messageId: id }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/recovery-attributed'), token: tokenSchema, recovery: z.object({ count: z.number().int().nonnegative(), observedSequence: z.number().int().nonnegative(), notBefore: z.number().int().nonnegative(), messageId: id }).strict().optional(), healthRecovery: z.object({ count: positive, observedSequence: z.number().int().nonnegative(), notBefore: z.number().int().nonnegative(), messageId: id }).strict() }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/activated'), token: tokenSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/checkpoint'), token: tokenSchema, checkpoint: checkpointSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/reported'), token: tokenSchema, result: text }).strict(),
@@ -71,7 +78,11 @@ export interface AttemptRecord extends Omit<ReserveAssignmentRequest, 'expectedG
   readonly generation: number
   readonly revision: number
   readonly phase: 'reserved' | 'active' | 'stopping' | 'terminal'
+  readonly retryPolicy: AssignmentRetryPolicy
+  /** Interrupted-runtime deliveries only. */
   readonly recovery?: { count: number; observedSequence: number; notBefore: number; messageId: string }
+  /** Health observation nudges have a distinct budget and never spend runtime retry budget. */
+  readonly healthRecovery?: { count: number; observedSequence: number; notBefore: number; messageId: string }
   readonly result?: string
   readonly stopReason?: string
   readonly stopEvidence?: RuntimeStopEvidence
@@ -96,6 +107,8 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if ((prior?.generation ?? 0) !== request.expectedGeneration) throw new Error('Stale assignment generation')
     if (prior !== undefined && prior.phase !== 'terminal') throw new Error('Task is already owned')
     if (prior && request.repairLimit !== prior.repairLimit) throw new Error('Repair policy is immutable for accepted work')
+    const retryPolicy = request.retryPolicy ?? (prior?.retryPolicy ?? legacyAssignmentRetryPolicy)
+    if (prior && JSON.stringify(retryPolicy) !== JSON.stringify(prior.retryPolicy)) throw new Error('Retry policy is immutable for an assignment lineage')
     if (prior?.interruption && prior.interruption.count >= (request.repairLimit ?? 0)) throw new Error('Coordinator interruption retry budget is exhausted')
     if (request.repair) {
       if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.stopReason || !prior.result
@@ -106,9 +119,9 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if (records.some(record => record.phase !== 'terminal' && record.workerId === request.workerId)) throw new Error('Worker is already assigned')
     // A runtime identity is an immutable attempt reference; it is never reused after termination.
     if (records.some(record => record.runtimeId === request.runtimeId)) throw new Error('Runtime identity is already assigned')
-    const { expectedGeneration, ...identity } = request
+    const { expectedGeneration, retryPolicy: _requestedPolicy, ...identity } = request
     const record = {
-      ...identity, attemptId: `attempt-${event.sequence}`, assignmentId: `assignment-${event.sequence}`,
+      ...identity, retryPolicy, attemptId: `attempt-${event.sequence}`, assignmentId: `assignment-${event.sequence}`,
       generation: expectedGeneration + 1, revision: 1, phase: 'reserved',
     } as AttemptRecord
     return [...records, record]
@@ -120,7 +133,8 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
   // The delivery identity is reserved before the external mailbox effect. On a
   // post-effect crash, replaying that exact identity must preserve the original
   // recovery revision and budget rather than consume another recovery slot.
-  if (event.type === 'attempt/recovery' && current.recovery?.messageId === event.messageId) {
+  if ((event.type === 'attempt/recovery' && current.recovery?.messageId === event.messageId)
+    || (event.type === 'attempt/health-recovery' && current.healthRecovery?.messageId === event.messageId)) {
     if (current.revision !== event.token.expectedRevision) throw new Error('Stale attempt revision')
     return records
   }
@@ -128,8 +142,20 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
   let next: AttemptRecord = { ...current, revision: current.revision + 1 }
   switch (event.type) {
     case 'attempt/recovery':
-      if (current.phase !== 'active' || (current.recovery?.count ?? 0) >= 3) throw new Error('Recovery requires an active attempt with remaining budget')
+      if (current.phase !== 'active' || (current.recovery?.count ?? 0) >= current.retryPolicy.maxAttempts) throw new Error('Recovery requires an active attempt with remaining budget')
       next = { ...next, recovery: { count: (current.recovery?.count ?? 0) + 1, observedSequence: event.observedSequence, notBefore: event.notBefore, messageId: event.messageId } }
+      break
+    case 'attempt/health-recovery':
+      if (current.phase !== 'active') throw new Error('Health recovery requires an active attempt')
+      next = { ...next, healthRecovery: { count: (current.healthRecovery?.count ?? 0) + 1, observedSequence: event.observedSequence, notBefore: event.notBefore, messageId: event.messageId } }
+      break
+    case 'attempt/recovery-attributed':
+      if (current.phase !== 'active') throw new Error('Recovery attribution requires an active attempt')
+      if (!event.healthRecovery.messageId.startsWith('health-nudge-')) throw new Error('Legacy health attribution requires a health nudge message')
+      if (event.recovery === undefined) {
+        const { recovery: _legacyRecovery, ...withoutRecovery } = next
+        next = { ...withoutRecovery, healthRecovery: event.healthRecovery }
+      } else next = { ...next, recovery: event.recovery, healthRecovery: event.healthRecovery }
       break
     case 'attempt/activated':
       if (current.phase !== 'reserved') throw new Error('Activation requires a reserved attempt')
@@ -166,11 +192,29 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
 export class AssignmentStore {
   private constructor(
     private readonly journal: DurableJournal<AttemptRecord[], Payload>, private limits: AssignmentLimits,
+    /** Effective legacy generic recovery deliveries, captured only for this store's migration. */
+    private readonly legacyRecoveries: Extract<Event, { type: 'attempt/recovery' }>[],
   ) {}
 
   static async open(directory: string, limits: AssignmentLimits): Promise<AssignmentStore> {
     const validated = limitsSchema.parse(limits)
-    return new AssignmentStore(await DurableJournal.open(join(directory, 'assignments.jsonl'), [], reduce), validated)
+    const filename = join(directory, 'assignments.jsonl')
+    const journal = await DurableJournal.open(filename, [], reduce)
+    try {
+      const seen = new Set<string>()
+      const legacyRecoveries = (await readFile(filename, 'utf8')).split('\n').flatMap(line => {
+        if (line === '') return []
+        const parsed = eventSchema.safeParse(JSON.parse(line))
+        if (!parsed.success || parsed.data.type !== 'attempt/recovery') return []
+        const event = parsed.data
+        // Exact message-ID replays are post-effect crash recovery, not deliveries.
+        const key = `${event.token.attemptId}:${event.token.generation}:${event.messageId}`
+        if (seen.has(key)) return []
+        seen.add(key)
+        return [event]
+      })
+      return new AssignmentStore(journal, validated, legacyRecoveries)
+    } catch (error) { await journal.close(); throw error }
   }
 
   /** Coordinator policy is authoritative; changing limits never releases existing reservations. */
@@ -193,6 +237,30 @@ export class AssignmentStore {
 
   recover(token: AttemptToken, observedSequence: number, notBefore: number, messageId: string): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/recovery', token, observedSequence, notBefore, messageId })
+  }
+  recoverHealth(token: AttemptToken, observedSequence: number, notBefore: number, messageId: string): Promise<AttemptRecord> {
+    return this.mutate({ type: 'attempt/health-recovery', token, observedSequence, notBefore, messageId })
+  }
+  /**
+   * Published M6 put health nudges in `attempt/recovery`. Rebuild both counters
+   * from those immutable events, then append one receipt; never rewrite evidence.
+   */
+  async attributeLegacyHealthRecoveries(boundRecoveries: readonly { attemptId: string; generation: number; messageId: string }[]): Promise<void> {
+    const bound = new Set(boundRecoveries
+      .filter(value => value.messageId.startsWith('health-nudge-'))
+      .map(value => `${value.attemptId}:${value.generation}:${value.messageId}`))
+    for (const record of this.list()) {
+      if (record.phase !== 'active' || record.healthRecovery !== undefined) continue
+      const legacy = this.legacyRecoveries.filter(event => event.token.attemptId === record.attemptId && event.token.generation === record.generation)
+      const health = legacy.filter(event => bound.has(`${record.attemptId}:${record.generation}:${event.messageId}`))
+      if (health.length === 0) continue
+      const runtime = legacy.filter(event => !bound.has(`${record.attemptId}:${record.generation}:${event.messageId}`))
+      const latestHealth = health.at(-1)!
+      const latestRuntime = runtime.at(-1)
+      await this.mutate({ type: 'attempt/recovery-attributed', token: { attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision },
+        ...(latestRuntime === undefined ? {} : { recovery: { count: runtime.length, observedSequence: latestRuntime.observedSequence, notBefore: latestRuntime.notBefore, messageId: latestRuntime.messageId } }),
+        healthRecovery: { count: health.length, observedSequence: latestHealth.observedSequence, notBefore: latestHealth.notBefore, messageId: latestHealth.messageId } })
+    }
   }
   activate(token: AttemptToken): Promise<AttemptRecord> { return this.mutate({ type: 'attempt/activated', token }) }
   checkpoint(token: AttemptToken, checkpoint: AssignmentCheckpoint): Promise<AttemptRecord> {

@@ -6,6 +6,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AssignmentStore, AttemptToken, AttemptRecord } from './assignments.ts'
 import { latestTurnEnd } from './turn-evidence.ts'
 import { RuntimeDrain } from './runtime-drain.ts'
+import { nextAssignmentRetryAt } from './assignment-retry-policy.ts'
 import { TeamTaskId } from './types.ts'
 import type {} from './index.ts'
 
@@ -17,7 +18,7 @@ const tokenOf = (record: AttemptRecord): AttemptToken => ({
 export class DshAssignmentRuntime {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly drains: RuntimeDrain
-  constructor(private readonly ctx: Context, private readonly assignments: AssignmentStore, drainTimeoutMs = 30_000, private readonly recoverInterrupted = false, drains?: RuntimeDrain) {
+  constructor(private readonly ctx: Context, private readonly assignments: AssignmentStore, drainTimeoutMs = 30_000, private readonly recoverInterrupted = false, drains?: RuntimeDrain, private readonly clock: () => number = Date.now) {
     this.drains = drains ?? new RuntimeDrain(drainTimeoutMs)
   }
 
@@ -82,14 +83,14 @@ export class DshAssignmentRuntime {
           if (member?.name !== record.attemptId) throw new Error('Interrupted runtime ownership is uncertain')
           const observedSequence = stored.events.filter(event => event.type !== 'session/end-seed').at(-1)?.seq ?? 0
           if (record.recovery?.observedSequence !== observedSequence) {
-            if ((record.recovery?.count ?? 0) >= 3) {
+            if ((record.recovery?.count ?? 0) >= record.retryPolicy.maxAttempts) {
               const stopping = await this.assignments.stop(tokenOf(record), 'DSH interrupted-worker recovery budget exhausted')
               return this.retireAfterDrain(lead, stopping)
             }
             record = await this.assignments.recover(tokenOf(record), observedSequence,
-              Date.now() + 1_000 * 2 ** (record.recovery?.count ?? 0), randomUUID())
+              nextAssignmentRetryAt(record.retryPolicy, record.recovery?.count ?? 0, this.clock()), randomUUID())
           }
-          if (Date.now() < record.recovery!.notBefore) return record
+          if (this.clock() < record.recovery!.notBefore) return record
           await this.ctx.agentTeams.sendReservedMessage(lead, {
             target: record.attemptId, delivery: 'wakeup', signal: new AbortController().signal,
             content: [{ type: 'text', text: `${this.prompt(record)}\nContinue the interrupted assignment in its existing worktree. Inspect preserved output before editing; do not repeat completed work.` }],
