@@ -196,6 +196,12 @@ export class ExternalRuntimeSupervisor {
       // fast ENOENT/exit cannot be lost in the launch-to-identity window.
       const lifecycle = observeChild(child)
       const spool = captureSpool(child, request, stdout, stderr)
+      let inputError: Error | undefined
+      child.stdin?.on('error', (error: NodeJS.ErrnoException) => {
+        // A fast-exited wrapper may close stdin before our write completes.
+        // EPIPE is not stop evidence: lifecycle close still fences receipts.
+        if (error.code !== 'EPIPE') inputError ??= error
+      })
       if (child.pid === undefined) {
         await lifecycle.catch(() => {})
         await spool.drained().catch(() => {})
@@ -225,7 +231,7 @@ export class ExternalRuntimeSupervisor {
         throw new Error('External runtime launch identity is uncertain; preserve capacity')
       }
       child.stdin.end(request.stdin)
-      return supervise(child, supervisor, identity, request, lock, stdout, stderr, lifecycle, spool)
+      return supervise(child, supervisor, identity, request, lock, stdout, stderr, lifecycle, spool, () => inputError)
     } catch (error) {
       // Once the namespace wrapper inherited the descriptor, the helper must
       // preserve the fence until that wrapper has actually closed. Closing here would
@@ -301,12 +307,18 @@ function captureSpool(child: ChildProcess, request: ExternalSupervisorRequest, s
   }
 }
 
-function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>, spoolCapture: SpoolCapture): SupervisedProcess {
+function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>, spoolCapture: SpoolCapture, inputFailure: () => Error | undefined): SupervisedProcess {
   let cancellation: Promise<StopProof> | undefined
   let exit: { code: number | null; signal: string | null } | undefined
   const closed = lifecycle.then(async result => {
     exit = result
     await spoolCapture.drained()
+    const inputError = inputFailure()
+    if (inputError !== undefined) {
+      await writeUncertain(request.directory, `stdin delivery failed: ${inputError.message}`)
+      await lock.close()
+      throw new Error('External runtime stdin delivery failed; preserve capacity', { cause: inputError })
+    }
     // `close` arrives only after the wrapper's stdio closes. Namespace teardown
     // is certified separately by the read-only observer after helper exit.
     const spool = await spoolProof(stdout, stderr)
@@ -334,8 +346,18 @@ function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identi
 
 async function cancelNamespacedProcess(child: ChildProcess, identity: ProcessBirthIdentity, lifecycle: Promise<{ code: number | null; signal: string | null }>, graceMs: number, persist: (proof: StopProof) => Promise<void>): Promise<StopProof> {
   const proof: StopProof = { requestedAt: Date.now(), signals: [], containment: 'pid-namespace', hostWrapper: identity, innerInitPid: 1 }
-  if (child.pid !== identity.pid || child.exitCode !== null || child.signalCode !== null) {
+  if (child.pid !== identity.pid) {
     proof.uncertain = 'live namespace wrapper handle is unavailable; refusing a persisted PID signal'
+    await persist(proof)
+    return proof
+  }
+  if (child.exitCode !== null || child.signalCode !== null) {
+    // Pipe closure on overflow can stop the actual child before cancellation
+    // is registered. Its exit status forbids another signal, but only its
+    // observed close (and the subsequent spool drain) certifies completion.
+    const terminal = await waitForLifecycle(lifecycle, graceMs)
+    if (terminal === undefined) proof.uncertain = 'exited namespace wrapper did not close within the bounded drain'
+    else proof.exit = terminal
     await persist(proof)
     return proof
   }
@@ -350,6 +372,11 @@ async function cancelNamespacedProcess(child: ChildProcess, identity: ProcessBir
       try { child.kill('SIGKILL'); proof.signals.push('SIGKILL') } catch (error) { proof.uncertain = `SIGKILL could not be delivered: ${error instanceof Error ? error.message : String(error)}` }
       terminal = await waitForLifecycle(lifecycle, graceMs)
       if (terminal === undefined) proof.uncertain ??= 'namespace wrapper did not close within the bounded SIGKILL drain'
+    } else if (child.pid === identity.pid) {
+      // The child may exit as the TERM deadline expires, before its pipes
+      // close. Preserve the close fence without signaling an exited process.
+      terminal = await waitForLifecycle(lifecycle, graceMs)
+      if (terminal === undefined) proof.uncertain = 'exited namespace wrapper did not close within the bounded drain'
     } else proof.uncertain = 'namespace wrapper handle changed before SIGKILL; refusing a persisted PID signal'
   }
   if (terminal !== undefined) proof.exit = terminal

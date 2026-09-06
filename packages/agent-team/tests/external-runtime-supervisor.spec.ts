@@ -10,15 +10,38 @@ import { acquireFileOwnership } from '../src/file-ownership.ts'
 const fsyncEvents = vi.hoisted((): string[] => [])
 const procDirentEnumerations = vi.hoisted((): number[] => [])
 const birthReadRace = vi.hoisted((): { enabled: boolean; pid?: number; closed?: Promise<void> } => ({ enabled: false }))
+const overflowCloseRace = vi.hoisted((): { enabled: boolean; closed?: Promise<void> } => ({ enabled: false }))
+const closeDelivery = vi.hoisted((): { enabled: boolean; ready?: Promise<void>; release?: () => void } => ({ enabled: false }))
+const stdinFailure = vi.hoisted((): { error?: NodeJS.ErrnoException } => ({}))
 vi.mock('node:child_process', async importOriginal => {
   const processes = await importOriginal<typeof import('node:child_process')>()
   return {
     ...processes,
     spawn: (...args: Parameters<typeof processes.spawn>) => {
       const child = processes.spawn(...args)
+      if (stdinFailure.error !== undefined && args[0] === 'unshare') {
+        const error = stdinFailure.error
+        queueMicrotask(() => child.stdin?.destroy(error))
+      }
       if (birthReadRace.enabled && args[0] === 'unshare') {
         birthReadRace.pid = child.pid
         birthReadRace.closed = new Promise(resolveClose => child.once('close', () => resolveClose()))
+      }
+      if (overflowCloseRace.enabled && args[0] === 'unshare') {
+        overflowCloseRace.closed = new Promise(resolveClose => child.once('close', () => resolveClose()))
+      }
+      if (closeDelivery.enabled && args[0] === 'unshare') {
+        const emit = child.emit.bind(child)
+        closeDelivery.ready = new Promise(resolveReady => {
+          child.emit = (event, ...values) => {
+            if (event !== 'close') return emit(event, ...values)
+            // Withhold delivery of the actual OS-backed close event, never
+            // synthesize an exit or a positive lifecycle receipt.
+            closeDelivery.release = () => { emit(event, ...values) }
+            resolveReady()
+            return true
+          }
+        })
       }
       return child
     },
@@ -51,6 +74,9 @@ vi.mock('node:fs/promises', async importOriginal => {
       const sync = handle.sync.bind(handle)
       handle.sync = async () => {
         fsyncEvents.push(`sync:${String(args[0])}`)
+        // Delay publishing the live handle until bounded pipe capture has
+        // caused the real overflowing wrapper to exit and close its pipes.
+        if (overflowCloseRace.enabled && String(args[0]).endsWith('/supervisor.json') && overflowCloseRace.closed !== undefined) await overflowCloseRace.closed
         await sync()
       }
       return handle
@@ -65,6 +91,13 @@ afterEach(async () => {
   birthReadRace.enabled = false
   delete birthReadRace.pid
   delete birthReadRace.closed
+  overflowCloseRace.enabled = false
+  delete overflowCloseRace.closed
+  closeDelivery.release?.()
+  closeDelivery.enabled = false
+  delete closeDelivery.ready
+  delete closeDelivery.release
+  delete stdinFailure.error
   for (const process of live.splice(0)) {
     try { process.kill(process.pid, 'SIGKILL') } catch { /* already stopped */ }
   }
@@ -183,12 +216,61 @@ it('tears down a PID namespace after spool overflow and leaves a host-wrapper re
   expect(identity?.containment).toEqual({ kind: 'pid-namespace', innerInitPid: 1 })
   await exited
   const proof = JSON.parse(await readFile(join(root, 'stop-proof.json'), 'utf8'))
-  expect(proof).toMatchObject({ containment: 'pid-namespace', hostWrapper: identity?.process, innerInitPid: 1, signals: expect.arrayContaining(['SIGTERM']), spool: { stdout: { bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } } })
+  expect(proof).toMatchObject({ containment: 'pid-namespace', hostWrapper: identity?.process, innerInitPid: 1, spool: { stdout: { bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } } })
   // A stop proof is final only after the ChildProcess close event has drained
   // its pipes; exit alone must not certify the spool.
   expect(proof.exit).toBeDefined()
+  expect(proof.uncertain).toBeUndefined()
   expect(proof.spool.stdout.bytes + proof.spool.stderr.bytes).toBeLessThanOrEqual(128 + 1_024)
   expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
+})
+
+it('records actual close and drained spool when overflow exits before cancellation receives the live handle', async () => {
+  const root = await directory()
+  overflowCloseRace.enabled = true
+  const supervised = await new ExternalRuntimeSupervisor().launch(await request(root, 'overflow-storm', { maxSpoolBytes: 128, terminateGraceMs: 50 }))
+  const terminal = await supervised.finished
+  expect(terminal.overflowed).toBe(true)
+  expect(terminal.stopProof).toMatchObject({
+    signals: [], containment: 'pid-namespace', hostWrapper: supervised.identity, innerInitPid: 1,
+    exit: { code: terminal.code, signal: terminal.signal },
+  })
+  expect(terminal.stopProof?.uncertain).toBeUndefined()
+  const proof = JSON.parse(await readFile(join(root, 'stop-proof.json'), 'utf8'))
+  const terminalProof = JSON.parse(await readFile(join(root, 'terminal-proof.json'), 'utf8'))
+  expect(proof.spool).toEqual(terminalProof.spool)
+  expect(proof.spool.stdout.bytes).toBeGreaterThan(0)
+  expect(proof.spool.stdout.bytes + proof.spool.stderr.bytes).toBeLessThanOrEqual(128 + 1_024)
+  expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
+})
+
+it('keeps an exited child uncertain when its actual close has not been observed within the drain deadline', async () => {
+  const root = await directory()
+  closeDelivery.enabled = true
+  const base = await request(root, 'unused', { terminateGraceMs: 20 })
+  const supervised = await new ExternalRuntimeSupervisor().launch({ ...base, command: join(root, 'missing-executable'), args: [] })
+  await closeDelivery.ready
+  try {
+    const proof = await supervised.cancel()
+    expect(proof).toMatchObject({ signals: [], hostWrapper: supervised.identity, uncertain: expect.stringContaining('did not close') })
+    expect(proof.exit).toBeUndefined()
+    expect(proof.spool).toBeUndefined()
+    await expect(readFile(join(root, 'terminal-proof.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally {
+    closeDelivery.release!()
+    delete closeDelivery.release
+    await supervised.finished
+  }
+})
+
+it('preserves an unexpected stdin failure without certifying a terminal receipt', async () => {
+  const root = await directory()
+  stdinFailure.error = Object.assign(new Error('fixture stdin I/O failure'), { code: 'EIO' })
+  const supervised = await new ExternalRuntimeSupervisor().launch(await request(root, 'linger'))
+  await expect(supervised.finished).rejects.toThrow(/stdin delivery failed; preserve capacity/)
+  expect(JSON.parse(await readFile(join(root, 'uncertain.json'), 'utf8'))).toEqual({ reason: 'stdin delivery failed: fixture stdin I/O failure' })
+  await expect(readFile(join(root, 'terminal-proof.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(readFile(join(root, 'helper-exit.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 it('consumes a durable cancellation request only through the live helper handle', async () => {
