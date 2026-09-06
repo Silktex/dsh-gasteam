@@ -173,6 +173,7 @@ const LEAD_IDLE = [
     '..............XttttttttttttPPPPXPPPPPtbbbbmmtttttXXXXXccppppX...',
     '..............XttttttttttttPPPPPPPPPPtzbbzmmtttttXcccccccccX....',
     '..............XccccctttttttPPPPPPPPPPtttttmmcccccXcccccccccX....',
+    '..............XccccctttttttPPPPPPPPPPtttttttcccccXccccccccX.....',
     '..............XcccccrrrrrrrrrrzzzzrrrrrrrrrrcccccXccccccccX.....',
     '..............XcccccrrrrrrrrrrzzzzrrrrrrrrrrccccccccccccccX.....',
     '...............XXXXXrrrrrrrrrrzzzzrrrrrrrrrrXXXcccccccccXX......',
@@ -305,6 +306,7 @@ const LEAD_IDLE = [
     '..............XttttttttttttPPPPXPPPPPtbbbbmmtttttXXXXXccppppX...',
     '..............XttttttttttttPPPPPPPPPPtzbbzmmtttttXcccccccccX....',
     '..............XccccctttttttPPPPPPPPPPtttttmmcccccXcccccccccX....',
+    '..............XccccctttttttPPPPPPPPPPtttttttcccccXccccccccX.....',
     '..............XcccccrrrrrrrrrrzzzzrrrrrrrrrrcccccXccccccccX.....',
     '..............XcccccrrrrrrrrrrzzzzrrrrrrrrrrccccccccccccccX.....',
     '...............XXXXXrrrrrrrrrrzzzzrrrrrrrrrrXXXcccccccccXX......',
@@ -1531,7 +1533,7 @@ const COORDINATOR_IDLE = [
     '........XwwcccccccccccccccccccccccccccwwX.......',
     '........XwwcccccccccccccccccccccccccccwwX.......',
     '........XwwcccccccccccccccccccccccccccwwX.......',
-    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
     '........XwwXcccccccccccPPPPccccccccccXwwX.......',
     '........XXccccccccccPPPPPPPPPPccccccccXX........',
     '........XccccccccccPPPPXXPPPPcccccccccccX.......',
@@ -1970,191 +1972,4 @@ function buildWalk48(base, sway) {
     shiftSpan(base[39], 14, 10, -1), // left leg top
     shiftSpan(base[40], 15, 9, -1),  // left leg
     shiftSpan(base[41], 15, 9, -1),
-    shiftSpan(base[42], 15, 9, -1),
-    shiftSpan(base[43], 14, 10, -1), // left leg bottom
-    shiftSpan(base[44], 13, 11, -1), // left boot
-    shiftSpan(base[45], 13, 11, -1),
-    shiftSpan(base[46], 13, 11, -1),
-    shiftSpan(base[47], 14, 9, -1),  // left sole
-  ])
-  const rightForward = withRows(base, 39, [
-    shiftSpan(base[39], 24, 10, 1),  // right leg top
-    shiftSpan(base[40], 24, 9, 1),   // right leg
-    shiftSpan(base[41], 24, 9, 1),
-    shiftSpan(base[42], 24, 9, 1),
-    shiftSpan(base[43], 24, 10, 1),  // right leg bottom
-    shiftSpan(base[44], 24, 11, 1),  // right boot
-    shiftSpan(base[45], 24, 11, 1),
-    shiftSpan(base[46], 24, 11, 1),
-    shiftSpan(base[47], 25, 9, 1),   // right sole
-  ])
-  const bobbed = bob(base, 48)
-  const swayRight = withRows(bobbed, sway.row, [shiftSpan(bobbed[sway.row], sway.start, sway.len, 1)])
-  const swayLeft = withRows(bobbed, sway.row, [shiftSpan(bobbed[sway.row], sway.start, sway.len, -1)])
-  return [leftForward, swayRight, rightForward, swayLeft]
-}
-
-const REVIEWER_WALK = buildWalk48(REVIEWER_IDLE[0], { row: 42, start: 6, len: 5 }) // satchel bottom sways
-const COORDINATOR_WALK = buildWalk48(COORDINATOR_IDLE[0], { row: 41, start: 37, len: 5 }) // tail sways
-
-/** Raised-arm stamp maps shared by teammateError and teammateDone. */
-const ARM_UP_L = ['XppX', 'XmmX', 'XmmX', 'XmmX', 'XmmX', 'XXXX'] // anchored (20,5)
-const ARM_UP_R = ['XppX', 'XmmX', 'XmmX', 'XmmX', 'XmmX', 'XXXX'] // anchored (20,39)
-const ARM_OUT_L = ['XppX.', 'XmmX.', 'XmmX.', 'XmmX.', 'XmmX.', '.XmXX', '..XXX'] // anchored (19,4)
-const ARM_OUT_R = ['.XppX', '.XmmX', '.XmmX', '.XmmX', '.XmmX', 'XXmX.', 'XXX..'] // anchored (19,39)
-
-/** Base for the raised-arm state sheets: resting paws fold into the torso. */
-function raisedArmsBase(base) {
-  let out = base
-  for (const row of [33, 34, 35]) {
-    out = stamp(out, row, 10, ['tttt'])
-    out = stamp(out, row, 34, ['tttt'])
-  }
-  return out
-}
-
-/**
- * teammateBlocked (48x48, 4f @6fps): waiting pose (idle body) + a bronze
- * pocket-watch swinging on a chain below the right paw — pendulum
- * left/center/right/center — while the left toe taps (ground/up/ground/mid).
- */
-function buildTeammateBlocked(base) {
-  const WATCH = ['.XXX.', 'XzzzX', 'XzhzX', 'XzzzX', '.XXX.']
-  const frame = (watchLeft, chainTop, chainBottom, toe) => {
-    let out = stamp(base, 37, chainTop, ['z'])
-    out = stamp(out, 38, chainBottom, ['z'])
-    out = stamp(out, 39, watchLeft, WATCH)
-    return toe === null ? out : stamp(out, toe[0], toe[1], [toe[2]])
-  }
-  return [
-    frame(30, 36, 35, [47, 13, 'X']), // watch left, toe taps the ground
-    frame(34, 36, 36, [44, 12, 'r']), // watch center, toe flicks up
-    frame(38, 36, 37, [47, 13, 'X']), // watch right, toe taps the ground
-    frame(34, 36, 36, [46, 12, 'r']), // watch center, toe mid-tap
-  ]
-}
-
-/**
- * teammateError (48x48, 4f @6fps): both arms raised and waving (up on even
- * frames, angled out on odd frames; frame 3 adds a paw flick so frames 1/3
- * stay distinct) + an oxide alarm flashing above the head (frames 0,2 on —
- * frame 2 pulses a highlight pixel — 1,3 off).
- */
-function buildTeammateError(base) {
-  const ALARM = ['..XX..', '.XrrX.', 'XrrrrX'] // anchored (1,21)
-  const ALARM_HI = ['..XX..', '.XrhX.', 'XrrrrX']
-  const body = raisedArmsBase(base)
-  const frames = []
-  for (let index = 0; index < 4; index += 1) {
-    let out = index % 2 === 0
-      ? stamp(stamp(body, 20, 5, ARM_UP_L), 20, 39, ARM_UP_R)
-      : stamp(stamp(body, 19, 4, ARM_OUT_L), 19, 39, ARM_OUT_R)
-    if (index === 0) out = stamp(out, 1, 21, ALARM)
-    if (index === 2) out = stamp(out, 1, 21, ALARM_HI)
-    if (index === 3) out = stamp(stamp(out, 18, 5, ['p']), 18, 42, ['p'])
-    frames.push(out)
-  }
-  return frames
-}
-
-/**
- * teammateDone (48x48, 4f @6fps): celebration — both arms up, the body jumps
- * 1px on frames 1,3, and h/b/r confetti pixels hang in the air (6 per frame,
- * positions differ per frame).
- */
-function buildTeammateDone(base) {
-  const CONFETTI = [
-    [[0, 10, 'h'], [1, 15, 'b'], [0, 30, 'r'], [2, 35, 'h'], [1, 25, 'b'], [3, 6, 'r']],
-    [[0, 12, 'r'], [2, 17, 'h'], [1, 32, 'b'], [3, 36, 'r'], [0, 26, 'h'], [2, 8, 'b']],
-    [[1, 9, 'b'], [0, 18, 'r'], [2, 28, 'h'], [1, 34, 'r'], [3, 24, 'b'], [0, 38, 'h']],
-    [[2, 11, 'r'], [0, 14, 'h'], [1, 29, 'b'], [3, 33, 'h'], [2, 22, 'r'], [1, 5, 'b']],
-  ]
-  const jump = frame => [...frame.slice(1), '.'.repeat(48)]
-  const body = stamp(stamp(raisedArmsBase(base), 20, 5, ARM_UP_L), 20, 39, ARM_UP_R)
-  return CONFETTI.map((pixels, index) => {
-    let out = index % 2 === 1 ? jump(body) : body
-    for (const [row, col, char] of pixels) out = stamp(out, row, col, [char])
-    return out
-  })
-}
-
-const TEAMMATE_BLOCKED = buildTeammateBlocked(TEAMMATE_IDLE[0])
-const TEAMMATE_ERROR = buildTeammateError(TEAMMATE_IDLE[0])
-const TEAMMATE_DONE = buildTeammateDone(TEAMMATE_IDLE[0])
-
-// ---------------------------------------------------------------------------
-// Sheet assembly, validation, and deterministic emission.
-// ---------------------------------------------------------------------------
-
-/** @type {{ file: string, exports: [string, object][] }[]} */
-const SHEETS = [
-  {
-    file: 'lead.ts',
-    exports: [
-      ['leadIdle', { name: 'lead.idle', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_IDLE }],
-      ['leadWork', { name: 'lead.work', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_WORK }],
-      ['leadWalk', { name: 'lead.walk', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_WALK }],
-    ],
-  },
-  {
-    file: 'teammate.ts',
-    exports: [
-      ['teammateIdle', { name: 'teammate.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_IDLE }],
-      ['teammateWork', { name: 'teammate.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WORK }],
-      ['teammateWalk', { name: 'teammate.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WALK }],
-      ['teammateBlocked', { name: 'teammate.blocked', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_BLOCKED }],
-      ['teammateError', { name: 'teammate.error', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_ERROR }],
-      ['teammateDone', { name: 'teammate.done', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_DONE }],
-    ],
-  },
-  {
-    file: 'reviewer.ts',
-    exports: [
-      ['reviewerIdle', { name: 'reviewer.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_IDLE }],
-      ['reviewerWork', { name: 'reviewer.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_WORK }],
-      ['reviewerWalk', { name: 'reviewer.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_WALK }],
-    ],
-  },
-  {
-    file: 'coordinator.ts',
-    exports: [
-      ['coordinatorIdle', { name: 'coordinator.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_IDLE }],
-      ['coordinatorWork', { name: 'coordinator.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_WORK }],
-      ['coordinatorWalk', { name: 'coordinator.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_WALK }],
-    ],
-  },
-]
-
-const HEADER = '/** GENERATED by scripts/sprites/generate.mjs — do not edit by hand. */\n'
-  + "import type { SpriteSheet } from '../../engine/sprites.ts'\n\n"
-
-function emit(exports) {
-  return HEADER + exports
-    .map(([exportName, sheet]) => `export const ${exportName}: SpriteSheet =\n${JSON.stringify(sheet, null, 2)}\n`)
-    .join('\n')
-}
-
-const outDir = join(dirname(fileURLToPath(import.meta.url)), '../../packages/client-ui-agent-team-visual/src/assets/sprites')
-
-// Validate every sheet before writing anything: refuse to write invalid sheets.
-let failed = false
-for (const { exports } of SHEETS) {
-  for (const [exportName, sheet] of exports) {
-    const violations = validateSheetRules(sheet)
-    if (violations.length > 0) {
-      failed = true
-      console.error(`✗ ${sheet.name} (${exportName}) refuses to write:`)
-      for (const violation of violations) console.error(`    ${violation}`)
-    }
-  }
-}
-if (failed) {
-  console.error('generate: aborted, no files written')
-  process.exit(1)
-}
-mkdirSync(outDir, { recursive: true })
-for (const { file, exports } of SHEETS) {
-  writeFileSync(join(outDir, file), emit(exports))
-  console.log(`wrote ${file} (${exports.map(([name]) => name).join(', ')})`)
-}
-console.log('generate: 15 sheets written')
+    shiftSpan(base[42], 15
