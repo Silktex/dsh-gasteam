@@ -58,18 +58,42 @@ export class GitIntegrationProvider implements TeamIntegrationProvider {
     return await this.git(spec.repository, ['rev-parse', '--verify', `refs/heads/${spec.targetBranch}^{commit}`], signal) as TeamCommitId
   }
 
+  /** True only when an accepted prerequisite is contained by this exact target. */
+  async contains(spec: TeamIntegrationSpec, target: TeamCommitId, commit: TeamCommitId, signal: AbortSignal): Promise<boolean> {
+    try { await this.git(spec.repository, ['merge-base', '--is-ancestor', commit, target], signal); return true }
+    catch { return false }
+  }
+
   async verify(spec: TeamIntegrationSpec, target: TeamCommitId, signal: AbortSignal): Promise<TeamCommitId> {
-    await mkdir(dirname(spec.cwd), { recursive: true })
-    await this.git(spec.repository, ['worktree', 'add', '--detach', '--', spec.cwd, target], signal)
-    await this.git(spec.cwd, ['-c', 'commit.gpgSign=false', 'merge', '--no-edit', '--no-stat', spec.sourceCommit], signal)
-    const candidate = await this.git(spec.cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], signal) as TeamCommitId
-    for (const step of spec.verification) {
-      await execa(step.command, step.args, { cwd: spec.cwd, cancelSignal: signal, timeout: this.config.verificationTimeoutMs })
+    return await this.verifyStack([spec], target, spec.cwd, signal)
+  }
+
+  /**
+   * Verify one ordered composition of immutable worker commits.  This is kept
+   * beside the single-candidate operation so both paths use precisely the
+   * same clean-tree, command, and target rules.
+   */
+  async verifyStack(specs: readonly TeamIntegrationSpec[], target: TeamCommitId, cwd: string, signal: AbortSignal): Promise<TeamCommitId> {
+    if (specs.length === 0) throw new TeamError('integration batch requires at least one source commit', 'TEAM_INTEGRATION_CONFLICT')
+    const first = specs[0]!
+    if (specs.some(spec => spec.targetBranch !== first.targetBranch
+      || JSON.stringify(spec.verification) !== JSON.stringify(first.verification))) {
+      throw new TeamError('integration batch changed target or verification policy', 'TEAM_INTEGRATION_CONFLICT')
     }
-    if (await this.git(spec.cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], signal) !== candidate) {
+    if (new Set(specs.map(spec => spec.sourceCommit)).size !== specs.length) {
+      throw new TeamError('integration batch repeats an immutable source commit', 'TEAM_INTEGRATION_CONFLICT')
+    }
+    await mkdir(dirname(cwd), { recursive: true })
+    await this.git(first.repository, ['worktree', 'add', '--detach', '--', cwd, target], signal)
+    for (const spec of specs) await this.git(cwd, ['-c', 'commit.gpgSign=false', 'merge', '--no-edit', '--no-stat', spec.sourceCommit], signal)
+    const candidate = await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], signal) as TeamCommitId
+    for (const step of first.verification) {
+      await execa(step.command, step.args, { cwd, cancelSignal: signal, timeout: this.config.verificationTimeoutMs })
+    }
+    if (await this.git(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], signal) !== candidate) {
       throw new TeamError('verification changed the candidate commit', 'TEAM_INTEGRATION_CONFLICT')
     }
-    await this.clean(spec.cwd, signal)
+    await this.clean(cwd, signal)
     return candidate
   }
 

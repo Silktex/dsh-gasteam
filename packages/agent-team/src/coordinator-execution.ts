@@ -29,6 +29,9 @@ import { DurableJournal } from './durable-journal.ts'
 import { CandidateRetentionStore } from './candidate-retention.ts'
 import type { CandidateRetentionRecord } from './candidate-retention.ts'
 import { GitCandidateCleanup } from './git-candidate-cleanup.ts'
+import { GitIntegrationProvider } from './git-integration-provider.ts'
+import { GitMergeBatch } from './git-merge-batching.ts'
+import { MergeBatchRegistry } from './merge-batch-registry.ts'
 import { HealthStore, healthConfigSchema } from './health.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { DshHealthRuntimeObserver } from './health-runtime-observation.ts'
@@ -50,6 +53,8 @@ export const executionConfigSchema = z.object({
   dispatchIntervalMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   /** Disabled unless explicitly set. The delay is pinned when a merged candidate is first observed. */
   candidateRetention: z.object({ delayMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), commandTimeoutMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(30_000) }).strict().optional(),
+  /** Sequential integration remains the default diagnostic mode. */
+  integrationBatching: z.object({ mode: z.literal('ordered'), maxCandidates: z.number().int().positive().max(64), maxSplitAttempts: z.number().int().positive().max(256) }).strict().optional(),
   /** Disabled unless an operator explicitly enables durable health observation. */
   health: healthConfigSchema.optional(),
   /**
@@ -91,17 +96,20 @@ export class CoordinatorExecution {
   private readonly removePolicy: () => void
   private closing: Promise<void> | undefined
   private shutdownRequested = false
+  private readonly pendingMergeBatchAdmissions = new Map<string, string>()
   /** Coordinator-owned cross-project gate; no model input can loosen it. */
   private workspaceBatchBlocker: ((work: { projectId: string; teamId: string; taskId: string }) => string | undefined) | undefined
 
   private constructor(
     private readonly ctx: Context,
+    private readonly directory: string,
     private readonly config: z.output<typeof executionConfigSchema> | undefined,
     private readonly projects: () => ProjectRecord[],
     private readonly isPaused: (projectId: string) => boolean,
     private readonly assignments: AssignmentStore,
     private readonly queue: DispatchQueue,
     private readonly submissions: SubmissionStore,
+    private readonly mergeBatches: MergeBatchRegistry,
     private readonly reports: ReportStore,
     private readonly retention: CandidateRetentionStore,
     private readonly failures: DurableJournal<ExecutionBlock[], { type: 'work/blocked'; block: ExecutionBlock }>,
@@ -171,11 +179,13 @@ export class CoordinatorExecution {
         try {
           const submissions = await SubmissionStore.open(directory)
           try {
-            const reports = await ReportStore.open(directory)
+            const mergeBatches = await MergeBatchRegistry.open(directory)
             try {
-              let retention: CandidateRetentionStore | undefined
+              const reports = await ReportStore.open(directory)
               try {
-                retention = await CandidateRetentionStore.open(directory)
+                let retention: CandidateRetentionStore | undefined
+                try {
+                  retention = await CandidateRetentionStore.open(directory)
                 await retention.recoverInterrupted()
                 let health: HealthStore | undefined
                 let healthRecovery: HealthRecoveryStore | undefined
@@ -232,11 +242,12 @@ export class CoordinatorExecution {
                     } else if (retainedExternal.length > 0) {
                       external = await recoveryAdapter()
                     }
-                    return new CoordinatorExecution(ctx, validated, projects, isPaused, assignments, queue, submissions, reports, retention, failures, health, healthRecovery, external, externalStore)
+                    return new CoordinatorExecution(ctx, directory, validated, projects, isPaused, assignments, queue, submissions, mergeBatches, reports, retention, failures, health, healthRecovery, external, externalStore)
                   } catch (error) { await externalStore?.close(); throw error }
                 } catch (error) { await healthRecovery?.close(); await health?.close(); throw error }
-              } catch (error) { await retention?.close(); throw error }
-            } catch (error) { await reports.close(); throw error }
+                } catch (error) { await retention?.close(); throw error }
+              } catch (error) { await reports.close(); throw error }
+            } catch (error) { await mergeBatches.closeStore(); throw error }
           } catch (error) { await submissions.close(); throw error }
         } catch (error) { await queue.close(); throw error }
       } catch (error) { await failures.close(); throw error }
@@ -504,24 +515,11 @@ export class CoordinatorExecution {
           if (cwd === undefined) throw new Error('Reported attempt has no ready provider-owned worktree for submission')
           if (externalWorktree !== undefined && externalWorktree.repository !== project.project.repository) throw new Error('External worktree receipt repository does not match the selected project')
           const sourceCommit = await runGit(cwd, ['rev-parse', '--verify', 'HEAD^{commit}'], new AbortController().signal, 30_000)
-          await this.submit(lead, project.project, { ...token(record), sourceCommit, evidence: record.result })
+          await this.submit(lead, project.project, { ...token(record), sourceCommit, evidence: record.result, dependsOn: [] })
         } catch (error) { await this.block(record, error) }
       }
-      const visited = new Set<string>()
-      for (const submission of this.submissions.list()) {
-        if (submission.phase !== 'queued' || visited.has(submission.teamId)) continue
-        const project = views.find(view => view.project.id === submission.projectId)
-        if (!project || project.paused) continue
-        visited.add(submission.teamId)
-        try {
-          const lead = await this.leadFor(project.project, submission.teamId)
-          const next = this.ctx.agentTeams.listIntegrations(lead).find(job => job.phase !== 'merged' && job.phase !== 'failed')
-          const owner = this.submissions.list().find(record => record.integrationId === next?.id && record.teamId === lead.id)
-          if (!next || !owner) continue
-          const job = await this.ctx.agentTeams.runIntegration(lead, new AbortController().signal)
-          if (job?.phase === 'failed') await this.block(owner, new Error(job.error ?? 'Integration verification failed'))
-        } catch (error) { await this.block(submission, error) }
-      }
+      if (this.config.integrationBatching === undefined) await this.runSequentialIntegrations(views)
+      else await this.runOrderedMergeBatches(views)
     }
     for (const submission of this.submissions.list()) {
       if (submission.phase !== 'queued') continue
@@ -543,6 +541,7 @@ export class CoordinatorExecution {
         await this.submissions.accepted(submission.id)
       } catch (error) { await this.block(submission, error) }
     }
+    await this.closeMaterializedMergeBatches(views)
     await this.scanCandidateRetention(views)
     const attemptedThisScan = new Set<number>()
     while (true) {
@@ -592,6 +591,163 @@ export class CoordinatorExecution {
       }
     }
     await this.scanHealth(views)
+  }
+
+  private async runSequentialIntegrations(views: readonly CoordinatorProjectView[], gatedOnly = false): Promise<void> {
+    const visited = new Set<string>()
+    for (const submission of this.submissions.list()) {
+      if (submission.phase !== 'queued' || visited.has(submission.teamId)) continue
+      const project = views.find(view => view.project.id === submission.projectId)
+      if (!project || project.paused) continue
+      visited.add(submission.teamId)
+      try {
+        const lead = await this.leadFor(project.project, submission.teamId)
+        const next = this.ctx.agentTeams.listIntegrations(lead).find(job => {
+          const owner = this.submissions.list().find(record => record.integrationId === job.id && record.teamId === lead.id)
+          return job.phase !== 'merged' && job.phase !== 'failed' && (!gatedOnly || job.reviewGate !== undefined)
+            && owner?.dependencies.every(dependency => this.submissions.list().find(record => record.id === dependency.submissionId)?.phase === 'accepted')
+        })
+        const owner = this.submissions.list().find(record => record.integrationId === next?.id && record.teamId === lead.id)
+        if (!next || !owner) continue
+        const job = await this.ctx.agentTeams.runIntegration(lead, new AbortController().signal, next.id)
+        if (job?.phase === 'failed') await this.block(owner, new Error(job.error ?? 'Integration verification failed'))
+      } catch (error) { await this.block(submission, error) }
+    }
+  }
+
+  /**
+   * Build canonical target groups from already durable Team integrations. The
+   * batch journal owns verification/promotion receipts; Team jobs are then
+   * replayed through their existing idempotent state machine to materialize
+   * the per-submission merged or failed state before task acceptance.
+   */
+  private async runOrderedMergeBatches(views: readonly CoordinatorProjectView[]): Promise<void> {
+    const policy = this.config!.integrationBatching!
+    const entries: { submission: SubmissionRecord; lead: Agent; job: import('./types.ts').TeamIntegrationSnapshot; key: string }[] = []
+    for (const submission of this.submissions.list()) {
+      // Retain accepted members while their peers are still materializing. The
+      // active registry then reopens the original durable batch after a crash
+      // between individual task receipts.
+      if (submission.phase !== 'queued' && submission.phase !== 'accepted') continue
+      const project = views.find(view => view.project.id === submission.projectId)
+      if (!project || project.paused) continue
+      try {
+        const lead = await this.leadFor(project.project, submission.teamId)
+        const job = this.ctx.agentTeams.listIntegrations(lead).find(candidate => candidate.id === submission.integrationId)
+        if (!job || job.reviewGate !== undefined) continue
+        const common = await realpath(await runGit(job.repository, ['rev-parse', '--path-format=absolute', '--git-common-dir'], new AbortController().signal, 30_000))
+        entries.push({ submission, lead, job, key: `${common}\u0000${job.targetBranch}\u0000${JSON.stringify(job.verification)}` })
+      } catch (error) { await this.block(submission, error) }
+    }
+    const groups = new Map<string, { entries: typeof entries; batchId?: string }>()
+    const activeMembers = new Set<string>()
+    for (const registration of this.mergeBatches.list().filter(record => record.phase === 'active')) {
+      for (const member of registration.members) activeMembers.add(member)
+      const selected = registration.members.flatMap(member => entries.filter(entry => entry.submission.integrationId === member))
+      if (selected.length === registration.members.length) {
+        groups.set(`active:${registration.id}`, { entries: selected, batchId: registration.id })
+      }
+    }
+    for (const entry of entries) {
+      if (activeMembers.has(entry.submission.integrationId) || entry.submission.phase !== 'queued' || entry.job.phase !== 'queued') continue
+      const group = groups.get(entry.key) ?? { entries: [] }
+      group.entries.push(entry)
+      groups.set(entry.key, group)
+    }
+    for (const group of groups.values()) {
+      // Only eligible pending work consumes the limit. A blocked queue head
+      // must not starve unrelated submissions beyond the candidate window.
+      const selected: typeof entries = group.batchId === undefined ? [] : group.entries
+      if (group.batchId === undefined) for (const entry of group.entries) {
+        if (selected.length >= policy.maxCandidates) break
+        const failed = entry.submission.dependencies.find(dependency =>
+          entries.find(candidate => candidate.submission.id === dependency.submissionId)?.job.phase === 'failed')
+        if (failed) {
+          const diagnostic = `Prerequisite ${failed.submissionId} was excluded from integration`
+          try {
+            await this.ctx.agentTeams.abandonIntegration(entry.lead, entry.job.id, diagnostic, new AbortController().signal)
+          } catch (error) { await this.block(entry.submission, error) }
+          await this.block(entry.submission, new Error(diagnostic))
+          continue
+        }
+        if (entry.submission.dependencies.every(dependency =>
+          this.submissions.list().find(record => record.id === dependency.submissionId)?.phase === 'accepted'
+          || selected.some(candidate => candidate.submission.id === dependency.submissionId))) selected.push(entry)
+      }
+      if (!selected.length) continue
+      const first = selected[0]!
+      try {
+        // A pre-registration crash can leave an unpromoted journal behind. A
+        // fresh ID avoids binding later admission to that orphan's old policy.
+        const admissionKey = JSON.stringify(selected.map(entry => entry.submission.integrationId))
+        const pendingId = this.pendingMergeBatchAdmissions.get(admissionKey)
+        const batchId = group.batchId ?? pendingId ?? `batch-${randomUUID()}`
+        const provider = new GitIntegrationProvider({ providerName: 'coordinator-batch', targetBranch: first.job.targetBranch,
+          verification: first.job.verification, commandTimeoutMs: 30_000, verificationTimeoutMs: 300_000 })
+        const batch = group.batchId === undefined && pendingId === undefined
+          ? await GitMergeBatch.create(this.directory, batchId, selected.map(entry => ({ id: entry.submission.integrationId, spec: {
+          repository: first.job.repository, cwd: entry.job.cwd, sourceBranch: entry.job.sourceBranch, sourceCommit: entry.job.sourceCommit,
+          targetBranch: entry.job.targetBranch, verification: entry.job.verification,
+        },
+          dependsOn: entry.submission.dependencies.filter(dependency => this.submissions.list().find(record => record.id === dependency.submissionId)?.phase !== 'accepted')
+            .map(dependency => this.submissions.list().find(record => record.id === dependency.submissionId)!.integrationId),
+          acceptedPrerequisites: entry.submission.dependencies.filter(dependency => this.submissions.list().find(record => record.id === dependency.submissionId)?.phase === 'accepted')
+            .map(dependency => ({ id: dependency.submissionId, sourceCommit: dependency.sourceCommit as import('./types.ts').TeamCommitId })),
+        })), { maxCandidates: policy.maxCandidates, maxSplitAttempts: policy.maxSplitAttempts })
+          : await GitMergeBatch.open(this.directory, batchId)
+        let result
+        try {
+          if (group.batchId === undefined) {
+            // Reuse the same closed journal during repeated admission failures;
+            // a failing registry must not allocate a new orphan on every scan.
+            this.pendingMergeBatchAdmissions.set(admissionKey, batchId)
+            await this.mergeBatches.admit(batchId, selected.map(entry => entry.submission.integrationId))
+            this.pendingMergeBatchAdmissions.delete(admissionKey)
+          }
+          result = await batch.run(provider, new AbortController().signal)
+        } finally { await batch.close() }
+        for (const entry of selected) {
+          const outcome = result.outcomes[entry.submission.integrationId]!
+          if (outcome.state === 'accepted') {
+            // The Git target already contains the durable batch receipt. This
+            // replays the ordinary job reducer and produces its individual
+            // merged receipt without a second target advancement.
+            if (entry.job.phase !== 'merged') {
+              const merged = await this.ctx.agentTeams.runIntegration(entry.lead, new AbortController().signal, entry.submission.integrationId as TeamIntegrationId)
+              if (merged?.id !== entry.submission.integrationId || merged.phase === 'failed') {
+                await this.block(entry.submission, new Error(merged?.error ?? 'Batch receipt could not materialize its exact integration'))
+              }
+            }
+          } else if (outcome.state === 'rejected' || outcome.state === 'blocked') {
+            if (entry.job.phase !== 'failed') await this.ctx.agentTeams.abandonIntegration(entry.lead, entry.submission.integrationId as TeamIntegrationId,
+              outcome.diagnostic ?? `Merge batch ${outcome.state}`, new AbortController().signal)
+            await this.block(entry.submission, new Error(outcome.diagnostic ?? `Merge batch ${outcome.state}`))
+          }
+        }
+      } catch (error) { for (const entry of selected) await this.block(entry.submission, error) }
+    }
+    // Candidate-review integrations carry a receipt bound to their individual
+    // candidate. They retain the existing serialized path until the review
+    // model is extended with a stack-level receipt, rather than stalling.
+    await this.runSequentialIntegrations(views, true)
+  }
+
+  private async closeMaterializedMergeBatches(views: readonly CoordinatorProjectView[]): Promise<void> {
+    for (const registration of this.mergeBatches.list()) {
+      if (registration.phase === 'closed') continue
+      let complete = true
+      for (const integrationId of registration.members) {
+        const submission = this.submissions.list().find(record => record.integrationId === integrationId)
+        const project = submission === undefined ? undefined : views.find(view => view.project.id === submission.projectId)
+        if (!submission || !project) { complete = false; break }
+        if (submission.phase === 'accepted') continue
+        try {
+          const lead = await this.leadFor(project.project, submission.teamId)
+          if (this.ctx.agentTeams.listIntegrations(lead).find(job => job.id === integrationId)?.phase !== 'failed') { complete = false; break }
+        } catch { complete = false; break }
+      }
+      if (complete) await this.mergeBatches.close(registration.id)
+    }
   }
 
   /** Observational mapping only: no health result can wake, stop, or replace an assignment. */
@@ -762,17 +918,30 @@ export class CoordinatorExecution {
   async submit(lead: Agent, project: ProjectRecord, request: SubmitRequest): Promise<SubmissionRecord> {
     if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
     const input = submitRequestSchema.parse(request)
+    const { dependsOn, ...submissionRequest } = input
     const records = this.assignments.list()
-    const attempt = records.find(record => record.attemptId === input.attemptId)
-    if (!attempt || attempt.projectId !== project.id || attempt.teamId !== lead.id || attempt.generation !== input.generation || attempt.revision !== input.expectedRevision) throw new Error('Stale or unauthorized submission attempt')
+    const attempt = records.find(record => record.attemptId === submissionRequest.attemptId)
+    if (!attempt || attempt.projectId !== project.id || attempt.teamId !== lead.id || attempt.generation !== submissionRequest.generation || attempt.revision !== submissionRequest.expectedRevision) throw new Error('Stale or unauthorized submission attempt')
     if (records.findLast(record => sameWork(record, attempt))?.attemptId !== attempt.attemptId) throw new Error('Superseded attempt cannot submit')
     if (attempt.phase !== 'terminal' || attempt.stopEvidence?.kind !== 'stopped' || attempt.stopReason) throw new Error('Submission requires a quiescent reported attempt')
     if (!attempt.result || this.queue.list().some(request => sameWork(request, attempt) && request.cancelReason !== undefined)) throw new Error('Cancelled or unreported attempt cannot submit')
     const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(attempt.taskId))
     if (task.nonCodeCriteria !== undefined) throw new Error('non-code work requires explicit report acceptance, not Git submission')
-    if (input.reviewGate !== undefined && input.reviewGate !== task.reviewGate) throw new Error('Submission review gate disagrees with the immutable task gate')
-    const submission = await this.submissions.submit({ ...input, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
+    if (submissionRequest.reviewGate !== undefined && submissionRequest.reviewGate !== task.reviewGate) throw new Error('Submission review gate disagrees with the immutable task gate')
+    const repositoryId = await realpath(await runGit(project.repository, ['rev-parse', '--path-format=absolute', '--git-common-dir'], new AbortController().signal, 30_000))
+    const dependencies = await Promise.all(dependsOn.map(async submissionId => {
+      const dependency = this.submissions.list().find(record => record.id === submissionId)
+      if (!dependency || dependency.phase === 'pending') throw new Error(`Submission prerequisite ${submissionId} is not durably queued or accepted`)
+      if (dependency.targetBranch !== project.targetBranch) throw new Error(`Submission prerequisite ${submissionId} targets a different branch`)
+      const dependencyRepository = await realpath(await runGit(dependency.repository, ['rev-parse', '--path-format=absolute', '--git-common-dir'], new AbortController().signal, 30_000))
+      if (dependencyRepository !== repositoryId) throw new Error(`Submission prerequisite ${submissionId} targets a different canonical repository`)
+      return { submissionId: dependency.id, projectId: dependency.projectId, teamId: dependency.teamId, taskId: dependency.taskId,
+        sourceCommit: dependency.sourceCommit, state: dependency.phase }
+    }))
+    if (new Set(dependencies.map(dependency => dependency.submissionId)).size !== dependencies.length) throw new Error('Submission prerequisites repeat an integration identity')
+    const submission = await this.submissions.submit({ ...submissionRequest, projectId: project.id, teamId: lead.id, taskId: attempt.taskId,
       runtimeId: attempt.runtimeId, repository: project.repository, targetBranch: project.targetBranch, verification: project.verification,
+      dependencies,
       ...(task.reviewGate === undefined ? {} : { reviewGate: task.reviewGate }) })
     try { return await this.queueSubmission(lead, submission) }
     catch (error) { await this.block(submission, error); throw error }
@@ -1003,6 +1172,7 @@ export class CoordinatorExecution {
       await this.failures.close()
       await this.queue.close()
       await this.submissions.close()
+      await this.mergeBatches.closeStore()
       await this.reports.close()
       await this.retention.close()
       await this.healthRecovery?.close()

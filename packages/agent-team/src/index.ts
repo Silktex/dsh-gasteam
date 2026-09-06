@@ -400,8 +400,8 @@ export class TeamService extends TypertRemoteService {
    * @param signal - caller cancellation.
    * @returns resulting integration record, or undefined for an empty queue.
    */
-  async runIntegration(caller: Agent, signal: AbortSignal): Promise<TeamIntegrationSnapshot | undefined> {
-    return await this.runOperation(signal, async cancellation => await this.integrations.run(this.roster.membership(caller), cancellation))
+  async runIntegration(caller: Agent, signal: AbortSignal, id?: TeamIntegrationId): Promise<TeamIntegrationSnapshot | undefined> {
+    return await this.runOperation(signal, async cancellation => await this.integrations.run(this.roster.membership(caller), cancellation, id))
   }
 
   /**

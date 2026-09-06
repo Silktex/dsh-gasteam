@@ -242,10 +242,10 @@ Done evidence: deterministic provider conformance suite plus a real installed ex
 
 Dependencies: M4 and stable sequential integration evidence.
 
-- [ ] Add configurable candidate batching while retaining a sequential mode for diagnosis and small projects.
-- [ ] Verify ordered candidate stacks against the current target; isolate failing submissions with a bounded bisect/split policy.
-- [ ] Track per-submission acceptance and retain diagnostics so a rejected submission does not appear merged when other changes succeed.
-- [ ] Re-verify any changed candidate composition. Honor explicit dependencies between submissions; do not merge dependents whose prerequisites were excluded.
+- [x] Add configurable candidate batching while retaining a sequential mode for diagnosis and small projects.
+- [x] Verify ordered candidate stacks against the current target; isolate failing submissions with a bounded bisect/split policy.
+- [x] Track per-submission acceptance and retain diagnostics so a rejected submission does not appear merged when other changes succeed.
+- [x] Re-verify any changed candidate composition. Honor explicit dependencies between submissions; do not merge dependents whose prerequisites were excluded.
 
 Red tests: one bad submission among independent good ones is isolated; dependent changes are held with their failed prerequisite; combinations that fail together are handled without assuming individual pass implies combined pass; target movement invalidates old verification; restart during isolation does not duplicate promotion.
 
@@ -301,7 +301,7 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 | M7 Cross-project batches | done | All five requirements map to published03a6920: project policy/authority, union dependency graph, current-attempt acceptance and failed/reopened history, durable notification epochs/acknowledgements, and operator planning through model/typed Remote services. Real compiled-plugin keyless two-repository process tests prove dependency ordering, independent failure recovery, exact assignment counts and notification replay. Consumer-package installation remains M11. |
 | M8 Dashboard | in_progress | Project-scoped health inbox, revision-fenced acknowledgement, loading/empty/error/stale/project-switch states, and English/Chinese copy are validated. Chrome fixture evidence uses explicit DOM input-event fallback; native keyboard transport was unavailable. The workspace overview and operator-authorized collection pagination now ship with retained snapshot/chunk bounds and reconnect conflicts. Activity feed, remaining operational controls, fuller diagnostics and real-service demonstration remain open. |
 | M9 External providers | in_progress | Project-selected code/non-code external routing, immutable admission/worktree/namespace ownership, real authenticated verified integration, reconstructed deterministic restart/cancel harness and durable runtime/assignment usage ship. Shared routed DSH/external lifecycle capabilities now pass combined checks; complete provider/recovery acceptance audit remains. |
-| M10 Merge batching | in_progress | Agent implementing opt-in ordered batches, durable composition and bounded failing-change isolation; no completion claim yet. |
+| M10 Merge batching | done | Ordered stacks, durable membership/budgets, exact per-task receipts, dependency isolation and restart/target-movement real-Git acceptance are verified. Retention and post-promotion verification limitations are documented. |
 | M11 Release/install | pending | — |
 
 Continuation fields:
@@ -314,7 +314,7 @@ Continuation fields:
 - Changed files and commit: published through d979049 (M3 complete, exact CI passed); next checkpoint adds shared routed-provider capability contract. Preserve unrelated docs/README.md, darkfactory.md, docs/worklist.md and pending.md.
 - Open decisions/constraints: uncertain runtime ownership retains capacity until positive stop evidence. Retention has no external ownership proof and interrupted cleanup is not automatically retried. Configurable retry policy, recovery handoff/replacement/resolution, full dashboard operations, provider usage, batching and standalone release acceptance remain unfinished. Published operator authorization and aggregate shutdown bounds do not prove those remaining behaviors.
 - External blockers: none established after user confirmed accidental deletion. Actual authenticated integration passed; a subsequent restart/cancel run has surviving evidence, but its lost portable fixture needs reconstruction. Usage projection and other open requirements remain.
-- Next concrete action: verify the M6 completion commit CI; continue dashboard activity/controls and real-service demonstration, batching acceptance, provider audit and release verification. Continue remaining M6/M8/M9, M10/M11 and every final acceptance requirement.
+- Next concrete action: verify the M6 completion commit CI; continue dashboard activity/controls and real-service demonstration, provider audit and release verification; inspect exact batching commit CI. Continue remaining M6/M8/M9, M10/M11 and every final acceptance requirement.
 - Release actions still required: all unfinished M6/M8/M9/M10/M11 requirements, full final acceptance and applicable publication/installation verification. No localhost restart or durable user-data modification has occurred.
 - Previous goal-turn classification: progress — exact6bef1a2 CI verified and recovery notes preserved; user confirmed accidental deletion and reconstruction resumed. Full goal remains active.
 

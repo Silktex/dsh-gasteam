@@ -1,6 +1,6 @@
 import type { WorkspacePageSnapshotStore } from '../src/workspace-pagination.ts'
 import { afterEach, expect, it, vi } from 'vitest'
-import { rm, readFile, writeFile } from 'node:fs/promises'
+import { rm, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -23,6 +23,7 @@ import { MockAdapter, textResponse, toolCallResponse } from '../../../tests/supp
 import TeamService from '../src/index.ts'
 import { ProjectCatalog } from '../src/projects.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
+import { MergeBatchRegistry } from '../src/merge-batch-registry.ts'
 import { CoordinatorExecution } from '../src/coordinator-execution.ts'
 import { AssignmentStore, type AttemptRecord, type AttemptToken } from '../src/assignments.ts'
 import { HealthStore } from '../src/health.ts'
@@ -254,7 +255,7 @@ it('pages beyond the overview attempt bound through the actual Remote', async ()
   expect(last.items.map(item => item.attemptId)).toEqual(['page-attempt-512'])
 })
 
-it('admits a workspace batch code item only through verified integration and retains it across restart', async () => {
+it('admits a workspace batch code item through ordered integration batching and retains it across restart', async () => {
   const { ctx, lead, coordinator, request, config, git } = await fixture(true)
   const commands = [{ command: 'node', args: ["-e", "if(require('node:fs').readFileSync('shared.txt','utf8').trim()!=='batch')process.exit(1)"] }]
   await coordinator.register(lead, { ...request, verification: { revision: 1, commands } })
@@ -275,7 +276,7 @@ it('admits a workspace batch code item only through verified integration and ret
     }
   }([textResponse('Committed batch artifact and verified it.'), textResponse('Lead acknowledgement')]))
   const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id,
-    execution: { ...execution, maxRepairAttempts: 0, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
+    execution: { ...execution, maxRepairAttempts: 0, integrationBatching: { mode: 'ordered', maxCandidates: 8, maxSplitAttempts: 8 }, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
   cleanup.push(() => running.close())
   await running.planWorkspaceBatch(lead, { id: 'code-batch', name: 'verified code', items: [{ id: 'code', projectId: 'project', teamId: lead.id, subject: 'Batch code', description: 'Commit the batch artifact' }] })
   const task = ctx.agentTeams.listTasks(lead).find(candidate => candidate.subject === 'Batch code')!
@@ -1506,4 +1507,153 @@ it('keeps snapshot cleanup inside the retained aggregate shutdown deadline', asy
     const reopened = await WorkspaceCoordinator.open(ctx, config)
     await reopened.close()
   } finally { release(); closePages.mockRestore(); await running.close() }
+})
+
+/** Real workers commit independent branches before host submit pins explicit dependencies. */
+async function queuedMergeFixture(names: string[], maxCandidates: number, dependencies: Record<string, string[]> = {}) {
+  const fixtureState = await fixture(true)
+  const { ctx, lead, coordinator, request, config } = fixtureState
+  const commands = [{ command: 'node', args: ['-e', "if(require('node:fs').existsSync('bad.txt'))process.exit(1)"] }]
+  await coordinator.register(lead, { ...request, verification: { revision: 1, commands } })
+  const tasks = []
+  for (const name of names) tasks.push(await coordinator.acceptTask(lead, 'project', { subject: name, description: `Commit ${name}.txt` }))
+  await coordinator.close()
+  await ctx.plugin(GitIntegration, { providerName: 'test', targetBranch: 'main', verification: commands, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
+  const integration = vi.spyOn(ctx.agentTeams, 'integrationEnabled', 'get').mockReturnValue(false)
+  const written = new Set<string>()
+  ctx.llm.registerAdapter(['mock'], new class extends MockAdapter {
+    override async *stream(options: Parameters<MockAdapter['stream']>[0]) {
+      const worker = ctx.agents.list().find(agent => ctx.agentTeams.tryMembership(agent)?.role === 'teammate')
+      if (worker && !written.has(worker.id)) {
+        const name = names[written.size]!
+        written.add(worker.id)
+        const cwd = worker.session.header.cwd!
+        await writeFile(join(cwd, `${name}.txt`), `${name}\n`)
+        await runGit(cwd, ['add', `${name}.txt`], new AbortController().signal, 30_000)
+        await runGit(cwd, ['commit', '-m', `artifact ${name}`], new AbortController().signal, 30_000)
+      }
+      yield* super.stream(options)
+    }
+  }(Array.from({ length: names.length * 4 }, () => textResponse('Committed artifact and reported evidence.'))))
+  const batchExecution = { ...execution, maxConcurrent: 1, maxRepairAttempts: 0, integrationBatching: { mode: 'ordered' as const, maxCandidates, maxSplitAttempts: 12 } }
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: batchExecution })
+  cleanup.push(() => running.close())
+  for (let index = 0; index < names.length; index++) {
+    const active = running.view().attempts[index]!
+    await vi.waitFor(() => expect(ctx.agents.get(SessionId(active.runtimeId))).toBeUndefined())
+    await running.reconcile()
+  }
+  expect(running.view().attempts.map(attempt => attempt.phase)).toEqual(names.map(() => 'terminal'))
+  integration.mockRestore()
+  const submissions: Record<string, Awaited<ReturnType<typeof running.submit>>> = {}
+  for (const [index, name] of names.entries()) {
+    const attempt = running.view().attempts.find(value => value.taskId === tasks[index]!.id)!
+    const cwd = ctx.agentTeams.listMembers(lead).find(member => member.id === attempt.runtimeId)!.worktree!.cwd
+    const sourceCommit = await runGit(cwd, ['rev-parse', 'HEAD'], new AbortController().signal, 30_000)
+    submissions[name] = await running.submit(lead, 'project', { attemptId: attempt.attemptId, generation: attempt.generation,
+      expectedRevision: attempt.revision, sourceCommit, evidence: attempt.result!, dependsOn: (dependencies[name] ?? []).map(value => submissions[value]!.id) })
+  }
+  return { ...fixtureState, running, tasks, submissions, batchExecution }
+}
+
+it('progresses every pending Coordinator submission beyond maxCandidates without accepted-history starvation', async () => {
+  const { running, ctx, lead, tasks, git } = await queuedMergeFixture(['one', 'two', 'three', 'four', 'five'], 2)
+  for (let round = 0; round < 3; round++) await running.reconcile()
+  expect(running.view().submissions.map(value => value.phase)).toEqual(Array(5).fill('accepted'))
+  for (const [index, name] of ['one', 'two', 'three', 'four', 'five'].entries()) {
+    expect((await git('show', `main:${name}.txt`)).stdout).toBe(name)
+    expect(ctx.agentTeams.getTask(lead, tasks[index]!.id)).toMatchObject({ status: 'completed' })
+  }
+  expect(ctx.agentTeams.listIntegrations(lead).map(job => job.phase)).toEqual(Array(5).fill('merged'))
+})
+
+it.each([1, 3])('isolates a failed Coordinator prerequisite and its queued dependent while independent good output lands (limit %s)', async (limit) => {
+  const { running, ctx, lead, tasks, submissions, git } = await queuedMergeFixture(['bad', 'dependent', 'good'], limit, { dependent: ['bad'] })
+  expect(submissions.dependent!.dependencies[0]).toMatchObject({ submissionId: submissions.bad!.id, state: 'queued' })
+  await running.reconcile()
+  await running.reconcile()
+  expect(running.view().submissions.map(value => value.phase)).toEqual(['queued', 'queued', 'accepted'])
+  expect(ctx.agentTeams.listIntegrations(lead).map(job => job.phase)).toEqual(['failed', 'failed', 'merged'])
+  expect(ctx.agentTeams.listIntegrations(lead)[1]!.error).toMatch(/Prerequisite.*excluded/)
+  expect(tasks.map(task => ctx.agentTeams.getTask(lead, task.id).status)).toEqual(['pending', 'pending', 'completed'])
+  expect((await git('ls-tree', '--name-only', 'main')).stdout.split('\n')).toEqual(['good.txt', 'shared.txt'])
+  expect((await git('show', 'main:good.txt')).stdout).toBe('good')
+})
+
+it('reopens after the first actual Coordinator submission acceptance with pinned batch identity and budget', async () => {
+  const { running, ctx, lead, config, tasks, git, batchExecution } = await queuedMergeFixture(['first', 'second', 'third'], 3)
+  const originalAccept = ctx.agentTeams.acceptIntegratedTask.bind(ctx.agentTeams)
+  let firstAccepted = false
+  const crash = vi.spyOn(ctx.agentTeams, 'acceptIntegratedTask').mockImplementation(async (...args) => {
+    if (firstAccepted) throw new Error('Injected crash boundary before remaining task receipt')
+    const result = await originalAccept(...args)
+    firstAccepted = true
+    return result
+  })
+  await running.reconcile()
+  expect(running.view().submissions.map(value => value.phase)).toEqual(['accepted', 'queued', 'queued'])
+  const registrations = (await readFile(join(config.directory, 'merge-batches.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  const registration = registrations.find(event => event.type === 'merge-batch/admitted').record
+  expect(registrations.some(event => event.type === 'merge-batch/closed')).toBe(false)
+  const batchPath = join(config.directory, 'merge-batches', `${registration.id}.jsonl`)
+  const before = JSON.parse((await readFile(batchPath, 'utf8')).trim().split('\n').at(-1)!).state
+  const target = (await git('rev-parse', 'main')).stdout
+  const promotions = (await git('reflog', 'show', '--format=%H', 'main')).stdout
+  await running.close()
+  crash.mockRestore()
+  const receipts = vi.spyOn(ctx.agentTeams, 'acceptIntegratedTask')
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...batchExecution, integrationBatching: { mode: 'ordered', maxCandidates: 1, maxSplitAttempts: 1 } } })
+  cleanup.push(() => restored.close())
+  await restored.reconcile()
+  expect(restored.view().submissions.map(value => value.phase)).toEqual(['accepted', 'accepted', 'accepted'])
+  expect(receipts.mock.calls.map(([, request]) => request.taskId)).toEqual([tasks[1]!.id, tasks[2]!.id])
+  expect(tasks.map(task => ctx.agentTeams.getTask(lead, task.id).status)).toEqual(['completed', 'completed', 'completed'])
+  expect((await git('rev-parse', 'main')).stdout).toBe(target)
+  expect((await git('reflog', 'show', '--format=%H', 'main')).stdout).toBe(promotions)
+  for (const name of ['first', 'second', 'third']) expect((await git('show', `main:${name}.txt`)).stdout).toBe(name)
+  const after = JSON.parse((await readFile(batchPath, 'utf8')).trim().split('\n').at(-1)!).state
+  expect(after).toEqual(before)
+  const restoredRegistrations = (await readFile(join(config.directory, 'merge-batches.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  expect(restoredRegistrations.filter(event => event.type === 'merge-batch/admitted')).toHaveLength(1)
+  expect(restoredRegistrations.at(-1)).toMatchObject({ type: 'merge-batch/closed', id: registration.id })
+  receipts.mockRestore()
+})
+
+it('recovers an unpromoted batch journal left before registry admission without pinning its abandoned policy', async () => {
+  const { running, ctx, lead, config, git, batchExecution } = await queuedMergeFixture(['orphan'], 2)
+  const target = (await git('rev-parse', 'main')).stdout
+  const crash = vi.spyOn(MergeBatchRegistry.prototype, 'admit').mockRejectedValue(new Error('Crash before registration'))
+  await running.reconcile()
+  expect(running.view().submissions[0]!.phase).toBe('queued')
+  expect((await git('rev-parse', 'main')).stdout).toBe(target)
+  await running.reconcile()
+  expect(await readdir(join(config.directory, 'merge-batches'))).toHaveLength(1)
+  expect((await git('rev-parse', 'main')).stdout).toBe(target)
+  await running.close()
+  crash.mockRestore()
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...batchExecution,
+    integrationBatching: { mode: 'ordered', maxCandidates: 1, maxSplitAttempts: 1 } } })
+  cleanup.push(() => restored.close())
+  expect(restored.view().submissions[0]!.phase).toBe('accepted')
+  expect(ctx.agentTeams.listIntegrations(lead)[0]!.phase).toBe('merged')
+  expect((await git('show', 'main:orphan.txt')).stdout).toBe('orphan')
+})
+
+it('reopens a batch with a rejected predecessor before materializing the good member receipt', async () => {
+  const { running, ctx, lead, config, tasks, git, batchExecution } = await queuedMergeFixture(['bad', 'good'], 2)
+  const crash = vi.spyOn(ctx.agentTeams, 'runIntegration').mockRejectedValueOnce(new Error('Crash before good job receipt'))
+  await running.reconcile()
+  expect(ctx.agentTeams.listIntegrations(lead).map(job => job.phase)).toEqual(['failed', 'queued'])
+  expect(running.view().submissions.map(submission => submission.phase)).toEqual(['queued', 'queued'])
+  expect((await git('ls-tree', '--name-only', 'main')).stdout.split('\n')).toEqual(['good.txt', 'shared.txt'])
+  const promotions = (await git('reflog', 'show', '--format=%H', 'main')).stdout
+  await running.close()
+  crash.mockRestore()
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: batchExecution })
+  cleanup.push(() => restored.close())
+  expect(restored.view().submissions.map(submission => submission.phase)).toEqual(['queued', 'accepted'])
+  expect(ctx.agentTeams.listIntegrations(lead).map(job => job.phase)).toEqual(['failed', 'merged'])
+  expect(tasks.map(task => ctx.agentTeams.getTask(lead, task.id).status)).toEqual(['pending', 'completed'])
+  expect((await git('show', 'main:good.txt')).stdout).toBe('good')
+  expect((await git('reflog', 'show', '--format=%H', 'main')).stdout).toBe(promotions)
 })

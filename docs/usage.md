@@ -232,3 +232,57 @@ Workspace history retains at most 32 process-local snapshots, with up to 8,192 r
 
 
 Workspace overview and attempt history show provider-reported input, cached input, output and reasoning tokens when available. Missing counts display as unknown, reported zero remains zero, and cost stays unknown because no price is inferred.
+
+## Ordered integration batching
+
+Sequential integration is the default: omit `execution.integrationBatching`.
+For bounded ordered batches, add this to the coordinator plugin configuration:
+
+```yaml
+execution:
+  modelProvider: YOUR_PROVIDER
+  model: YOUR_MODEL
+  maxConcurrent: 8
+  integrationBatching:
+    mode: ordered
+    maxCandidates: 8
+    maxSplitAttempts: 16
+```
+
+`maxCandidates` accepts 1–64 submissions; `maxSplitAttempts` accepts 1–256
+candidate compositions, including the initial verification. Each batch groups
+one canonical repository, target branch, and verification command policy. Every
+changed composition is verified against the current target under the shared Git
+integration lock. Failed compositions are split within the persisted budget;
+independent passing changes can land while failed changes and their dependents
+retain diagnostics and unaccepted task states. Model completion alone does not
+accept a code task.
+
+The host `coordinator.submit(lead, projectId, request)` operation accepts
+`dependsOn: [submissionId]` for explicit prerequisites that are already queued or
+accepted. These are submission IDs, not task IDs or integration job IDs. A
+prerequisite and its dependent can be verified together in their original order;
+an excluded prerequisite blocks the dependent. Accepted prerequisites must still
+be present in the target. Candidate-review jobs keep their individual review
+receipts and use sequential integration, including prerequisite acceptance.
+
+Active batch membership and its split budget survive restart and configuration
+changes. Removing batching returns new work to sequential execution; finish
+active batches before changing this mode. Batch acceptance is recorded separately
+for every task, so a restart between task receipts resumes the remaining receipts
+without promoting the target twice.
+
+Batch journals and composition worktrees are retained for diagnosis; the normal
+candidate-retention policy does not currently prune these batch artifacts. A
+crash before registry admission can leave an unpromoted orphan journal. Repeated
+admission failures reuse that journal within the running coordinator; a restart
+can retain the orphan and admit a fresh batch. These orphan journals hold no live
+ownership after close and do not authorize promotion.
+
+After batch promotion, each accepted member re-enters the normal integration
+pipeline to create its individual job receipt. This currently repeats verification
+against the promoted target. A failure in that later check or receipt step leaves
+a durable blocker even though the batch commit has already landed; inspect both
+the target and the per-task receipt when diagnosing this state. Batch rejection
+before promotion and failure while materializing a promoted receipt are distinct
+outcomes.

@@ -30,6 +30,30 @@ async function setup(verification: TeamVerificationCommand[] = [verifiesOutput])
 }
 
 describe('verified Git Team integration', () => {
+  it('verifies an ordered stack of immutable source commits in one isolated candidate', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const provider = new GitIntegrationProvider({
+      providerName: 'git', targetBranch: 'main', verification: [{ command: process.execPath, args: ['-e', "const fs=require('node:fs');if(!fs.existsSync('first.txt')||!fs.existsSync('second.txt'))process.exit(1)"] }],
+      commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000,
+    })
+    const source = async (name: string, file: string) => {
+      const memberId = SessionId(name)
+      const worktree = await fixture.provider.resolve(fixture.repository, memberId, signal)
+      await fixture.provider.provision(worktree, signal)
+      await writeFile(join(worktree.cwd, file), `${name}\n`)
+      await execa('git', ['-C', worktree.cwd, 'add', file])
+      await execa('git', ['-C', worktree.cwd, 'commit', '-m', name])
+      return await provider.resolve({ ...worktree, memberId, provider: 'git', phase: 'ready' }, `${name}-job` as TeamIntegrationId, signal)
+    }
+    const first = await source('first', 'first.txt')
+    const second = await source('second', 'second.txt')
+    const target = await provider.target(first, signal)
+    const candidate = await provider.verifyStack([first, second], target, join(fixture.repository, '..', 'integration-stack'), signal)
+    await provider.promote(first, target, candidate, signal)
+    expect(await readFile(join(fixture.repository, 'first.txt'), 'utf8')).toBe('first\n')
+    expect(await readFile(join(fixture.repository, 'second.txt'), 'utf8')).toBe('second\n')
+  })
+
   it('verifies the pinned worker commit separately and recognizes a previously promoted candidate', async () => {
     const { repository, worktree, provider, spec, git } = await setup()
     const target = await provider.target(spec, signal)

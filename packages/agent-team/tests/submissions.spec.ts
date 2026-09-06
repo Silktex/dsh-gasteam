@@ -28,6 +28,16 @@ it('replays pending intent with immutable policy and the same integration identi
     await expect(restored.submit({ ...input, ...patch })).rejects.toThrow(/immutable inputs/)
   }
 })
+it('persists exact cross-team prerequisite identities with the submission intent', async () => {
+  const { directory, store, input } = await fixture()
+  const dependencies = [{ submissionId: 'prior-submission', projectId: 'other-project', teamId: 'other-team', taskId: 'other-task', sourceCommit: 'b'.repeat(40), state: 'accepted' as const }]
+  const pending = await store.submit({ ...input, dependencies })
+  await store.close()
+  const restored = await SubmissionStore.open(directory)
+  cleanup.push(() => restored.close())
+  expect(restored.list()).toEqual([expect.objectContaining({ id: pending.id, dependencies })])
+  await expect(restored.submit({ ...input, dependencies: [{ ...dependencies[0]!, taskId: 'different-task' }] })).rejects.toThrow(/immutable inputs/)
+})
 it('rejects a second writer and malformed source references', async () => {
   const { directory, store, input } = await fixture()
   await expect(SubmissionStore.open(directory)).rejects.toThrow(/already owned/)

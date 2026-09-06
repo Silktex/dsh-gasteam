@@ -178,14 +178,16 @@ export class TeamIntegrations {
    * @param signal - execution cancellation.
    * @returns the resulting record, or undefined for an empty queue.
    */
-  async run(membership: TeamMembership, signal: AbortSignal): Promise<TeamIntegrationSnapshot | undefined> {
+  async run(membership: TeamMembership, signal: AbortSignal, id?: TeamIntegrationId): Promise<TeamIntegrationSnapshot | undefined> {
     this.assertLead(membership)
     const { root } = membership
     if (this.running.has(root.id)) throw new TeamError('Team integration runner is busy', 'TEAM_INTEGRATION_BUSY')
     this.running.add(root.id)
     let release: (() => Promise<void>) | undefined
     try {
-      let job = this.list(membership).find(candidate => candidate.phase !== 'merged' && candidate.phase !== 'failed')
+      let job = id === undefined
+        ? this.list(membership).find(candidate => candidate.phase !== 'merged' && candidate.phase !== 'failed')
+        : this.list(membership).find(candidate => candidate.id === id && candidate.phase !== 'merged' && candidate.phase !== 'failed')
       if (job === undefined) return undefined
       const provider = this.provider(job.provider)
       release = await acquireIntegrationOwnership(job.repository, job.targetBranch, signal)

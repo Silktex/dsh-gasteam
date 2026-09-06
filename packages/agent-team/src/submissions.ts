@@ -6,16 +6,21 @@ import z from 'zod'
 import { DurableJournal } from './durable-journal.ts'
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+const dependencySchema = z.object({ submissionId: id, projectId: id, teamId: id, taskId: id,
+  sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), state: z.enum(['queued', 'accepted']) }).strict()
 export const submitRequestSchema = z.object({
   attemptId: id, generation: positive, expectedRevision: positive,
   sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/), evidence: z.string().trim().min(1).max(16_384),
   /** Immutable host-only workflow gate copied from the durable task before admission. */
   reviewGate: id.optional(),
+  /** Durable integration submissions which this source explicitly requires. */
+  dependsOn: z.array(id).max(64).default([]),
 }).strict()
-export type SubmitRequest = z.infer<typeof submitRequestSchema>
-const inputSchema = submitRequestSchema.extend({
+export type SubmitRequest = z.input<typeof submitRequestSchema>
+const inputSchema = submitRequestSchema.omit({ dependsOn: true }).extend({
   projectId: id, teamId: id, taskId: id, runtimeId: id, repository: z.string().min(1), targetBranch: z.string().min(1),
   verification: z.object({ revision: positive, commands: z.array(z.object({ command: z.string().min(1), args: z.array(z.string()) }).strict()).min(1) }).strict(),
+  dependencies: z.array(dependencySchema).max(64).default([]),
 }).strict()
 export type SubmissionInput = z.infer<typeof inputSchema>
 export interface SubmissionRecord extends SubmissionInput { id: string; integrationId: string; phase: 'pending' | 'queued' | 'accepted' }
