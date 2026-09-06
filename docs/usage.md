@@ -227,3 +227,6 @@ Delivery uses one reserved durable Team message ID; replay cannot consume anothe
 
 
 Workspace history retains at most 32 process-local snapshots, with up to 8,192 rows and 4 MiB retained in memory. A larger requested collection uses private temporary chunk files; continuation reads only the requested chunks. Initial capture still materializes the coordinator projection. Normal coordinator shutdown and eviction remove owned snapshot files. Cursors are tied to the authenticated operator and collection; they are not durable bookmarks. Nested workflow steps and blocker details retain their explicit per-row limits.
+
+
+Workspace overview and attempt history show provider-reported input, cached input, output and reasoning tokens when available. Missing counts display as unknown, reported zero remains zero, and cost stays unknown because no price is inferred.

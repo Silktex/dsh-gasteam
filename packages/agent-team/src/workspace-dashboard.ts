@@ -8,11 +8,19 @@ const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const diagnostic = z.string().trim().min(1).max(16_384)
 
 const projectSchema = z.object({ id, revision, paused: z.boolean(), capacity: revision, active: revision }).strip()
+/** Provider receipts are immutable, attributable counts. Their absence remains unknown. */
+const externalUsageSchema = z.object({
+  provider: z.literal('external'), attemptId: id, generation: positive, runtimeRevision: positive,
+  inputTokens: revision.optional(), cachedInputTokens: revision.optional(), outputTokens: revision.optional(), reasoningOutputTokens: revision.optional(),
+}).strip().refine(value => value.inputTokens !== undefined || value.cachedInputTokens !== undefined || value.outputTokens !== undefined || value.reasoningOutputTokens !== undefined, 'External usage needs a reported token count')
 const attemptSchema = z.object({
   attemptId: id, generation: positive, revision: positive, projectId: id, teamId: id, taskId: id,
   phase: z.enum(['reserved', 'active', 'stopping', 'terminal']),
   progress: z.object({ classification: z.enum(['progressing', 'idle', 'dependency-wait', 'operator-wait', 'stale', 'unavailable', 'failed']), certainty: z.enum(['known', 'uncertain']), observedAt: timestamp }).strip().optional(),
-}).strip()
+  externalUsage: externalUsageSchema.optional(),
+}).strip().superRefine((value, ctx) => {
+  if (value.externalUsage !== undefined && (value.externalUsage.attemptId !== value.attemptId || value.externalUsage.generation !== value.generation)) ctx.addIssue({ code: 'custom', path: ['externalUsage'], message: 'External usage must bind to the attempt generation' })
+})
 const workflowStepSchema = z.object({ stepId: id, revision: positive, phase: z.enum(['pending', 'running', 'completed', 'failed']), taskId: id.optional() }).strip()
 const workflowSchema = z.object({ executionId: id, projectId: id, teamId: id, steps: z.array(workflowStepSchema) }).strip()
 const batchSchema = z.object({ id, phase: z.enum(['active', 'blocked', 'failed', 'completed']), required: positive, completedRequired: revision, completionEpoch: revision }).strip()

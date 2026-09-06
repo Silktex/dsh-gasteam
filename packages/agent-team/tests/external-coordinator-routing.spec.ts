@@ -64,7 +64,7 @@ async function exerciseRoute(Coordinator: typeof WorkspaceCoordinator): Promise<
   const { repo, ctx, lead, config, coordinator } = await setup(Coordinator)
   const task = await coordinator.acceptTask(lead, 'project', { subject: 'descendant', description: 'Keep an owned descendant alive until cancellation', nonCodeCriteria: 'Return a report only if completed' })
   await coordinator.close()
-  const first = await Coordinator.open(ctx, { ...config, execution: execution(repo.root, repo.repository) })
+  const first = await Coordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution: execution(repo.root, repo.repository) })
   let closedFirst = false
   cleanup.push(async () => { if (!closedFirst) await first.close() })
   await waitFor(async () => {
@@ -76,6 +76,9 @@ async function exerciseRoute(Coordinator: typeof WorkspaceCoordinator): Promise<
   })
   const launched = first.view().attempts.find(item => item.taskId === task.id)!
   expect(launched).toMatchObject({ provider: 'external', phase: 'active', externalPolicy: { projectId: 'project', admission: { cwd: repo.repository, model: 'gpt-5.6-codex', executableVerification: 'verified' }, maxSpoolBytes: 65_536, terminateGraceMs: 50 }, checkpoint: { task: { nonCodeCriteria: 'Return a report only if completed' } } })
+  const assignments = ((first as unknown as { execution: { assignments: AssignmentStore } }).execution).assignments
+  await assignments.externalUsage({ attemptId: launched.attemptId, generation: launched.generation, expectedRevision: launched.revision }, { provider: 'external', attemptId: launched.attemptId, generation: launched.generation, runtimeRevision: 1, inputTokens: 0, outputTokens: 3 })
+  expect(first.workspaceDashboard(lead).attempts.find(item => item.attemptId === launched.attemptId)?.externalUsage).toEqual({ provider: 'external', attemptId: launched.attemptId, generation: launched.generation, runtimeRevision: 1, inputTokens: 0, outputTokens: 3 })
   expect(ctx.agents.get(SessionId(launched.runtimeId))).toBeUndefined()
   // A coincident DSH session must not supply liveness or sequence progress to
   // an external assignment: only its external supervisor/store can do that.
@@ -92,7 +95,7 @@ async function exerciseRoute(Coordinator: typeof WorkspaceCoordinator): Promise<
   await first.close()
   closedFirst = true
 
-  const restored = await Coordinator.open(ctx, { ...config, execution: execution(repo.root, repo.repository) })
+  const restored = await Coordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution: execution(repo.root, repo.repository) })
   cleanup.push(() => restored.close())
   await restored.reconcile()
   const interrupted = restored.view().attempts.find(item => item.attemptId === launched.attemptId)!

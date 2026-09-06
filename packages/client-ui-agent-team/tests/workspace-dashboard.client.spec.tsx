@@ -38,6 +38,39 @@ describe('WorkspaceDashboard', () => {
     expect(await screen.findByText(en['dashboard.progress.unobserved'])).toBeTruthy()
   })
 
+  it('renders provider-reported usage without estimating cost, including exact zero counts', async () => {
+    const reported: WorkspaceDashboardView = { ...view, attempts: [{ ...view.attempts[0]!, externalUsage: { provider: 'external', attemptId: 'attempt-api', generation: 1, runtimeRevision: 9, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 } }] }
+    const page: WorkspaceDashboardPage = { collection: 'attempts', snapshotRevision: 'a'.repeat(64), items: reported.attempts, truncated: false }
+    const projects: WorkspaceDashboardPage = { collection: 'projects', snapshotRevision: 'a'.repeat(64), items: reported.projects, truncated: false }
+    const loadPage = vi.fn().mockResolvedValueOnce({ ok: true, value: projects }).mockResolvedValueOnce({ ok: true, value: page })
+    render(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok(reported)} loadPage={loadPage} t={english} />)
+    await screen.findByText('attempt-api')
+    fireEvent.change(screen.getByLabelText(en['dashboard.pageCollection']), { target: { value: 'attempts' } })
+    await vi.waitFor(() => expect(screen.getAllByText('Input: 0')).toHaveLength(2))
+    expect(screen.getAllByText('Cached input: 0')).toHaveLength(2)
+    expect(screen.getAllByText('Output: 0')).toHaveLength(2)
+    expect(screen.getAllByText('Reasoning output: 0')).toHaveLength(2)
+    expect(screen.getAllByText('Cost unknown')).toHaveLength(2)
+    expect(screen.queryByText(/estimated/i)).toBeNull()
+  })
+
+  it('labels absent provider usage as unknown and never lets a late B usage receipt leak into A', async () => {
+    const firstA = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardView }>()
+    const pendingB = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardView }>()
+    const freshA = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardView }>()
+    const load = vi.fn().mockImplementationOnce(() => firstA.promise).mockImplementationOnce(() => pendingB.promise).mockImplementationOnce(() => freshA.promise)
+    const rendered = render(<WorkspaceDashboard sessionId={SESSION_A} load={load} t={english} />)
+    firstA.resolve({ ok: true, value: view })
+    expect(await screen.findByText(/Usage unknown/)).toBeTruthy()
+    rendered.rerender(<WorkspaceDashboard sessionId={SESSION_B} load={load} t={english} />)
+    rendered.rerender(<WorkspaceDashboard sessionId={SESSION_A} load={load} t={english} />)
+    pendingB.resolve({ ok: true, value: { ...view, attempts: [{ ...view.attempts[0]!, externalUsage: { provider: 'external', attemptId: 'attempt-api', generation: 1, runtimeRevision: 11, inputTokens: 444 } }] } })
+    await Promise.resolve()
+    expect(screen.queryByText('Input: 444')).toBeNull()
+    freshA.resolve({ ok: true, value: view })
+    expect(await screen.findByText(/Usage unknown/)).toBeTruthy()
+  })
+
   it('clears a stale selected project and attempt after a newer dashboard result', async () => {
     const first = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardView }>()
     const load = vi.fn().mockImplementationOnce(() => first.promise).mockResolvedValueOnce({ ok: true, value: { ...view, projects: [], attempts: [] } })

@@ -23,6 +23,14 @@ function Truncation({ value, t }: { readonly value: boolean; readonly t: Workspa
 function stateLabel(t: WorkspaceDashboardProps['t'], prefix: 'attempt' | 'workflow' | 'batch' | 'queue' | 'integration', value: string): string {
   return t(`dashboard.${prefix}.${value}` as TeamKey)
 }
+function Usage({ usage, t }: { readonly usage: WorkspaceDashboardView['attempts'][number]['externalUsage']; readonly t: WorkspaceDashboardProps['t'] }) {
+  if (usage === undefined) return <span>{t('dashboard.usage.unknown')} · {t('dashboard.usage.costUnknown')}</span>
+  const counts: [TeamKey, number | undefined][] = [
+    ['dashboard.usage.input', usage.inputTokens], ['dashboard.usage.cachedInput', usage.cachedInputTokens],
+    ['dashboard.usage.output', usage.outputTokens], ['dashboard.usage.reasoningOutput', usage.reasoningOutputTokens],
+  ]
+  return <>{counts.filter(([, value]) => value !== undefined).map(([label, value]) => <span key={label}>{t(label)}: {value}</span>)}<span>{t('dashboard.usage.costUnknown')}</span></>
+}
 
 /**
  * Presents only the browser-safe workspace projection. Its `load` capability is
@@ -143,7 +151,7 @@ export function WorkspaceDashboard({ sessionId, load, loadPage, t }: WorkspaceDa
       </DashboardSection>
       <DashboardSection title={t('dashboard.attempts')} truncated={view.attemptsTruncated} t={t}>
         {visibleAttempts.map(attempt => <button key={attempt.attemptId} type="button" className={css.row} aria-pressed={attempt.attemptId === attemptId} onClick={() => { setAttemptId(attempt.attemptId); setNotice(null) }}>
-          <strong>{attempt.attemptId}</strong><span>{attempt.projectId}/{attempt.taskId}</span><span>{stateLabel(t, 'attempt', attempt.phase)}</span><span>{attempt.progress === undefined ? t('dashboard.progress.unobserved') : `${t(`dashboard.progress.${attempt.progress.classification}` as TeamKey)} · ${t(`dashboard.progress.${attempt.progress.certainty}`)}`}</span>
+          <strong>{attempt.attemptId}</strong><span>{attempt.projectId}/{attempt.taskId}</span><span>{stateLabel(t, 'attempt', attempt.phase)}</span><span>{attempt.progress === undefined ? t('dashboard.progress.unobserved') : `${t(`dashboard.progress.${attempt.progress.classification}` as TeamKey)} · ${t(`dashboard.progress.${attempt.progress.certainty}`)}`}</span><Usage usage={attempt.externalUsage} t={t} />
         </button>)}
       </DashboardSection>
       <DashboardSection title={t('dashboard.workflows')} truncated={view.workflowsTruncated} t={t}>
@@ -170,7 +178,7 @@ export function WorkspaceDashboard({ sessionId, load, loadPage, t }: WorkspaceDa
 function PageRows({ page, t }: { readonly page: WorkspaceDashboardPage; readonly t: WorkspaceDashboardProps['t'] }) {
   const items = page.items
   let rows: ReactNode
-  if (page.collection === 'attempts') rows = (items as WorkspaceDashboardView['attempts']).map(item => <article key={item.attemptId} className={css.card}><strong>{item.attemptId}</strong><span>{item.projectId}/{item.taskId}</span><span>{stateLabel(t, 'attempt', item.phase)}</span><span>{item.progress === undefined ? t('dashboard.progress.unobserved') : `${t(`dashboard.progress.${item.progress.classification}` as TeamKey)} · ${t(`dashboard.progress.${item.progress.certainty}` as TeamKey)}`}</span></article>)
+  if (page.collection === 'attempts') rows = (items as WorkspaceDashboardView['attempts']).map(item => <article key={item.attemptId} className={css.card}><strong>{item.attemptId}</strong><span>{item.projectId}/{item.taskId}</span><span>{stateLabel(t, 'attempt', item.phase)}</span><span>{item.progress === undefined ? t('dashboard.progress.unobserved') : `${t(`dashboard.progress.${item.progress.classification}` as TeamKey)} · ${t(`dashboard.progress.${item.progress.certainty}` as TeamKey)}`}</span><Usage usage={item.externalUsage} t={t} /></article>)
   else if (page.collection === 'workflows') rows = (items as WorkspaceDashboardView['workflows']).map(item => <article key={item.executionId} className={css.card}><strong>{item.executionId}</strong>{item.steps.map(step => <span key={step.stepId}>{step.stepId} · {stateLabel(t, 'workflow', step.phase)}</span>)}<Truncation value={item.stepsTruncated} t={t} /></article>)
   else if (page.collection === 'integrations') rows = (items as WorkspaceDashboardView['integrations']).map(item => <article key={item.integrationId} className={css.card}><strong>{item.integrationId}</strong><span>{stateLabel(t, 'integration', item.phase)} · {item.projectId}/{item.teamId}</span><span>{item.sourceCommit}</span>{item.diagnostic === undefined ? null : <p>{item.diagnostic}</p>}</article>)
   else if (page.collection === 'escalations') rows = (items as WorkspaceDashboardView['escalations']).map(item => <article key={item.id} className={css.card}><strong>{t(`health.severity.${item.severity}` as TeamKey)} · {t(`health.condition.${item.condition}` as TeamKey)}</strong><span>{item.projectId}/{item.taskId} · {item.attemptId}</span><p>{item.diagnostics}</p></article>)

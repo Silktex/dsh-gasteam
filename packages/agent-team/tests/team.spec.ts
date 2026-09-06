@@ -2019,18 +2019,17 @@ describe('Team mailbox and waiting', () => {
     vi.useFakeTimers()
     try {
       const first = internal.disposeRuntime()
-      // The fake deadline fires before the assertion is attached below.
-      void first.catch(() => undefined)
+      const timedOut = expect(first).rejects.toBeInstanceOf(AggregateError)
       await vi.advanceTimersByTimeAsync(25)
-      await expect(first).rejects.toBeInstanceOf(AggregateError)
+      await timedOut
       expect(aborts).toBe(1)
       expect(ctx.agents.get(started.member.id)).toBeDefined()
+      release.resolve(undefined)
+      await expect(sending).resolves.toMatchObject({ status: 'queued' })
+      await internal.disposeRuntime()
+      expect(aborts).toBe(1)
+      expect(ctx.agents.get(started.member.id)).toBeUndefined()
     } finally { vi.useRealTimers() }
-    release.resolve(undefined)
-    await expect(sending).resolves.toMatchObject({ status: 'queued' })
-    await internal.disposeRuntime()
-    expect(aborts).toBe(1)
-    expect(ctx.agents.get(started.member.id)).toBeUndefined()
   })
 
   it('joins an unresolved child drain on a later close without repeating provider cancellation', async () => {

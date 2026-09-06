@@ -7,7 +7,7 @@ const input = {
     { id: 'web', revision: 3, paused: true, capacity: 1, active: 0 },
   ],
   attempts: [
-    { attemptId: 'attempt-api', generation: 1, revision: 4, projectId: 'api', teamId: 'lead-api', taskId: 'task-api', phase: 'active', progress: { classification: 'progressing', certainty: 'known', observedAt: 10, cursor: 'secret-tool-output' }, prompt: 'do not expose' },
+    { attemptId: 'attempt-api', generation: 1, revision: 4, projectId: 'api', teamId: 'lead-api', taskId: 'task-api', phase: 'active', progress: { classification: 'progressing', certainty: 'known', observedAt: 10, cursor: 'secret-tool-output' }, externalUsage: { provider: 'external', attemptId: 'attempt-api', generation: 1, runtimeRevision: 7, inputTokens: 0, cachedInputTokens: 4, outputTokens: 0, reasoningOutputTokens: 2, estimatedCost: 99, rawReceipt: 'secret-provider-receipt' }, prompt: 'do not expose' },
     { attemptId: 'attempt-web', generation: 1, revision: 1, projectId: 'web', teamId: 'lead-web', taskId: 'task-web', phase: 'terminal', progress: { classification: 'unavailable', certainty: 'uncertain', observedAt: 11 } },
   ],
   workflows: [{ executionId: 'workflow-api', projectId: 'api', teamId: 'lead-api', steps: [
@@ -26,13 +26,20 @@ it('projects an operator-safe dashboard and strips prompts, paths, credentials, 
   const view = projectWorkspaceDashboard(input)
   expect(view.projectsTruncated).toBe(false)
   expect(view.attempts[0]).toMatchObject({ attemptId: 'attempt-api', phase: 'active', progress: { classification: 'progressing', certainty: 'known', observedAt: 10 } })
+  expect(view.attempts[0]?.externalUsage).toEqual({ provider: 'external', attemptId: 'attempt-api', generation: 1, runtimeRevision: 7, inputTokens: 0, cachedInputTokens: 4, outputTokens: 0, reasoningOutputTokens: 2 })
   expect(view.workflows[0]?.executionId).toBe('workflow-api')
   expect(view.workflows[0]?.steps[0]).toMatchObject({ stepId: 'implement', taskId: 'task-api' })
   expect(view.batches[0]).toMatchObject({ id: 'release', completedRequired: 1, required: 2 })
   expect(view.queue[0]).toMatchObject({ blockers: [{ code: 'workspace-batch-dependency' }] })
   expect(view.integrations[0]).toMatchObject({ integrationId: 'integration-api', phase: 'failed', failureKind: 'verification', diagnostic: 'Checks failed.' })
   expect(view.escalations[0]).toMatchObject({ severity: 'warning', diagnostics: 'No durable checkpoint.' })
-  expect(JSON.stringify(view)).not.toMatch(/private|secret|prompt|repository|token|cursor|report/i)
+  expect(JSON.stringify(view)).not.toMatch(/private|secret|prompt|repository|cursor|report|estimatedCost|rawReceipt/i)
+})
+
+it('preserves missing provider usage as unknown and rejects a receipt attributed to another attempt generation', () => {
+  const unknown = projectWorkspaceDashboard({ ...input, attempts: [{ ...input.attempts[1], externalUsage: undefined }], workflows: [], batches: [], queue: [], integrations: [], escalations: [] })
+  expect(unknown.attempts[0]?.externalUsage).toBeUndefined()
+  expect(() => projectWorkspaceDashboard({ ...input, attempts: [{ ...input.attempts[0], externalUsage: { provider: 'external', attemptId: 'attempt-api', generation: 2, runtimeRevision: 7, inputTokens: 1 } }] })).toThrow(/generation/i)
 })
 
 it('bounds every dashboard collection, workflow step, and queue blocker list with explicit truncation', () => {
