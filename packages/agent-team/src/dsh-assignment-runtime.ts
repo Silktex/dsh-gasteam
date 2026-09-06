@@ -54,9 +54,17 @@ export class DshAssignmentRuntime {
         }, record.runtimeId)
         return await this.assignments.activate(tokenOf(record))
       } catch (error) {
-        // Provisioning failure is durable and still occupies capacity until the provider confirms quiescence.
-        const stopping = await this.assignments.stop(tokenOf(record), `DSH admission failed: ${error instanceof Error ? error.message : String(error)}`)
-        await this.retireAfterDrain(lead, stopping)
+        const diagnostic = `DSH admission failed: ${error instanceof Error ? error.message : String(error)}`
+        const retryable = this.retryability(diagnostic)
+        if (retryable === undefined) throw new Error(`Provisioning ownership is uncertain; preserve the reservation: ${diagnostic}`)
+        await this.drain(lead, [record.runtimeId])
+        if (this.ctx.agents.get(SessionId(record.runtimeId)) !== undefined) throw new Error('Provisioning ownership is uncertain; preserve the reservation')
+        // A rejected spawn may still have created then drained a child. The
+        // drain proves quiescence, not that the provider never started it.
+        const priorFailures = this.assignments.list().filter(candidate => candidate.projectId === record.projectId
+          && candidate.teamId === record.teamId && candidate.taskId === record.taskId && candidate.provisioning !== undefined).length
+        await this.assignments.provisionFailed(tokenOf(record), { runtimeId: record.runtimeId, kind: 'stopped', receipt: `dsh/provision-drained:${lead.id}:${record.runtimeId}` }, diagnostic,
+          nextAssignmentRetryAt(record.retryPolicy, priorFailures, this.clock()), retryable)
         throw error
       }
     })
@@ -140,6 +148,13 @@ export class DshAssignmentRuntime {
       ...(record.repair ? { repair: record.repair } : {}),
       instruction: 'Execute the checkpoint and report evidence. Your report is not task acceptance; verification and integration are separate obligations.',
     })
+  }
+
+  /** Only a classified admission outcome may free a never-started reservation. */
+  private retryability(diagnostic: string): boolean | undefined {
+    if (/\bauth(?:entication|orization)?\b|\binvalid\b|\bpolicy\b|\bunsupported\b|\bnot found\b/i.test(diagnostic)) return false
+    if (/\btemporary\b|\btimed? ?out\b|\b(?:econn|network|connection|rate limit)\b|\b(?:provider|spawn|fork) (?:failed|unavailable)\b/i.test(diagnostic)) return true
+    return undefined
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {

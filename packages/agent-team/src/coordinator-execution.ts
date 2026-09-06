@@ -384,9 +384,16 @@ export class CoordinatorExecution {
         || this.reports.list().some(report => report.attemptId === attempt.attemptId && report.phase === 'accepted')) return { ...request, state: 'accepted', attemptId: attempt.attemptId, blockers: [] }
       const interruptionExhausted = attempt.interruption !== undefined && attempt.interruption.count >= (attempt.repairLimit ?? 0)
       if (interruptionExhausted) block('recovery-required', `Coordinator interruption retry budget exhausted (${attempt.repairLimit ?? 0})`)
-      if (!repair && attempt.interruption === undefined && attempt.phase === 'terminal' && request.cancelReason === undefined) block(attempt.result && !attempt.stopReason && !failure ? 'awaiting-acceptance' : 'recovery-required',
+      if (!repair && attempt.interruption === undefined && attempt.provisioning === undefined && attempt.phase === 'terminal' && request.cancelReason === undefined) block(attempt.result && !attempt.stopReason && !failure ? 'awaiting-acceptance' : 'recovery-required',
         failure?.diagnostic ?? (attempt.result && !attempt.stopReason ? 'Worker report awaits verified task acceptance' : attempt.stopReason ?? 'Attempt stopped; explicit recovery is required'))
-      if ((!repair && attempt.interruption === undefined) || interruptionExhausted) return { ...request, state: attempt.phase === 'terminal' ? request.cancelReason === undefined ? 'finished' : 'cancelled' : 'assigned', attemptId: attempt.attemptId, blockers }
+      const provisioningExhausted = attempt.provisioning !== undefined && (!attempt.provisioning.retryable || attempt.provisioning.count > attempt.retryPolicy.maxAttempts)
+      if (provisioningExhausted) block('recovery-required', attempt.provisioning!.retryable
+        ? `Provisioning retry budget exhausted (${attempt.retryPolicy.maxAttempts})`
+        : 'Provisioning failure is not retryable; explicit operator recovery is required')
+      if (attempt.provisioning && !provisioningExhausted && now < attempt.provisioning.notBefore) block('pacing', `Provisioning retry cannot precede ${attempt.provisioning.notBefore}`)
+      if ((!repair && attempt.interruption === undefined && (attempt.provisioning === undefined || provisioningExhausted)) || interruptionExhausted) {
+        return { ...request, state: attempt.phase === 'terminal' ? request.cancelReason === undefined ? 'finished' : 'cancelled' : 'assigned', attemptId: attempt.attemptId, blockers }
+      }
     }
     if (this.shutdownRequested) block('shutdown', 'Coordinator shutdown has started')
     if (!this.config) block('execution-disabled', 'Coordinator execution is disabled')
@@ -535,7 +542,7 @@ export class CoordinatorExecution {
       try {
         const previous = this.assignments.list().findLast(record => sameWork(record, work))
         const repair = previous ? this.repairFor(previous) : undefined
-        if (previous && !repair && previous.interruption === undefined) throw new Error('Previous attempt is not eligible for repair')
+        if (previous && !repair && previous.interruption === undefined && previous.provisioning === undefined) throw new Error('Previous attempt is not eligible for repair')
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
           workerId: randomUUID(), runtimeId: randomUUID(), provider: this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
@@ -558,7 +565,10 @@ export class CoordinatorExecution {
         if (record !== undefined && !startInvoked) await this.assignments.retire(token(record), {
           runtimeId: record.runtimeId, kind: 'never-started', receipt: 'coordinator/pre-start-failure',
         })
-        await this.block(work, error)
+        const persisted = record === undefined ? undefined : this.assignments.list().find(item => item.attemptId === record!.attemptId)
+        // A classified never-started failure already carries its durable
+        // diagnostic and deadline. A generic block would fence its retry.
+        if (persisted?.provisioning?.retryable !== true) await this.block(work, error)
       }
     }
     await this.scanHealth(views)

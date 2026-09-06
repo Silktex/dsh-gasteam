@@ -365,6 +365,48 @@ it('mounts the server plugin with awaited startup and releases its service and o
 })
 
 const execution = { modelProvider: 'mock', model: 'mock', maxConcurrent: 2 }
+
+it('reopens only a positively never-started provision failure at its durable retry deadline', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.acceptTask(lead, 'project', { subject: 'Retry provision', description: 'Wait for the persisted retry deadline' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  let now = 1_000
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const spawn = vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('temporary provider unavailable'))
+  try {
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxConcurrent: 1,
+      retryPolicy: { maxAttempts: 1, initialDelayMs: 50, multiplier: 2, maxDelayMs: 100 } } })
+    cleanup.push(() => running.close())
+    expect(running.view().attempts).toMatchObject([{ phase: 'terminal', provisioning: { count: 1, notBefore: 1_050, retryable: true } }])
+    await running.reconcile()
+    expect(running.view().attempts).toHaveLength(1)
+    expect(running.view().dispatchStatus[0]).toMatchObject({ state: 'waiting', blockers: expect.arrayContaining([expect.objectContaining({ code: 'pacing' })]) })
+    now = 1_050
+    expect(running.view().dispatchStatus[0]).toMatchObject({ state: 'ready', blockers: [] })
+    await running.reconcile()
+    expect(running.view().attempts).toHaveLength(2)
+    expect(running.view().attempts.at(-1)).toMatchObject({ generation: 2, phase: 'active' })
+  } finally { spawn.mockRestore(); clock.mockRestore() }
+})
+
+it('keeps a non-retryable provision failure terminal after later reconciliations', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.acceptTask(lead, 'project', { subject: 'No credential retry', description: 'Credentials require operator repair' })
+  await coordinator.close()
+  const spawn = vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('authentication policy rejected'))
+  try {
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxConcurrent: 1 } })
+    cleanup.push(() => running.close())
+    expect(running.view().attempts).toMatchObject([{ phase: 'terminal', provisioning: { retryable: false } }])
+    await running.reconcile()
+    expect(running.view().attempts).toHaveLength(1)
+    expect(running.view().dispatchStatus[0]).toMatchObject({ state: 'finished', blockers: expect.arrayContaining([expect.objectContaining({ code: 'recovery-required' })]) })
+  } finally { spawn.mockRestore() }
+})
+
 it('restores a Lead-scoped health inbox and acknowledges it with a durable revision fence', async () => {
   const { config, coordinator, lead, request, ctx } = await fixture()
   await coordinator.register(lead, request)
@@ -850,8 +892,15 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   ctx.provide('workspaceCoordinator', coordinator)
   const plugin = await ctx.plugin(CoordinatorTools)
   let calls = 0
+  const transcript: { tool: string; input: unknown; result: { error: boolean; payload: unknown } }[] = []
   const call = (name: string, args: unknown, agent = lead) => ctx.tools.execute({
     callId: ToolCallId(`scheduling-${++calls}`), name, arguments: args, agent, signal: new AbortController().signal,
+  }).then(result => {
+    const text = result.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+    let payload: unknown = text
+    try { payload = JSON.parse(text) } catch {}
+    transcript.push({ tool: name, input: args, result: { error: result.isError === true, payload } })
+    return result
   })
   const status = await call('team_dispatch_status', { project_id: 'project' })
   expect(status.isError).not.toBe(true)
@@ -874,6 +923,12 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   expect(() => schedulingControlSchema.parse({ action: 'priority', projectId: 'project', taskId: task.id, expectedRevision: 2, priority: 0, injected: true })).toThrow()
   expect((await call('team_dispatch_cancel', { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' })).isError).not.toBe(true)
   expect(ctx.agentTeams.remoteScheduling(lead, { projectId: 'project' }).requests[0]!.cancelReason).toBe('Tool cancellation')
+  expect(transcript).toEqual(expect.arrayContaining([
+    expect.objectContaining({ tool: 'team_dispatch_status', input: { project_id: 'project' }, result: { error: false, payload: expect.objectContaining({ projectId: 'project', requests: expect.arrayContaining([expect.objectContaining({ taskId: task.id, revision: 1 })]) }) } }),
+    expect.objectContaining({ tool: 'team_dispatch_priority', input: { project_id: 'project', task_id: task.id, expected_revision: 1, priority: 50 }, result: { error: false, payload: expect.anything() } }),
+    expect.objectContaining({ tool: 'team_dispatch_pause', input: { project_id: 'project', expected_revision: 0, paused: true }, result: { error: false, payload: expect.anything() } }),
+    expect.objectContaining({ tool: 'team_dispatch_cancel', input: { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' }, result: { error: false, payload: expect.anything() } }),
+  ]))
   await plugin.dispose()
 })
 
@@ -1134,6 +1189,12 @@ it.each([true, false, 'conflict', 'cancel'] as const)('automatically repairs fai
   const commands = [{ command: 'node', args: ['-e', "if(require('node:fs').readFileSync('shared.txt','utf8').trim()!=='repaired')process.exit(1)"] }]
   await coordinator.register(lead, { ...request, verification: { revision: 1, commands } })
   const task = await coordinator.acceptTask(lead, 'project', { subject: 'Repair artifact', description: 'Preserve original evidence and repair verification' })
+  const dependent = repairSucceeds === false
+    ? await coordinator.acceptTask(lead, 'project', { subject: 'Blocked by failed verification', description: 'Require verified prerequisite acceptance', blockedBy: [task.id] })
+    : undefined
+  const independent = repairSucceeds === false
+    ? await coordinator.acceptTask(lead, 'project', { subject: 'Independent healthy report', description: 'Finish while the broken candidate is fenced', nonCodeCriteria: 'State that this report completed independently.' })
+    : undefined
   await coordinator.close()
   await ctx.plugin(GitIntegration, { providerName: 'test', targetBranch: 'main', verification: commands, commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000 })
   const written = new Set<string>()
@@ -1145,10 +1206,12 @@ it.each([true, false, 'conflict', 'cancel'] as const)('automatically repairs fai
       if (member && !written.has(member.id)) {
         written.add(member.id)
         prompts.push(text)
-        const cwd = member.worktree!.cwd
-        await writeFile(join(cwd, 'shared.txt'), written.size > 1 && repairSucceeds ? 'repaired\n' : 'broken\n')
-        await runGit(cwd, ['add', 'shared.txt'], new AbortController().signal, 30_000)
-        await runGit(cwd, ['commit', '-m', member.name], new AbortController().signal, 30_000)
+        if (independent === undefined || !text.includes(independent.subject)) {
+          const cwd = member.worktree!.cwd
+          await writeFile(join(cwd, 'shared.txt'), written.size > 1 && repairSucceeds ? 'repaired\n' : 'broken\n')
+          await runGit(cwd, ['add', 'shared.txt'], new AbortController().signal, 30_000)
+          await runGit(cwd, ['commit', '-m', member.name], new AbortController().signal, 30_000)
+        }
       }
       yield* super.stream(options)
     }
@@ -1182,9 +1245,9 @@ it.each([true, false, 'conflict', 'cancel'] as const)('automatically repairs fai
     expect(running.view().attempts.filter(attempt => attempt.phase !== 'terminal').length).toBeLessThanOrEqual(1)
   }
   const view = running.view()
-  expect(view.attempts).toHaveLength(repairSucceeds ? 2 : 4)
+  expect(view.attempts).toHaveLength(repairSucceeds ? 2 : repairSucceeds === false ? 5 : 4)
   expect(new Set(view.attempts.map(attempt => attempt.runtimeId)).size).toBe(view.attempts.length)
-  expect(view.submissions).toHaveLength(view.attempts.length)
+  expect(view.submissions).toHaveLength(repairSucceeds === false ? 4 : view.attempts.length)
   expect(view.submissions[0]!.phase).toBe('queued')
   expect(ctx.agentTeams.listIntegrations(lead)[0]!.phase).toBe('failed')
   if (repairSucceeds === 'conflict') expect(ctx.agentTeams.listIntegrations(lead)[0]!.error).toContain('CONFLICT')
@@ -1193,6 +1256,11 @@ it.each([true, false, 'conflict', 'cancel'] as const)('automatically repairs fai
   expect((await git('show', 'main:shared.txt')).stdout).toBe(repairSucceeds ? 'repaired' : 'base')
   expect(ctx.agentTeams.getTask(lead, task.id).status).toBe(repairSucceeds ? 'completed' : 'pending')
   if (!repairSucceeds) expect(view.dispatchStatus[0]!.blockers.some(block => block.detail.includes('repair budget exhausted'))).toBe(true)
+  if (dependent !== undefined && independent !== undefined) {
+    expect(view.attempts.find(attempt => attempt.taskId === dependent.id)).toBeUndefined()
+    expect(view.dispatchStatus.find(status => status.taskId === dependent.id)).toMatchObject({ state: 'waiting', blockers: expect.arrayContaining([expect.objectContaining({ code: 'dependencies' })]) })
+    expect(view.attempts.find(attempt => attempt.taskId === independent.id)).toMatchObject({ phase: 'terminal', result: 'Committed artifact' })
+  }
   const original = view.attempts[0]!
   await expect(running.submit(lead, 'project', { attemptId: original.attemptId, generation: original.generation, expectedRevision: original.revision, sourceCommit: view.submissions[0]!.sourceCommit, evidence: original.result! })).rejects.toThrow(/Superseded/)
 })

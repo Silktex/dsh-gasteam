@@ -41,6 +41,28 @@ it('bounds recoverable coordinator interruptions while preserving generation and
   await expect(store.reserve({ ...request, repairLimit: 2, expectedGeneration: 2, runtimeId: 'session-c' })).rejects.toThrow(/retry budget/i)
 })
 
+it('retains a durable never-started provisioning lineage, deadline, and exact replacement budget', async () => {
+  const { store, directory } = await fixture()
+  const policy = { maxAttempts: 1, initialDelayMs: 50, multiplier: 2, maxDelayMs: 100 }
+  const first = await store.reserve({ ...request, retryPolicy: policy })
+  const failed = await store.provisionFailed(token(first), { runtimeId: first.runtimeId, kind: 'stopped', receipt: 'provider-drained' }, 'temporary provider outage', 1_050, true)
+  expect(failed).toMatchObject({ phase: 'terminal', stopEvidence: { kind: 'stopped' }, provisioning: { count: 1, notBefore: 1_050, diagnostic: 'temporary provider outage', retryable: true } })
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const restored = await AssignmentStore.open(directory, limits); stores.push(restored)
+  const retry = await restored.reserve({ ...request, expectedGeneration: 1, runtimeId: 'session-retry', retryPolicy: policy })
+  const exhausted = await restored.provisionFailed(token(retry), { runtimeId: retry.runtimeId, kind: 'stopped', receipt: 'provider-drained-2' }, 'temporary provider outage', 1_150, true)
+  expect(exhausted.provisioning).toMatchObject({ count: 2, notBefore: 1_150 })
+  await expect(restored.reserve({ ...request, expectedGeneration: 2, runtimeId: 'session-extra', retryPolicy: policy })).rejects.toThrow(/provisioning retry budget/i)
+})
+
+it('persists a classified non-retryable provisioning failure without reopening its lineage', async () => {
+  const { store } = await fixture()
+  const first = await store.reserve({ ...request, retryPolicy: { maxAttempts: 3, initialDelayMs: 1, multiplier: 1, maxDelayMs: 1 } })
+  const failed = await store.provisionFailed(token(first), { runtimeId: first.runtimeId, kind: 'never-started', receipt: 'auth-rejected' }, 'authentication policy rejected', 1, false)
+  expect(failed.provisioning).toMatchObject({ count: 1, retryable: false })
+  await expect(store.reserve({ ...request, expectedGeneration: 1, runtimeId: 'session-retry' })).rejects.toThrow(/not retryable/i)
+})
+
 it('pins recovery deliveries separately from health nudges and preserves the policy on reopen', async () => {
   const { store, directory } = await fixture()
   const policy = { maxAttempts: 1, initialDelayMs: 7, multiplier: 3, maxDelayMs: 99 }

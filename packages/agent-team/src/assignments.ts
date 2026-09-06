@@ -66,6 +66,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('attempt/stopping'), token: tokenSchema, reason: text }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/retired'), token: tokenSchema, evidence: stopSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/interrupted'), token: tokenSchema, evidence: stopSchema, interruption: interruptionRequestSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/provision-failed'), token: tokenSchema, evidence: stopSchema, diagnostic: text, notBefore: z.number().int().nonnegative(), retryable: z.boolean() }).strict(),
 ])
 type Event = z.output<typeof eventSchema>
 type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'sequence'> : never : never
@@ -94,6 +95,8 @@ export interface AttemptRecord extends Omit<ReserveAssignmentRequest, 'expectedG
   readonly interruption?: z.output<typeof interruptionSchema>
   /** Provider-reported external tokens only; absent means unknown. */
   readonly externalUsage?: z.output<typeof externalUsageSchema>
+  /** A provision failure has a separate, pinned replacement budget. */
+  readonly provisioning?: { count: number; notBefore: number; diagnostic: string; retryable: boolean }
 }
 const limitsSchema = z.object({
   globalCapacity: positive, projectCapacities: z.record(id, positive),
@@ -116,6 +119,12 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     const retryPolicy = request.retryPolicy ?? (prior?.retryPolicy ?? legacyAssignmentRetryPolicy)
     if (prior && JSON.stringify(retryPolicy) !== JSON.stringify(prior.retryPolicy)) throw new Error('Retry policy is immutable for an assignment lineage')
     if (prior?.interruption && prior.interruption.count >= (request.repairLimit ?? 0)) throw new Error('Coordinator interruption retry budget is exhausted')
+    // `maxAttempts` is the number of replacement generations after the
+    // initial provision. A first failed provision therefore permits one
+    // replacement when maxAttempts is one; a second failure does not.
+    if (prior?.provisioning && (!prior.provisioning.retryable || prior.provisioning.count > prior.retryPolicy.maxAttempts)) {
+      throw new Error(prior.provisioning.retryable ? 'Provisioning retry budget is exhausted' : 'Provisioning failure is not retryable')
+    }
     if (request.repair) {
       if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.stopReason || !prior.result
         || request.repair.previousAttemptId !== prior.attemptId
@@ -203,6 +212,12 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
       if (event.evidence.kind === 'never-started' && current.phase !== 'reserved') throw new Error('Never-started interruption requires a reserved attempt')
       next = { ...next, phase: 'terminal', stopEvidence: event.evidence,
         interruption: { ...event.interruption, count: records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId && record.taskId === current.taskId && record.interruption !== undefined).length + 1 } }
+      break
+    case 'attempt/provision-failed':
+      if (current.phase !== 'reserved' || event.evidence.runtimeId !== current.runtimeId) throw new Error('Provisioning failure requires a reserved attempt with matching runtime evidence')
+      next = { ...next, phase: 'terminal', stopEvidence: event.evidence, stopReason: event.diagnostic,
+        provisioning: { count: records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId && record.taskId === current.taskId && record.provisioning !== undefined).length + 1,
+          notBefore: event.notBefore, diagnostic: event.diagnostic, retryable: event.retryable } }
       break
   }
   return records.map((record, position) => position === index ? next : record)
@@ -294,6 +309,9 @@ export class AssignmentStore {
   }
   interrupt(token: AttemptToken, evidence: RuntimeStopEvidence): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/interrupted', token, evidence, interruption: { reason: 'coordinator-shutdown', receipt: evidence.receipt } })
+  }
+  provisionFailed(token: AttemptToken, evidence: RuntimeStopEvidence, diagnostic: string, notBefore: number, retryable: boolean): Promise<AttemptRecord> {
+    return this.mutate({ type: 'attempt/provision-failed', token, evidence, diagnostic, notBefore, retryable })
   }
   list(): AttemptRecord[] { return this.journal.snapshot() }
   close(): Promise<void> { return this.journal.close() }

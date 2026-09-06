@@ -369,6 +369,63 @@ describe('Team identity and provisioning', () => {
     } finally { await assignments.close() }
   })
 
+  it('releases a positively absent temporary provisioner for its durable retry but holds uncertain ownership', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Provision retry', description: 'Only retry after absence is proven' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-provision-retry-'))
+    roots.push(assignmentDirectory)
+    let assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+    const checkpoint = { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Wait for provision' }
+    try {
+      let now = 1_000
+      let runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true, undefined, () => now)
+      const first = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'first', runtimeId: 'temporary-runtime', provider: 'spawn', expectedGeneration: 0,
+        retryPolicy: { maxAttempts: 1, initialDelayMs: 50, multiplier: 2, maxDelayMs: 100 }, checkpoint })
+      vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('temporary provider unavailable'))
+      await expect(runtime.start(lead, token(first))).rejects.toThrow(/temporary provider unavailable/i)
+      expect(assignments.list()[0]).toMatchObject({ phase: 'terminal', provisioning: { count: 1, notBefore: 1_050, retryable: true }, stopEvidence: { kind: 'stopped' } })
+      const retry = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'second', runtimeId: 'replacement-runtime', provider: 'spawn', expectedGeneration: 1,
+        retryPolicy: first.retryPolicy, checkpoint })
+      expect(retry.generation).toBe(2)
+      now = 1_050
+      vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('temporary provider unavailable'))
+      await expect(runtime.start(lead, token(retry))).rejects.toThrow(/temporary provider unavailable/i)
+      expect(assignments.list().at(-1)).toMatchObject({ phase: 'terminal', provisioning: { count: 2, notBefore: 1_150, retryable: true }, stopEvidence: { kind: 'stopped' } })
+      await assignments.close()
+      assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+      await expect(assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'extra', runtimeId: 'extra-runtime', provider: 'spawn', expectedGeneration: 2,
+        retryPolicy: first.retryPolicy, checkpoint })).rejects.toThrow(/provisioning retry budget/i)
+
+      const uncertainTask = await ctx.agentTeams.createTask(lead, { subject: 'Uncertain provision', description: 'Hold the reserved slot' })
+      const uncertain = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: uncertainTask.id, workerId: 'uncertain', runtimeId: 'uncertain-runtime', provider: 'spawn', expectedGeneration: 0, checkpoint })
+      vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('temporary provider unavailable'))
+      vi.spyOn(ctx.subagents, 'drainContinuableChildren').mockRejectedValueOnce(new Error('provider ownership probe failed'))
+      runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true, undefined, () => now)
+      await expect(runtime.start(lead, token(uncertain))).rejects.toThrow(/ownership probe failed/i)
+      expect(assignments.list().find(item => item.attemptId === uncertain.attemptId)).toMatchObject({ phase: 'reserved' })
+      await expect(assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: 'blocked-by-uncertain', workerId: 'blocked', runtimeId: 'blocked-runtime', provider: 'spawn', expectedGeneration: 0, checkpoint })).rejects.toThrow(/capacity/i)
+    } finally { await assignments.close() }
+  })
+
+  it('records authentication and policy admission failures as non-retryable terminal evidence', async () => {
+    const { ctx, lead } = await setupWorkers(['hang'], {})
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Invalid admission', description: 'Do not retry credentials' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-provision-auth-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    try {
+      const record = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'auth', runtimeId: 'auth-runtime', provider: 'spawn', expectedGeneration: 0,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Never start' } })
+      vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('authentication policy rejected'))
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      await expect(runtime.start(lead, { attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })).rejects.toThrow(/authentication policy rejected/i)
+      expect(assignments.list()[0]).toMatchObject({ phase: 'terminal', provisioning: { retryable: false }, stopEvidence: { kind: 'stopped' } })
+      await expect(assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'retry', runtimeId: 'auth-retry', provider: 'spawn', expectedGeneration: 1,
+        retryPolicy: record.retryPolicy, checkpoint: record.checkpoint })).rejects.toThrow(/not retryable/i)
+    } finally { await assignments.close() }
+  })
+
   it('treats a crash after a later turn starts as recovery instead of reusing the old report', async () => {
     const { ctx, lead } = await setupWorkers([textResponse('assignment report')], {})
     const task = await ctx.agentTeams.createTask(lead, { subject: 'Assigned work', description: 'Run one worker' })
