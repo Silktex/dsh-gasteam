@@ -103,25 +103,25 @@ export class ExternalAssignmentRuntime {
       observed = await this.observer.observe(directory)
     }
     const identity = await readSupervisorIdentity(directory)
-    if (identity === undefined || identity.attemptId !== attemptId || identity.generation !== generation || identity.supervisor === undefined) return await this.store.markUncertain(attemptId, generation, 'supervisor identity does not bind this external attempt')
+    if (identity === undefined || identity.attemptId !== attemptId || identity.generation !== generation || identity.supervisor === undefined) return await this.retainUncertainty(attemptId, generation, 'supervisor identity does not bind this external attempt')
     try { await this.assertManifest(directory, attemptId, generation, record) } catch (error) {
-      return await this.store.markUncertain(attemptId, generation, `supervisor manifest does not match durable external intent: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
+      return await this.retainUncertainty(attemptId, generation, `supervisor manifest does not match durable external intent: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
     }
     if (record.process === undefined && identity.process !== undefined) record = await this.store.recordProcessStarted(attemptId, generation, identity.process, Date.now(), identity.supervisor)
-    if (record.process !== undefined && (identity.process === undefined || identity.process.pid !== record.process.pid || identity.process.birthId !== record.process.birthId)) return await this.store.markUncertain(attemptId, generation, 'supervisor wrapper identity does not match durable attempt')
-    if (record.supervisor !== undefined && !sameProcess(identity.supervisor, record.supervisor)) return await this.store.markUncertain(attemptId, generation, 'supervisor helper identity does not match durable attempt')
-    if (record.supervisor === undefined) return await this.store.markUncertain(attemptId, generation, 'durable external attempt lacks supervisor helper identity')
+    if (record.process !== undefined && (identity.process === undefined || identity.process.pid !== record.process.pid || identity.process.birthId !== record.process.birthId)) return await this.retainUncertainty(attemptId, generation, 'supervisor wrapper identity does not match durable attempt')
+    if (record.supervisor !== undefined && !sameProcess(identity.supervisor, record.supervisor)) return await this.retainUncertainty(attemptId, generation, 'supervisor helper identity does not match durable attempt')
+    if (record.supervisor === undefined) return await this.retainUncertainty(attemptId, generation, 'durable external attempt lacks supervisor helper identity')
     // A caller may crash after journaled cancellation but before it creates the
     // helper request. Re-materialize exactly that durable request only after
     // binding the live helper to the immutable launch manifest.
     if (record.cancellation !== undefined && observed.state !== 'stopped') {
       try { await requestExternalSupervisorCancellation(directory, attemptId, generation, record.cancellation.reason) } catch (error) {
-        return await this.store.markUncertain(attemptId, generation, `external cancellation reconciliation failed: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
+        return await this.retainUncertainty(attemptId, generation, `external cancellation reconciliation failed: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
       }
     }
     if (observed.state === 'running') return record.phase === 'uncertain' && record.process !== undefined ? await this.store.reconcileRunning(attemptId, generation, record.process) : record
-    if (observed.state === 'uncertain') return await this.store.markUncertain(attemptId, generation, observed.reason ?? 'external helper ownership is uncertain')
-    if (identity?.process === undefined || record.process === undefined) return await this.store.markUncertain(attemptId, generation, 'stopped helper lacks durable wrapper binding')
+    if (observed.state === 'uncertain') return await this.retainUncertainty(attemptId, generation, observed.reason ?? 'external helper ownership is uncertain')
+    if (identity?.process === undefined || record.process === undefined) return await this.retainUncertainty(attemptId, generation, 'stopped helper lacks durable wrapper binding')
     try {
       const exitRaw = await readFile(`${directory}/helper-exit.json`)
       const proofRaw = await readFile(`${directory}/terminal-proof.json`)
@@ -147,7 +147,18 @@ export class ExternalAssignmentRuntime {
       if (record.process === undefined) throw new Error('terminal observation lost wrapper identity')
       return await this.store.recordGroupStopped(attemptId, generation, { receiptId: `terminal-${createHash('sha256').update(proofRaw).digest('hex')}`, process: record.process, groupEmpty: true }, Date.now(), record.turnCompleted === true)
     } catch (error) {
-      return await this.store.markUncertain(attemptId, generation, `external terminal observation failed: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
+      return await this.retainUncertainty(attemptId, generation, `external terminal observation failed: ${error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512)}`)
+    }
+  }
+
+  private async retainUncertainty(attemptId: string, generation: number, reason: string): Promise<ExternalRuntimeRecord> {
+    try { return await this.store.markUncertain(attemptId, generation, reason) } catch (error) {
+      // Another observer may have published the same immutable terminal proof
+      // while this observer was reading receipts. Terminal state is authoritative
+      // and observe() is already idempotent once it exists.
+      const latest = this.store.get(attemptId, generation)
+      if (latest?.terminal !== undefined) return latest
+      throw error
     }
   }
 

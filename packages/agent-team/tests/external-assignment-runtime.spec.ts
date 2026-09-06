@@ -132,6 +132,23 @@ it('selects the final Codex agent message and idempotently replays partially jou
   const helperExit = JSON.parse(await readFile(join(root, 'helper-exit.json'), 'utf8')) as { exit: { code: number | null; signal: string | null } }
   await store.recordExit('attempt-multi', 1, helperExit.exit)
   const beforeReplay = store.get('attempt-multi', 1)!
+  const originalRecordThread = store.recordThread.bind(store)
+  const originalRecordGroupStopped = store.recordGroupStopped.bind(store)
+  let threadCalls = 0
+  let terminalized!: () => void
+  const terminalPublished = new Promise<void>(resolvePublished => { terminalized = resolvePublished })
+  store.recordThread = async (...args) => {
+    if (++threadCalls === 2) {
+      await terminalPublished
+      throw new Error('simulated stale concurrent observer write')
+    }
+    return await originalRecordThread(...args)
+  }
+  store.recordGroupStopped = async (...args) => {
+    const terminal = await originalRecordGroupStopped(...args)
+    terminalized()
+    return terminal
+  }
   await expect(Promise.all([runtime.observe('attempt-multi', 1, root), runtime.observe('attempt-multi', 1, root)])).resolves.toEqual([expect.objectContaining({ phase: 'completed', result: 'fixture final report', threadId: 'fixture-thread', revision: beforeReplay.revision + 1 }), expect.objectContaining({ phase: 'completed', result: 'fixture final report', threadId: 'fixture-thread', revision: beforeReplay.revision + 1 })])
   expect(store.get('attempt-multi', 1)).toMatchObject({ terminal: { outcome: 'completed' }, result: 'fixture final report', retainsCapacity: false })
   await store.close()
