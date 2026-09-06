@@ -15,6 +15,12 @@
     },
     {
       "path": "./packages/agent-team-web-profile/tsconfig.json"
+    },
+    {
+      "path": "./packages/client-ui-agent-team-visual/tsconfig.host.json"
+    },
+    {
+      "path": "./packages/agent-team-visual-web-profile/tsconfig.json"
     }
   ]
 }

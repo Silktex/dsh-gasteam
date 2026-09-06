@@ -3,6 +3,9 @@
   "references": [
     {
       "path": "./packages/client-ui-agent-team/tsconfig.client.json"
+    },
+    {
+      "path": "./packages/client-ui-agent-team-visual/tsconfig.client.json"
     }
   ]
 }

@@ -18,6 +18,8 @@ const entries = {
   'client-ui-agent-team': ['index', 'invariant'],
   'agent-team-profile': ['index', 'invariant'],
   'agent-team-web-profile': ['index', 'invariant'],
+  'client-ui-agent-team-visual': ['index', 'invariant'],
+  'agent-team-visual-web-profile': ['index', 'invariant'],
 }
 for (const [pkg, files] of Object.entries(entries)) {
   for (const file of files) {
@@ -48,4 +50,25 @@ await build({
     },
   }],
 })
-console.log('Built 5 Team packages with shared Remote descriptors.')
+const visualId = '@deepseek-ai/dsh-experimental-client-ui-agent-team-visual'
+await build({
+  entryPoints: [resolve(root, 'packages/client-ui-agent-team-visual/src/client/index.ts')],
+  outfile: resolve(root, 'packages/client-ui-agent-team-visual/lib/client.js'),
+  bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', minify: true, jsx: 'automatic',
+  external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis', '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives'],
+  define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env.MODE': '"production"', 'import.meta.env.DEV': 'false', 'import.meta.env.PROD': 'true' },
+  banner: { js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(visualId)}, factory: (require) => { var module = { exports: {} }; var exports = module.exports;` },
+  footer: { js: 'return module.exports; } });' },
+  plugins: [{
+    name: 'gasview-css-modules',
+    setup(builder) {
+      builder.onLoad({ filter: /\.module\.css$/ }, async ({ path }) => {
+        const output = transform({ filename: path, code: await readFile(path), cssModules: true, minify: true })
+        const classes = Object.fromEntries(Object.entries(output.exports).map(([key, value]) => [key, value.name]))
+        const styleId = Object.values(classes)[0] ?? 'styles'
+        return { loader: 'js', contents: `const id = ${JSON.stringify(visualId)}, styleId = ${JSON.stringify(styleId)}; if (!document.querySelector('style[data-plugin="' + id + '"][data-style="' + styleId + '"]')) { const style = document.createElement('style'); style.dataset.plugin = id; style.dataset.style = styleId; style.textContent = ${JSON.stringify(output.code.toString())}; document.head.append(style); } export default ${JSON.stringify(classes)};` }
+      })
+    },
+  }],
+})
+console.log('Built 7 Team packages with shared Remote descriptors.')

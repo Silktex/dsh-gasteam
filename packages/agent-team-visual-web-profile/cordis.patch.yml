@@ -1,0 +1,7 @@
+# Private GasView visual agents Web layer. Apply after dsh-web-app, the host-side
+# dsh-agent-team-profile, and dsh-agent-team-web-profile so the browser mounts only
+# when the Team service and its Remote are present. Opt-in: omit this layer to disable.
+
+- insert:
+    - id: ui-agent-team-visual
+      name: '@deepseek-ai/dsh-experimental-client-ui-agent-team-visual'
