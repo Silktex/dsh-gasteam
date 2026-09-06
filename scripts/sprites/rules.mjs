@@ -15,7 +15,7 @@ export function validateSheetRules(sheet) {
   if (typeof sheet !== 'object' || sheet === null) return ['sheet is not an object']
   const { name, frameWidth, frameHeight, fps, legend, frames } = sheet
   if (typeof name !== 'string' || !NAME_PATTERN.test(name)) {
-    violations.push(`name '${name}' must match /^[a-z]+\.[a-z]+$/`)
+    violations.push(`name '${name}' must match /^[a-z]+\\.[a-z]+$/`)
   }
   if (!Array.isArray(frames) || frames.length < 2) {
     violations.push(`frames.length ${Array.isArray(frames) ? frames.length : '?'} must be >= 2`)
