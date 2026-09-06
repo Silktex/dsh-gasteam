@@ -35,6 +35,8 @@ import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, Workspace
 import { projectWorkspaceDashboard } from './workspace-dashboard.ts'
 import type { WorkspaceDashboardPageRequest, WorkspaceDashboardPage, WorkspaceDashboardView } from './workspace-dashboard.ts'
 import { WorkspacePageSnapshotStore } from './workspace-pagination.ts'
+import { WorkspaceActivityReader } from './workspace-activity.ts'
+import type { WorkspaceActivityPage, WorkspaceActivityRequest } from './workspace-activity.ts'
 import type { RuntimeProviderCapabilities } from './runtime-provider.ts'
 
 function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
@@ -144,6 +146,8 @@ export interface CoordinatorView {
   readonly projects: CoordinatorProjectView[]
   readonly submissions: SubmissionRecord[]
   readonly reports: ReportAcceptanceRecord[]
+  /** Durable M10 registry only; individual batch journals remain host-owned. */
+  readonly mergeBatches: import('./merge-batch-registry.ts').MergeBatchRegistration[]
   /** Coordinator-visible intent/outcome diagnostics; no model/RPC retention controls yet. */
   readonly candidateRetention: import('./candidate-retention.ts').CandidateRetentionRecord[]
   readonly attempts: AttemptRecord[]
@@ -164,6 +168,7 @@ export class WorkspaceCoordinator {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly controller = new AbortController()
   private readonly workspacePages = new WorkspacePageSnapshotStore()
+  private readonly workspaceActivity: WorkspaceActivityReader
   private readonly shutdown: RetainedShutdown
   private projects: CoordinatorProjectView[] = []
   private execution: CoordinatorExecution | undefined
@@ -175,8 +180,8 @@ export class WorkspaceCoordinator {
     private readonly ctx: Context,
     private readonly journal: DurableJournal<State, Payload>,
     private readonly catalog: ProjectCatalog, private readonly publication: PublicationConfig | undefined, private readonly workspaceOperatorId: string | undefined,
-    shutdownDeadlineMs: number,
-  ) { this.shutdown = new RetainedShutdown(shutdownDeadlineMs) }
+    shutdownDeadlineMs: number, directory: string,
+  ) { this.shutdown = new RetainedShutdown(shutdownDeadlineMs); this.workspaceActivity = new WorkspaceActivityReader(directory, journal.snapshot().id!) }
 
   static async open(ctx: Context, config: CoordinatorConfig): Promise<WorkspaceCoordinator> {
     if (config.execution !== undefined) executionConfigSchema.parse(config.execution)
@@ -196,7 +201,7 @@ export class WorkspaceCoordinator {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
       if (config.publication && (!config.publication.grants.length || typeof config.publication.publisher.publish !== 'function' || !config.publication.publisher.identity || !Number.isInteger(config.publication.publisher.revision) || config.publication.publisher.revision < 1)) throw new Error('Publication configuration requires grants and an identified idempotent publisher')
       catalog = await ProjectCatalog.open(config.directory, config.publication?.grants)
-      coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId, shutdownDeadlineMs)
+      coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId, shutdownDeadlineMs, config.directory)
       const activeCoordinator = coordinator
       if (journal.snapshot().operatorId !== config.workspaceOperatorId) {
         if (journal.snapshot().operatorId !== undefined || config.workspaceOperatorId === undefined) throw new Error('Configured workspace operator disagrees with durable coordinator authority')
@@ -313,14 +318,25 @@ export class WorkspaceCoordinator {
     return this.workspacePages.page(caller.id, request, () => this.workspaceDashboardSource())
   }
 
+  /** Bounded journal references, scoped to the exact configured workspace operator. */
+  async workspaceActivityPage(caller: Agent, request: WorkspaceActivityRequest): Promise<WorkspaceActivityPage> {
+    this.assertWorkspaceOperator(caller)
+    // Retain the coordinator shutdown ownership through the asynchronous file read.
+    return await this.run(async () => await this.workspaceActivity.page(caller.id, request))
+  }
+
   private workspaceDashboardSource(): unknown {
     const current = this.view()
     return {
       projects: current.projects.map(project => ({ id: project.project.id, revision: project.controlRevision, paused: project.paused, capacity: project.project.capacity, active: current.attempts.filter(attempt => attempt.projectId === project.project.id && attempt.phase !== 'terminal').length })),
-      attempts: current.attempts.map(attempt => { const health = current.health.findLast(value => value.attemptId === attempt.attemptId && value.generation === attempt.generation); return { attemptId: attempt.attemptId, generation: attempt.generation, revision: attempt.revision, projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, phase: attempt.phase, ...(health === undefined ? {} : { progress: { classification: health.classification, certainty: health.certainty, observedAt: health.observedAt } }), ...(attempt.externalUsage === undefined ? {} : { externalUsage: attempt.externalUsage }) } }),
+      attempts: current.attempts.map(attempt => { const health = current.health.findLast(value => value.attemptId === attempt.attemptId && value.generation === attempt.generation); const handoff = this.execution?.handoffEligibility(attempt); const retry = this.execution?.retryEligibility(attempt); return { attemptId: attempt.attemptId, generation: attempt.generation, revision: attempt.revision, projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, phase: attempt.phase, provider: attempt.provider, ...(handoff === undefined ? {} : handoff), ...(retry === undefined ? {} : retry), ...(attempt.provisioning === undefined ? {} : { provisioning: { count: attempt.provisioning.count, maxAttempts: attempt.retryPolicy.maxAttempts, notBefore: attempt.provisioning.notBefore, retryable: attempt.provisioning.retryable } }), ...(health === undefined ? {} : { progress: { classification: health.classification, certainty: health.certainty, observedAt: health.observedAt, ...(health.lastProgress === undefined ? {} : { lastProgressAt: health.lastProgress.observedAt }) } }), ...(attempt.externalUsage === undefined ? {} : { externalUsage: attempt.externalUsage }) } }),
       workflows: current.workflows.map(workflow => ({ executionId: workflow.executionId, projectId: workflow.projectId, teamId: workflow.teamId, steps: workflow.steps.map(step => ({ stepId: step.stepId, revision: step.revision, phase: step.phase, ...(step.taskId === undefined ? {} : { taskId: step.taskId }) })) })),
       batches: current.batches.map(batch => ({ id: batch.id, phase: batch.phase, required: batch.required, completedRequired: batch.completedRequired, completionEpoch: batch.completionEpoch })),
-      queue: current.dispatchStatus.map(request => ({ projectId: request.projectId, teamId: request.teamId, taskId: request.taskId, revision: request.revision, state: request.state, blockers: request.blockers.map(blocker => ({ code: blocker.code })) })),
+      mergeBatches: current.mergeBatches.map(batch => ({ id: batch.id, phase: batch.phase, members: batch.members.map(integrationId => {
+        const submission = current.submissions.find(item => item.integrationId === integrationId)
+        return { integrationId, ...(submission === undefined ? {} : { projectId: submission.projectId, teamId: submission.teamId, taskId: submission.taskId }) }
+      }) })),
+      queue: current.dispatchStatus.map(request => ({ projectId: request.projectId, teamId: request.teamId, taskId: request.taskId, revision: request.revision, ...(request.enqueuedAt === undefined ? {} : { enqueuedAt: request.enqueuedAt }), state: request.state, blockers: request.blockers.map(blocker => ({ code: blocker.code })) })),
       integrations: current.projects.flatMap(project => project.teams.flatMap(team => { const lead = this.ctx.agents.get(SessionId(team.teamId)); return lead === undefined ? [] : this.ctx.agentTeams.listIntegrations(lead).map(integration => ({ integrationId: integration.id, projectId: project.project.id, teamId: team.teamId, phase: integration.phase, sourceCommit: integration.sourceCommit, ...(integration.failureKind === undefined ? {} : { failureKind: integration.failureKind }), ...(integration.error === undefined ? {} : { diagnostic: integration.error }) })) })),
       escalations: current.escalations.map(escalation => ({ id: escalation.id, revision: escalation.revision, projectId: escalation.work.projectId, teamId: escalation.work.teamId, taskId: escalation.work.taskId, attemptId: escalation.attemptId, generation: escalation.generation, severity: escalation.severity, condition: escalation.condition, diagnostics: escalation.diagnostics })),
     }
@@ -490,12 +506,19 @@ export class WorkspaceCoordinator {
     else if (control.action === 'cancel') await this.run(async () => {
       this.authorize(caller, control.projectId)
       if (!this.execution) throw new Error('Coordinator execution is unavailable')
-      await this.execution.cancel(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision, control.reason)
+      await this.execution.cancel(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision, control.reason,
+        control.attemptId === undefined ? undefined : { attemptId: control.attemptId, generation: control.generation!, expectedRevision: control.expectedAttemptRevision! })
     })
     else if (control.action === 'handoff') await this.run(async () => {
       this.authorize(caller, control.projectId)
       if (!this.execution) throw new Error('Coordinator execution is unavailable')
       await this.execution.handoff(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision,
+        { attemptId: control.attemptId, generation: control.generation, expectedRevision: control.expectedAttemptRevision })
+    })
+    else if (control.action === 'retry') await this.run(async () => {
+      this.authorize(caller, control.projectId)
+      if (!this.execution) throw new Error('Coordinator execution is unavailable')
+      await this.execution.retry(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision,
         { attemptId: control.attemptId, generation: control.generation, expectedRevision: control.expectedAttemptRevision })
     })
     else await this.reprioritize(caller, control.projectId, control.taskId, control.expectedRevision, control.priority)
@@ -505,7 +528,7 @@ export class WorkspaceCoordinator {
   reconcile(): Promise<void> { return this.run(() => this.scan()) }
 
   view(): CoordinatorView {
-    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [], reports: [], candidateRetention: [], health: [], escalations: [] }
+    const execution = this.execution?.view(this.projects) ?? { attempts: [], executionBlocks: [], dispatchRequests: [], dispatchStatus: [], submissions: [], mergeBatches: [], reports: [], candidateRetention: [], health: [], escalations: [] }
     return structuredClone({
       ...execution,
       id: this.journal.snapshot().id!, projects: this.projects,
@@ -527,6 +550,7 @@ export class WorkspaceCoordinator {
     this.controller.abort(new Error('Coordinator is closing'))
     return this.shutdown.close(async () => {
       await this.pending
+      await this.workspaceActivity.close()
       await this.workspacePages.close()
       await this.workflows?.close()
       await this.workflowStore?.close()

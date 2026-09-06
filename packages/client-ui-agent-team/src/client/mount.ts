@@ -6,6 +6,9 @@ import type {
   OperatorEscalation,
   WorkspaceDashboardView,
   WorkspaceDashboardPage,
+  WorkspaceActivityPage,
+  SchedulingControl,
+  SchedulingView,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/remote'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -72,12 +75,27 @@ function registerUi(ctx: ClientContext): void {
       return await ctx.remote.agentTeams.acknowledgeHealth(leadSessionId(sessionId), { projectId, escalationId, expectedRevision })
     },
   }
-  const dashboard: Pick<WorkspaceDashboardProps, 'load' | 'loadPage'> = {
+  const dashboard: Pick<WorkspaceDashboardProps, 'load' | 'loadPage' | 'loadActivity' | 'loadScheduling' | 'controlScheduling' | 'loadHealth' | 'acknowledgeHealth'> = {
     async load(sessionId): Promise<TeamActionResult<WorkspaceDashboardView>> {
       return await ctx.remote.agentTeams.workspaceDashboard(leadSessionId(sessionId), {})
     },
     async loadPage(sessionId, request): Promise<TeamActionResult<WorkspaceDashboardPage>> {
       return await ctx.remote.agentTeams.workspaceDashboardPage(leadSessionId(sessionId), request)
+    },
+    async loadActivity(sessionId, request): Promise<TeamActionResult<WorkspaceActivityPage>> {
+      return await ctx.remote.agentTeams.workspaceActivityPage(leadSessionId(sessionId), request)
+    },
+    async loadScheduling(sessionId, projectId): Promise<TeamActionResult<SchedulingView>> {
+      return await ctx.remote.agentTeams.scheduling(leadSessionId(sessionId), { projectId })
+    },
+    async controlScheduling(sessionId, request: SchedulingControl): Promise<TeamActionResult<SchedulingView>> {
+      return await ctx.remote.agentTeams.controlScheduling(leadSessionId(sessionId), request)
+    },
+    async loadHealth(sessionId, projectId): Promise<TeamActionResult<OperatorEscalation[]>> {
+      return await ctx.remote.agentTeams.healthInbox(leadSessionId(sessionId), { projectId })
+    },
+    async acknowledgeHealth(sessionId, projectId, escalationId, expectedRevision): Promise<TeamActionResult<OperatorEscalation>> {
+      return await ctx.remote.agentTeams.acknowledgeHealth(leadSessionId(sessionId), { projectId, escalationId, expectedRevision })
     },
   }
 

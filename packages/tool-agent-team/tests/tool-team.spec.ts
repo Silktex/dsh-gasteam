@@ -234,6 +234,29 @@ describe('dsh-tool-team', () => {
     expect(JSON.parse(text(await execute(ctx, lead, 'team_worktree_release', { target: 'worker' })))).toEqual({ released: true })
   })
 
+  it('renders classified verification failures through the strict integration result schema', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setup([textResponse('worker ready')], false, {
+      worktreeProvider: 'git', integrationProvider: 'git',
+    }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    await ctx.plugin(GitIntegration, {
+      providerName: 'git', targetBranch: 'main', commandTimeoutMs: 30_000, verificationTimeoutMs: 30_000,
+      verification: [{ command: process.execPath, args: ['-e', 'process.exit(1)'] }],
+    })
+    const child = spawnedChildId(await execute(ctx, lead, 'spawn_teammate', {
+      name: 'worker', description: 'Produce a candidate that fails verification', prompt: 'finish',
+    }))
+    await waitNoAgent(ctx, child)
+    expect((await execute(ctx, lead, 'team_integration_enqueue', { target: 'worker' })).isError).toBe(false)
+
+    const result = await execute(ctx, lead, 'team_integration_run', {})
+    expect(result.isError, text(result)).not.toBe(true)
+    expect(JSON.parse(text(result))).toMatchObject({
+      integration: { phase: 'failed', failureKind: 'verification' },
+    })
+  })
+
   it('installs the complete scoped schema and shared-checkout policy for roots and teammates', async () => {
     const { ctx, lead } = await setup(['hang'])
     const leadAssembly = await assembly(ctx, lead)

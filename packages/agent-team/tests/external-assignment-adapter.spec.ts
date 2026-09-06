@@ -43,6 +43,65 @@ it('routes an explicitly non-code assignment through verified external admission
   await assignments.close()
 })
 
+it('classifies a runtime authentication failure as stopped and non-retryable', async () => {
+  const { assignments, external, adapter, attempt } = await setup('authentication-failure')
+  await adapter.start(attempt)
+  await waitFor(async () => {
+    const current = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+    await adapter.observe(current)
+    return assignments.list().find(item => item.attemptId === attempt.attemptId)?.phase === 'terminal'
+  })
+  expect(assignments.list().find(item => item.attemptId === attempt.attemptId)).toMatchObject({
+    phase: 'terminal', stopEvidence: { kind: 'stopped' },
+    provisioning: { count: 1, retryable: false, diagnostic: expect.stringMatching(/authentication failed.*credentials are not retained/i) },
+  })
+  expect(assignments.list().find(item => item.attemptId === attempt.attemptId)?.provisioning?.diagnostic).not.toContain('sk-secret-sentinel')
+  expect(await readFile(join(attempt.externalPolicy!.directory, 'assignments.jsonl'), 'utf8')).not.toContain('sk-secret-sentinel')
+  await external.close()
+  await assignments.close()
+})
+
+it('lets cancellation win over a classified authentication failure', async () => {
+  const { assignments, external, runtime, adapter, attempt } = await setup('authentication-failure')
+  const active = await adapter.start(attempt)
+  await waitFor(async () => (await runtime.observe(active.attemptId, active.generation, join(active.externalPolicy!.directory, active.attemptId))).terminal !== undefined)
+  const stopping = await assignments.stop({ attemptId: active.attemptId, generation: active.generation, expectedRevision: active.revision }, 'operator cancellation won race')
+  await expect(adapter.observe(stopping)).resolves.toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation won race' })
+  expect(assignments.list().find(item => item.attemptId === attempt.attemptId)?.provisioning).toBeUndefined()
+  await external.close()
+  await assignments.close()
+})
+
+it('keeps an unclassified failed turn as an execution failure', async () => {
+  const { assignments, external, adapter, attempt } = await setup('ordinary-runtime-failure')
+  await adapter.start(attempt)
+  await waitFor(async () => {
+    const current = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+    await adapter.observe(current)
+    return assignments.list().find(item => item.attemptId === attempt.attemptId)?.phase === 'terminal'
+  })
+  const failed = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+  expect(failed).toMatchObject({ phase: 'terminal', stopReason: 'External runtime failed or completed without a final report', stopEvidence: { kind: 'stopped' } })
+  expect(failed.provisioning).toBeUndefined()
+  await external.close()
+  await assignments.close()
+})
+
+it('does not classify a tool ENOENT after turn start as CLI startup failure', async () => {
+  const { assignments, external, adapter, attempt } = await setup('tool-enoent-after-turn-started')
+  await adapter.start(attempt)
+  await waitFor(async () => {
+    const current = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+    await adapter.observe(current)
+    return assignments.list().find(item => item.attemptId === attempt.attemptId)?.phase === 'terminal'
+  })
+  const failed = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+  expect(failed).toMatchObject({ phase: 'terminal', stopReason: 'External runtime failed or completed without a final report', stopEvidence: { kind: 'stopped' } })
+  expect(failed.provisioning).toBeUndefined()
+  await external.close()
+  await assignments.close()
+})
+
 it('projects only exact provider-reported usage onto its external attempt and preserves reported zero', async () => {
   const { assignments, external, adapter, attempt } = await setup('codex-usage-report')
   await adapter.start(attempt)

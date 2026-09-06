@@ -52,6 +52,13 @@ if (mode === 'silent') {
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-malformed-usage-thread"}\n')
   process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture malformed usage report"}}\n')
   process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":-1,"cached_input_tokens":"23","output_tokens":3.5}}\n')
+} else if (mode === 'authentication-failure') {
+  process.stdout.write('{"type":"error","message":"Authentication failed: invalid API key sk-secret-sentinel"}\n')
+  process.exitCode = 1
+} else if (mode === 'tool-enoent-after-turn-started') {
+  process.stdout.write('{"type":"turn.started"}\n')
+  process.stderr.write('tool execution failed with ENOENT\n')
+  process.exitCode = 1
 } else if (mode === 'codex-multi-report') {
   process.stdout.write('{"type":"turn.started"}\n')
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-thread"}\n')

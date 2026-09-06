@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { WorkspacePageSnapshotStore } from '../src/workspace-pagination.ts'
 import type { WorkspaceDashboardView } from '../src/workspace-dashboard.ts'
 
-const view = (ids: string[]): WorkspaceDashboardView => ({ projects: ids.map((id, index) => ({ id, revision: index, paused: false, capacity: 1, active: 0 })), projectsTruncated: false, attempts: [], attemptsTruncated: false, workflows: [], workflowsTruncated: false, batches: [], batchesTruncated: false, queue: [], queueTruncated: false, integrations: [], integrationsTruncated: false, escalations: [], escalationsTruncated: false })
+const view = (ids: string[]): WorkspaceDashboardView => ({ projects: ids.map((id, index) => ({ id, revision: index, paused: false, capacity: 1, active: 0 })), projectsTruncated: false, attempts: [], attemptsTruncated: false, workflows: [], workflowsTruncated: false, batches: [], batchesTruncated: false, mergeBatches: [], mergeBatchesTruncated: false, queue: [], queueTruncated: false, integrations: [], integrationsTruncated: false, escalations: [], escalationsTruncated: false })
 describe('WorkspacePageSnapshotStore', () => {
   it('pins a page sequence through later live changes without skips or duplicates', () => {
     const store = new WorkspacePageSnapshotStore()

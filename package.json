@@ -18,7 +18,9 @@
     "dsh": "dsh",
     "install:profile": "node scripts/install-profile.mjs",
     "start": "dsh --profile web --no-open",
+    "demo:dashboard": "node scripts/dashboard-demo.mjs",
     "test:smoke": "node scripts/smoke.mjs",
+    "test:release": "node scripts/standalone-release-validation.mjs",
     "test:acceptance": "vitest run --config vitest.acceptance.config.ts"
   },
   "devDependencies": {

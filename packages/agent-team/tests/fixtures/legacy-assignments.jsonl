@@ -1,0 +1,4 @@
+{"version":1,"sequence":1,"type":"assignment/reserved","request":{"projectId":"alpha","teamId":"team-a","taskId":"task-1","workerId":"worker-a","runtimeId":"session-a","provider":"dsh","expectedGeneration":0,"checkpoint":{"task":{"subject":"Implement","description":"Preserve this context"},"step":"implement","artifacts":[],"nextAction":"Write the change"}}}
+{"version":1,"sequence":2,"type":"attempt/activated","token":{"attemptId":"attempt-1","generation":1,"expectedRevision":1}}
+{"version":1,"sequence":3,"type":"attempt/checkpoint","token":{"attemptId":"attempt-1","generation":1,"expectedRevision":2},"checkpoint":{"task":{"subject":"Implement","description":"Preserve this context"},"step":"verify","artifacts":[{"kind":"file","ref":"worker.txt"}],"nextAction":"Run verification"}}
+{"version":1,"sequence":4,"type":"attempt/recovery","token":{"attemptId":"attempt-1","generation":1,"expectedRevision":3},"observedSequence":17,"notBefore":25,"messageId":"runtime-retry-a"}

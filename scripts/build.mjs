@@ -31,7 +31,7 @@ const id = '@deepseek-ai/dsh-experimental-client-ui-agent-team'
 await build({
   entryPoints: [resolve(root, 'packages/client-ui-agent-team/src/client/index.ts')],
   outfile: resolve(root, 'packages/client-ui-agent-team/lib/client.js'),
-  bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', minify: true,
+  bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', minify: true, jsx: 'automatic',
   external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis', '@deepseek-ai/dsh-client-ui-slots', '@deepseek-ai/dsh-client-ui-primitives'],
   define: { 'process.env.NODE_ENV': '"production"', 'import.meta.env.MODE': '"production"', 'import.meta.env.DEV': 'false', 'import.meta.env.PROD': 'true' },
   banner: { js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: (require) => { var module = { exports: {} }; var exports = module.exports;` },
@@ -42,7 +42,8 @@ await build({
       builder.onLoad({ filter: /\.module\.css$/ }, async ({ path }) => {
         const output = transform({ filename: path, code: await readFile(path), cssModules: true, minify: true })
         const classes = Object.fromEntries(Object.entries(output.exports).map(([key, value]) => [key, value.name]))
-        return { loader: 'js', contents: `const id = ${JSON.stringify(id)}; if (!document.querySelector('style[data-plugin="' + id + '"]')) { const style = document.createElement('style'); style.dataset.plugin = id; style.textContent = ${JSON.stringify(output.code.toString())}; document.head.append(style); } export default ${JSON.stringify(classes)};` }
+        const styleId = Object.values(classes)[0] ?? 'styles'
+        return { loader: 'js', contents: `const id = ${JSON.stringify(id)}, styleId = ${JSON.stringify(styleId)}; if (!document.querySelector('style[data-plugin="' + id + '"][data-style="' + styleId + '"]')) { const style = document.createElement('style'); style.dataset.plugin = id; style.dataset.style = styleId; style.textContent = ${JSON.stringify(output.code.toString())}; document.head.append(style); } export default ${JSON.stringify(classes)};` }
       })
     },
   }],

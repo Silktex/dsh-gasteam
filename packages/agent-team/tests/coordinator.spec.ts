@@ -2,6 +2,7 @@ import type { WorkspacePageSnapshotStore } from '../src/workspace-pagination.ts'
 import { afterEach, expect, it, vi } from 'vitest'
 import { rm, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -9,6 +10,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as CoordinatorTools from '../../tool-agent-team/src/coordinator.ts'
 import { schedulingViewSchema, schedulingControlSchema } from '../src/scheduling-schemas.ts'
 import { workspaceDashboardPageSchema, workspaceDashboardViewSchema } from '../src/workspace-dashboard.ts'
+import { workspaceActivityPageSchema } from '../src/workspace-activity.ts'
 import { createTaskSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, updateTaskSchema } from '../src/remote-schemas.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -227,6 +229,7 @@ it('authorizes and pages a retained workspace snapshot through the actual dashbo
   const other = await gitFixture(value => cleanup.push(() => rm(value, { recursive: true, force: true })))
   const otherLead = ctx.agentLoop.create(SessionId('paged-team-b'), { provider: 'mock', model: 'mock' }, { cwd: other.repository })
   await coordinator.close()
+  expect(() => ctx.agentTeams.remoteWorkspaceDashboard(lead, {})).toThrow(/coordinator is not enabled/i)
   const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id })
   cleanup.push(() => running.close())
   ctx.provide('workspaceCoordinator', running)
@@ -238,6 +241,19 @@ it('authorizes and pages a retained workspace snapshot through the actual dashbo
   const second = workspaceDashboardPageSchema.parse(ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'projects', pageSize: 1, cursor: first.nextCursor }))
   expect(second.items.map(item => item.id)).not.toEqual(first.items.map(item => item.id))
   expect(() => ctx.agentTeams.remoteWorkspaceDashboardPage(otherLead, { collection: 'projects' })).toThrow(/operator/i)
+})
+
+it('serves bounded exact activity references through the operator-only Remote', async () => {
+  const { ctx, lead, config, coordinator } = await fixture()
+  const other = ctx.agentLoop.create(SessionId('activity-other'), { provider: 'mock', model: 'mock' })
+  await coordinator.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id })
+  cleanup.push(() => running.close()); ctx.provide('workspaceCoordinator', running)
+  const first = workspaceActivityPageSchema.parse(await ctx.agentTeams.remoteWorkspaceActivityPage(lead, { limit: 1 }))
+  expect(first.items).toEqual([expect.objectContaining({ ref: expect.objectContaining({ source: 'coordinator', sequence: 1 }), type: 'coordinator/created' })])
+  const second = workspaceActivityPageSchema.parse(await ctx.agentTeams.remoteWorkspaceActivityPage(lead, { limit: 8, cursor: first.nextCursor }))
+  expect(second.items.some(item => item.ref.source === 'coordinator' && item.ref.sequence === 1)).toBe(false)
+  await expect(ctx.agentTeams.remoteWorkspaceActivityPage(other, {})).rejects.toThrow(/operator/i)
 })
 
 it('pages beyond the overview attempt bound through the actual Remote', async () => {
@@ -403,16 +419,60 @@ it('reopens only a positively never-started provision failure at its durable ret
   } finally { spawn.mockRestore(); clock.mockRestore() }
 })
 
+it('starts exactly one selected provisioning retry only after its durable deadline', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'Selected retry', description: 'Use the pinned provisioning retry lineage' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  let now = 1_000
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const spawn = vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('temporary provider unavailable'))
+  try {
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxConcurrent: 1,
+      retryPolicy: { maxAttempts: 1, initialDelayMs: 50, multiplier: 2, maxDelayMs: 100 } } })
+    cleanup.push(() => running.close())
+    const failed = running.view().attempts[0]!
+    const retry = { action: 'retry' as const, projectId: 'project', taskId: task.id, expectedRevision: 1,
+      attemptId: failed.attemptId, generation: failed.generation, expectedAttemptRevision: failed.revision }
+    await expect(running.controlScheduling(lead, retry)).rejects.toThrow(/not-due/)
+    expect(running.view().attempts).toHaveLength(1)
+    now = 1_050
+    const originalTask = ctx.agentTeams.getTask(lead, task.id)
+    const reopenedPrerequisite = vi.spyOn(ctx.agentTeams, 'getTask').mockReturnValueOnce({ ...originalTask, ready: false })
+    await expect(running.controlScheduling(lead, retry)).rejects.toThrow(/Task is no longer eligible/)
+    expect(running.view().attempts).toHaveLength(1)
+    reopenedPrerequisite.mockRestore()
+    const internals = running as unknown as { execution: { setWorkspaceBatchBlocker(blocker: (work: { projectId: string; teamId: string; taskId: string }) => string | undefined): void; external?: { ownsTask(projectId: string, nonCode: boolean): boolean; canStartProject(projectId: string): boolean } } }
+    internals.execution.setWorkspaceBatchBlocker(() => 'workspace batch prerequisite remains open')
+    await expect(running.controlScheduling(lead, retry)).rejects.toThrow(/workspace-batch-dependency/)
+    expect(running.view().attempts).toHaveLength(1)
+    internals.execution.setWorkspaceBatchBlocker(() => undefined)
+    internals.execution.external = { ownsTask: () => true, canStartProject: () => false }
+    await expect(running.controlScheduling(lead, retry)).rejects.toThrow(/provider-admission/)
+    expect(running.view().attempts).toHaveLength(1)
+    internals.execution.external = undefined
+    await running.controlScheduling(lead, retry)
+    const replacement = running.view().attempts.at(-1)!
+    expect(running.view().attempts).toHaveLength(2)
+    expect(replacement).toMatchObject({ generation: failed.generation + 1, phase: 'active', checkpoint: failed.checkpoint, retryPolicy: failed.retryPolicy })
+    await expect(running.controlScheduling(lead, retry)).rejects.toThrow(/stale provisioning retry/i)
+  } finally { spawn.mockRestore(); clock.mockRestore() }
+})
+
 it('keeps a non-retryable provision failure terminal after later reconciliations', async () => {
   const { ctx, lead, coordinator, request, config } = await fixture()
   await coordinator.register(lead, request)
-  await coordinator.acceptTask(lead, 'project', { subject: 'No credential retry', description: 'Credentials require operator repair' })
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'No credential retry', description: 'Credentials require operator repair' })
   await coordinator.close()
   const spawn = vi.spyOn(ctx.agentTeams, 'spawnReservedTeammate').mockRejectedValueOnce(new Error('authentication policy rejected'))
   try {
     const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, maxConcurrent: 1 } })
     cleanup.push(() => running.close())
-    expect(running.view().attempts).toMatchObject([{ phase: 'terminal', provisioning: { retryable: false } }])
+    const failed = running.view().attempts[0]!
+    expect(failed).toMatchObject({ phase: 'terminal', provisioning: { retryable: false } })
+    await expect(running.controlScheduling(lead, { action: 'retry', projectId: 'project', taskId: task.id, expectedRevision: 1,
+      attemptId: failed.attemptId, generation: failed.generation, expectedAttemptRevision: failed.revision })).rejects.toThrow(/not-retryable/)
     await running.reconcile()
     expect(running.view().attempts).toHaveLength(1)
     expect(running.view().dispatchStatus[0]).toMatchObject({ state: 'finished', blockers: expect.arrayContaining([expect.objectContaining({ code: 'recovery-required' })]) })
@@ -1024,6 +1084,11 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   expect(() => schedulingControlSchema.parse({ action: 'priority', projectId: 'project', taskId: task.id, expectedRevision: 2, priority: 0, injected: true })).toThrow()
   expect(schedulingControlSchema.parse({ action: 'handoff', projectId: 'project', taskId: task.id, expectedRevision: 2,
     attemptId: 'attempt-1', generation: 1, expectedAttemptRevision: 1 })).toMatchObject({ action: 'handoff', attemptId: 'attempt-1' })
+  expect(schedulingControlSchema.parse({ action: 'retry', projectId: 'project', taskId: task.id, expectedRevision: 2,
+    attemptId: 'attempt-1', generation: 1, expectedAttemptRevision: 1 })).toMatchObject({ action: 'retry', attemptId: 'attempt-1' })
+  expect((await call('team_dispatch_retry', { project_id: 'project', task_id: task.id, expected_revision: 2,
+    attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 })).isError).toBe(true)
+  expect((await call('team_dispatch_cancel', { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'missing token part', attempt_id: 'attempt-1' })).isError).toBe(true)
   expect((await call('team_dispatch_handoff', { project_id: 'project', task_id: task.id, expected_revision: 2,
     attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 })).isError).toBe(true)
   expect((await call('team_dispatch_cancel', { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' })).isError).not.toBe(true)
@@ -1033,6 +1098,8 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
     expect.objectContaining({ tool: 'team_dispatch_priority', input: { project_id: 'project', task_id: task.id, expected_revision: 1, priority: 50 }, result: { error: false, payload: expect.anything() } }),
     expect.objectContaining({ tool: 'team_dispatch_pause', input: { project_id: 'project', expected_revision: 0, paused: true }, result: { error: false, payload: expect.anything() } }),
     expect.objectContaining({ tool: 'team_dispatch_handoff', input: { project_id: 'project', task_id: task.id, expected_revision: 2, attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 }, result: { error: true, payload: expect.anything() } }),
+    expect.objectContaining({ tool: 'team_dispatch_retry', input: { project_id: 'project', task_id: task.id, expected_revision: 2, attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 }, result: { error: true, payload: expect.anything() } }),
+    expect.objectContaining({ tool: 'team_dispatch_cancel', input: { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'missing token part', attempt_id: 'attempt-1' }, result: { error: true, payload: expect.anything() } }),
     expect.objectContaining({ tool: 'team_dispatch_cancel', input: { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' }, result: { error: false, payload: expect.anything() } }),
   ]))
   await plugin.dispose()
@@ -1081,6 +1148,33 @@ it('persists active cancellation before draining and reconciles failed shutdown 
   drain.mockRestore()
   await running.pause(lead, 'project', 1, false)
   expect(running.view().attempts).toHaveLength(1)
+})
+
+it('fences a stale selected cancellation generation before it can cancel its replacement', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'Replacement cancellation', description: 'Fence the old selected generation' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang', 'hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: { dshDeadlineMs: 1_000, externalDeadlineMs: 1_000, escalationCooldownMs: 1_000, maxEscalationsPerCondition: 2 } } })
+  cleanup.push(() => running.close())
+  const first = running.view().attempts.find(item => item.taskId === task.id)!
+  const internals = (running as unknown as { execution: CoordinatorExecution }).execution as unknown as {
+    assignments: AssignmentStore
+    cancelAttempt: (lead: typeof lead, record: AttemptRecord, reason: string) => Promise<AttemptRecord>
+    startAttempt: (lead: typeof lead, record: AttemptRecord) => Promise<AttemptRecord>
+  }
+  const stopped = await internals.cancelAttempt(lead, first, 'replace first generation')
+  const replacement = await internals.assignments.reserve({ projectId: first.projectId, teamId: first.teamId, taskId: first.taskId,
+    workerId: randomUUID(), runtimeId: randomUUID(), provider: 'spawn', expectedGeneration: stopped.generation,
+    repairLimit: stopped.repairLimit!, handoffLimit: stopped.handoffLimit, retryPolicy: stopped.retryPolicy, checkpoint: stopped.checkpoint })
+  const active = await internals.startAttempt(lead, replacement)
+  await expect(running.controlScheduling(lead, { action: 'cancel', projectId: 'project', taskId: task.id, expectedRevision: 1, reason: 'stale A', attemptId: first.attemptId, generation: first.generation, expectedAttemptRevision: first.revision })).rejects.toThrow(/Stale cancellation attempt/)
+  expect(running.view().dispatchRequests.find(item => item.taskId === task.id)?.cancelReason).toBeUndefined()
+  expect(running.view().attempts.find(item => item.attemptId === active.attemptId)).toMatchObject({ phase: 'active' })
+  await running.controlScheduling(lead, { action: 'cancel', projectId: 'project', taskId: task.id, expectedRevision: 1, reason: 'fresh B', attemptId: active.attemptId, generation: active.generation, expectedAttemptRevision: active.revision })
+  expect(running.view().dispatchRequests.find(item => item.taskId === task.id)?.cancelReason).toBe('fresh B')
+  expect(running.view().attempts.find(item => item.attemptId === active.attemptId)).toMatchObject({ phase: 'terminal', stopReason: 'fresh B' })
 })
 
 

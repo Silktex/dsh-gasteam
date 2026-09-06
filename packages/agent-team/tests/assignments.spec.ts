@@ -132,6 +132,12 @@ it('persists a classified non-retryable provisioning failure without reopening i
   await expect(store.reserve({ ...request, expectedGeneration: 1, runtimeId: 'session-retry' })).rejects.toThrow(/not retryable/i)
 })
 
+it('does not let a DSH assignment relabel an active runtime as a provisioning failure', async () => {
+  const { store } = await fixture()
+  const active = await store.activate(token(await store.reserve(request)))
+  await expect(store.provisionFailed(token(active), { runtimeId: active.runtimeId, kind: 'stopped', receipt: 'unexpected-active-provider-failure' }, 'provider failed', 1, true)).rejects.toThrow(/active external/i)
+})
+
 it('pins recovery deliveries separately from health nudges and preserves the policy on reopen', async () => {
   const { store, directory } = await fixture()
   const policy = { maxAttempts: 1, initialDelayMs: 7, multiplier: 3, maxDelayMs: 99 }
@@ -396,4 +402,20 @@ it('pins repair policy and predecessor evidence across JSONL replay and rejects 
   await expect(restored.reserve({ ...repairRequest, expectedGeneration: repair.generation, runtimeId: 'extra-runtime',
     repair: { ...repairRequest.repair, previousAttemptId: repair.attemptId, round: 2 } })).rejects.toThrow(/exhausted/)
   await expect(restored.reserve({ ...request, repairLimit: 1, expectedGeneration: repair.generation, runtimeId: 'reset-runtime' })).rejects.toThrow(/erase/)
+})
+
+it('preserves a spent repair lineage when that repair worker has a retryable provisioning failure', async () => {
+  const { store } = await fixture()
+  const policy = { maxAttempts: 1, initialDelayMs: 10, multiplier: 1, maxDelayMs: 10 }
+  const original = await store.activate(token(await store.reserve({ ...request, provider: 'spawn', repairLimit: 1, retryPolicy: policy })))
+  const terminal = await store.retire(token(await store.report(token(original), 'candidate ready')), stopped(original))
+  const repair = { previousAttemptId: terminal.attemptId, submissionId: 'submission-1', integrationId: 'integration-1',
+    sourceCommit: 'a'.repeat(40), candidateCwd: '/retained/candidate', diagnostic: 'verification failed', round: 1 }
+  const repairReservation = await store.reserve({ ...request, provider: 'spawn', repairLimit: 1, expectedGeneration: terminal.generation,
+    workerId: 'repair-worker', runtimeId: 'repair-runtime', checkpoint: terminal.checkpoint, repair,
+    retryPolicy: policy })
+  const failed = await store.provisionFailed(token(repairReservation), stopped(repairReservation), 'temporary provisioning failure', 10, true)
+  await expect(store.reserve({ ...request, provider: 'spawn', repairLimit: 1, expectedGeneration: failed.generation,
+    workerId: 'repair-retry-worker', runtimeId: 'repair-retry-runtime', checkpoint: failed.checkpoint, repair,
+    retryPolicy: failed.retryPolicy })).resolves.toMatchObject({ generation: 3, repair, checkpoint: failed.checkpoint })
 })

@@ -7,11 +7,11 @@ const workSchema = z.object({ projectId: z.string().min(1), teamId: z.string().m
 export type DispatchWork = z.output<typeof workSchema>
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const priority = z.number().int().min(-1_000_000).max(1_000_000)
-const requestSchema = workSchema.extend({ order: integer.min(1), priority, revision: integer.min(1), cancelReason: z.string().min(1).max(16_384).optional() }).strict()
+const requestSchema = workSchema.extend({ order: integer.min(1), priority, revision: integer.min(1), enqueuedAt: integer.optional(), cancelReason: z.string().min(1).max(16_384).optional() }).strict()
 export type DispatchRequest = z.output<typeof requestSchema>
 const envelope = { version: z.literal(1), sequence: integer.min(1) }
 const eventSchema = z.discriminatedUnion('type', [
-  z.object({ ...envelope, type: z.literal('dispatch/enqueued'), work: workSchema, priority }).strict(),
+  z.object({ ...envelope, type: z.literal('dispatch/enqueued'), work: workSchema, priority, enqueuedAt: integer.optional() }).strict(),
   z.object({ ...envelope, type: z.literal('dispatch/priority'), work: workSchema, expectedRevision: integer.min(1), priority }).strict(),
   z.object({ ...envelope, type: z.literal('dispatch/cancelled'), work: workSchema, expectedRevision: integer.min(1), reason: z.string().trim().min(1).max(16_384) }).strict(),
   z.object({ ...envelope, type: z.literal('dispatch/selected'), work: workSchema, at: integer }).strict(),
@@ -25,7 +25,7 @@ function reduce(state: State, raw: unknown): State {
   const existing = state.requests.find(request => sameDispatchWork(request, event.work))
   if (event.type === 'dispatch/enqueued') {
     if (existing) throw new Error('Dispatch request already exists')
-    return { ...state, requests: [...state.requests, { ...event.work, priority: event.priority, order: event.sequence, revision: 1 }] }
+    return { ...state, requests: [...state.requests, { ...event.work, priority: event.priority, order: event.sequence, revision: 1, ...(event.enqueuedAt === undefined ? {} : { enqueuedAt: event.enqueuedAt }) }] }
   }
   if (!existing) throw new Error('Dispatch request is missing')
   if (event.type === 'dispatch/priority' || event.type === 'dispatch/cancelled') {
@@ -48,10 +48,10 @@ export class DispatchQueue {
     const last = this.journal.snapshot().lastDispatchAt
     return last === undefined ? undefined : last + intervalMs
   }
-  async enqueue(work: DispatchWork): Promise<void> {
-    workSchema.parse(work)
+  async enqueue(work: DispatchWork, enqueuedAt = Date.now()): Promise<void> {
+    workSchema.parse(work); integer.parse(enqueuedAt)
     if (this.list().some(request => sameDispatchWork(request, work))) return
-    await this.journal.append(() => ({ type: 'dispatch/enqueued', work, priority: 0 }))
+    await this.journal.append(() => ({ type: 'dispatch/enqueued', work, priority: 0, enqueuedAt }))
   }
   async reprioritize(work: DispatchWork, expectedRevision: number, value: number): Promise<void> {
     await this.journal.append(() => ({ type: 'dispatch/priority', work, expectedRevision, priority: value }))
@@ -59,6 +59,17 @@ export class DispatchQueue {
   async cancel(work: DispatchWork, expectedRevision: number, reason: string): Promise<void> {
     await this.journal.append(() => ({ type: 'dispatch/cancelled', work, expectedRevision, reason }))
   }
+  /** Record an explicit operator-selected dispatch after the same global pacing fence. */
+  async selectExact(work: DispatchWork, now: number, intervalMs: number): Promise<DispatchRequest | undefined> {
+    workSchema.parse(work); integer.parse(now); integer.parse(intervalMs)
+    const state = this.journal.snapshot()
+    if (state.lastDispatchAt !== undefined && now - state.lastDispatchAt < intervalMs) return undefined
+    const request = state.requests.find(candidate => sameDispatchWork(candidate, work) && candidate.cancelReason === undefined)
+    if (request === undefined) return undefined
+    await this.journal.append(() => ({ type: 'dispatch/selected', work, at: now }))
+    return request
+  }
+
   /** Caller serializes selection with assignment reservation. Ineligible requests retain their order. */
   async select(eligible: (request: DispatchRequest) => boolean, now: number, intervalMs: number): Promise<DispatchRequest | undefined> {
     integer.parse(now); integer.parse(intervalMs)

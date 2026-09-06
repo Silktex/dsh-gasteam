@@ -99,6 +99,8 @@ export class CoordinatorExecution {
   private readonly pendingMergeBatchAdmissions = new Map<string, string>()
   /** Coordinator-owned cross-project gate; no model input can loosen it. */
   private workspaceBatchBlocker: ((work: { projectId: string; teamId: string; taskId: string }) => string | undefined) | undefined
+  /** Latest reconciled snapshots supply the same admission blockers to controls and scans. */
+  private latestViews: readonly CoordinatorProjectView[] = []
 
   private constructor(
     private readonly ctx: Context,
@@ -254,14 +256,24 @@ export class CoordinatorExecution {
     } catch (error) { await assignments.close(); throw error }
   }
 
-  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[]; reports: ReportAcceptanceRecord[]; candidateRetention: CandidateRetentionRecord[]; health: AttemptHealth[]; escalations: OperatorEscalation[] } {
+  view(views: readonly CoordinatorProjectView[]): { attempts: AttemptRecord[]; executionBlocks: ExecutionBlock[]; dispatchRequests: DispatchRequest[]; dispatchStatus: DispatchStatus[]; submissions: SubmissionRecord[]; mergeBatches: import('./merge-batch-registry.ts').MergeBatchRegistration[]; reports: ReportAcceptanceRecord[]; candidateRetention: CandidateRetentionRecord[]; health: AttemptHealth[]; escalations: OperatorEscalation[] } {
     const now = Date.now()
-    return { submissions: this.submissions.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
+    return { submissions: this.submissions.list(), mergeBatches: this.mergeBatches.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
       dispatchStatus: this.queue.list().map(request => this.status(request, views, now)), health: this.health?.listHealth() ?? [], escalations: this.health?.listEscalations() ?? [] }
   }
 
   routedCapabilities(): { dsh: RuntimeProviderCapabilities; external?: RuntimeProviderCapabilities } {
     return { dsh: new RoutedDshAssignmentRuntime(this.runtime).capabilities, ...(this.external === undefined ? {} : { external: new RoutedExternalAssignmentRuntime(this.external).capabilities }) }
+  }
+
+  /** Browser-safe explanation of the existing handoff gate; it does not authorize a replacement. */
+  handoffEligibility(record: AttemptRecord): { handoffEligible: boolean; handoffReason?: 'external-provider' | 'not-active' | 'nudges-required' | 'budget-exhausted' } {
+    if (record.provider === 'external') return { handoffEligible: false, handoffReason: 'external-provider' }
+    if (record.phase !== 'active') return { handoffEligible: false, handoffReason: 'not-active' }
+    const nudges = this.config?.health?.recovery?.maxNudges
+    if (nudges === undefined || (record.healthRecovery?.count ?? 0) < nudges) return { handoffEligible: false, handoffReason: 'nudges-required' }
+    if (this.assignments.list().filter(candidate => sameWork(candidate, record) && candidate.handoff !== undefined).length >= (record.handoffLimit ?? 1)) return { handoffEligible: false, handoffReason: 'budget-exhausted' }
+    return { handoffEligible: true }
   }
 
   /** Install the coordinator's authoritative batch dependency gate. */
@@ -446,6 +458,7 @@ export class CoordinatorExecution {
 
   async scan(views: readonly CoordinatorProjectView[]): Promise<void> {
     if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    this.latestViews = views
     // Enqueue before eligibility checks so blocked/paused work retains its original order.
     for (const view of views) for (const team of view.teams) for (const task of team.tasks) {
       if (task.status === 'pending') await this.queue.enqueue({ projectId: view.project.id, teamId: team.teamId, taskId: task.id })
@@ -559,24 +572,8 @@ export class CoordinatorExecution {
       let startInvoked = false
       try {
         const previous = this.assignments.list().findLast(record => sameWork(record, work))
-        const repair = previous ? this.repairFor(previous) : undefined
-        if (previous && !repair && previous.interruption === undefined && previous.provisioning === undefined) throw new Error('Previous attempt is not eligible for repair')
-        record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
-          workerId: randomUUID(), runtimeId: randomUUID(), provider: this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
-          repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
-          handoffLimit: previous ? previous.handoffLimit : this.config.maxHandoffs ?? 1,
-          retryPolicy: previous?.retryPolicy ?? this.config.retryPolicy,
-          ...(this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? { externalPolicy: this.external.reservationPolicy() } : {}),
-          checkpoint: { task: { subject: task.subject, description: task.description,
-            ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
-            ...(task.workflowBinding === undefined ? {} : { workflowId: task.workflowBinding.executionId, workflowStep: task.workflowBinding.stepId }),
-            artifacts: [...(task.workflowBinding?.inputs.map(input => input.artifact) ?? []), ...(repair ? [{ kind: 'commit' as const, ref: repair.sourceCommit }, { kind: 'file' as const, ref: repair.candidateCwd }] : [])],
-            nextAction: repair
-              ? 'Repair the failed submission in this new worktree. Inspect the retained candidate and diagnostic; apply the pinned source commit, resolve conflicts against the current target, fix failing checks, commit the repaired artifact, and report evidence. Preserve all previous checkouts.'
-              : task.nonCodeCriteria === undefined
-                ? 'Perform the task in your isolated worktree, commit code changes, and report artifacts and verification evidence.'
-                : `Produce a clear evidence-backed report that satisfies these acceptance criteria: ${task.nonCodeCriteria}. Do not create a Git submission; the Lead must review and explicitly accept the report.` },
-        })
+        if (previous && this.repairFor(previous) === undefined && previous.interruption === undefined && previous.provisioning === undefined) throw new Error('Previous attempt is not eligible for repair')
+        record = await this.reserveDispatch(work, view.project, task, previous)
         const lead = await this.leadFor(view.project, work.teamId)
         startInvoked = true
         await this.startAttempt(lead, record)
@@ -1094,6 +1091,38 @@ export class CoordinatorExecution {
     }
   }
 
+  /**
+   * One durable reservation path for ordinary admission and a due provisioning
+   * replacement. A failed repair delivery keeps its original repair round and
+   * checkpoint; provisioning retry never authorizes another repair.
+   */
+  private async reserveDispatch(work: DispatchWork, project: ProjectRecord, task: CoordinatorProjectView['teams'][number]['tasks'][number], previous: AttemptRecord | undefined): Promise<AttemptRecord> {
+    const provisioningRetry = previous?.provisioning !== undefined
+    const repair = (previous === undefined ? undefined : this.repairFor(previous)) ?? (provisioningRetry ? previous?.repair : undefined)
+    const external = provisioningRetry ? previous?.provider === 'external' : this.external?.ownsTask(project.id, task.nonCodeCriteria !== undefined) === true
+    if (external && this.external === undefined) throw new Error('External provisioning retry has no retained provider adapter')
+    if (external && provisioningRetry && previous?.externalPolicy === undefined) throw new Error('External provisioning retry lacks its immutable provider policy')
+    const checkpoint = provisioningRetry ? previous!.checkpoint : {
+      task: { subject: task.subject, description: task.description,
+        ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }) }, step: repair ? 'repair' : 'implement',
+      ...(task.workflowBinding === undefined ? {} : { workflowId: task.workflowBinding.executionId, workflowStep: task.workflowBinding.stepId }),
+      artifacts: [...(task.workflowBinding?.inputs.map(input => input.artifact) ?? []), ...(repair ? [{ kind: 'commit' as const, ref: repair.sourceCommit }, { kind: 'file' as const, ref: repair.candidateCwd }] : [])],
+      nextAction: repair
+        ? 'Repair the failed submission in this new worktree. Inspect the retained candidate and diagnostic; apply the pinned source commit, resolve conflicts against the current target, fix failing checks, commit the repaired artifact, and report evidence. Preserve all previous checkouts.'
+        : task.nonCodeCriteria === undefined
+          ? 'Perform the task in your isolated worktree, commit code changes, and report artifacts and verification evidence.'
+          : `Produce a clear evidence-backed report that satisfies these acceptance criteria: ${task.nonCodeCriteria}. Do not create a Git submission; the Lead must review and explicitly accept the report.`,
+    }
+    return await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
+      workerId: randomUUID(), runtimeId: randomUUID(), provider: external ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
+      repairLimit: previous ? previous.repairLimit! : this.config!.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
+      handoffLimit: previous ? previous.handoffLimit : this.config!.maxHandoffs ?? 1,
+      retryPolicy: previous?.retryPolicy ?? this.config!.retryPolicy,
+      ...(external ? { externalPolicy: provisioningRetry ? previous!.externalPolicy! : this.external!.reservationPolicy() } : {}),
+      checkpoint,
+    })
+  }
+
   private async startAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
     if (record.provider === 'external') {
       if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
@@ -1118,16 +1147,69 @@ export class CoordinatorExecution {
     return await new RoutedDshAssignmentRuntime(this.runtime).cancel(lead, record, reason)
   }
 
-  async cancel(lead: Agent, work: DispatchWork, expectedRevision: number, reason: string): Promise<void> {
+  async cancel(lead: Agent, work: DispatchWork, expectedRevision: number, reason: string, expectedAttempt?: { attemptId: string; generation: number; expectedRevision: number }): Promise<void> {
     if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
     const submissions = this.submissions.list().filter(submission => sameWork(submission, work))
     if (submissions.some(submission => this.ctx.agentTeams.listIntegrations(lead).some(job => job.id === submission.integrationId && job.phase !== 'failed'))) throw new Error('Work has entered integration; integration cancellation is required')
     if (this.reports.list().some(report => sameWork(report, work))) throw new Error('Work has entered report acceptance; report cancellation is not permitted')
-    await this.queue.cancel(work, expectedRevision, reason)
     const record = this.assignments.list().findLast(record => sameWork(record, work))
+    if (expectedAttempt !== undefined && (!record || record.attemptId !== expectedAttempt.attemptId || record.generation !== expectedAttempt.generation || record.revision !== expectedAttempt.expectedRevision)) throw new Error('Stale cancellation attempt')
+    await this.queue.cancel(work, expectedRevision, reason)
     if (record && record.phase !== 'terminal') {
       try { await this.cancelAttempt(lead, record, reason) }
       catch (error) { await this.block(work, error); throw error }
+    }
+  }
+
+  /** Browser-safe explanation of a selected provisioning retry; it does not reserve capacity. */
+  retryEligibility(record: AttemptRecord): { retryEligible: boolean; retryReason?: 'not-provisioning' | 'not-retryable' | 'ownership-unproven' | 'budget-exhausted' | 'not-due'; retryAt?: number } {
+    if (record.provisioning === undefined) return { retryEligible: false, retryReason: 'not-provisioning' }
+    if (!record.provisioning.retryable) return { retryEligible: false, retryReason: 'not-retryable' }
+    if (record.phase !== 'terminal' || record.stopEvidence?.kind !== 'stopped') return { retryEligible: false, retryReason: 'ownership-unproven' }
+    if (record.provisioning.count > record.retryPolicy.maxAttempts) return { retryEligible: false, retryReason: 'budget-exhausted' }
+    if (Date.now() < record.provisioning.notBefore) return { retryEligible: false, retryReason: 'not-due', retryAt: record.provisioning.notBefore }
+    return { retryEligible: true }
+  }
+
+  /**
+   * Start exactly one due, classified provisioning replacement. The durable
+   * reservation is the effect receipt: a concurrent scheduler pass or replay
+   * sees the successor generation and fails the exact predecessor token.
+   */
+  async retry(lead: Agent, work: DispatchWork, expectedRevision: number, attempt: { attemptId: string; generation: number; expectedRevision: number }): Promise<void> {
+    if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    if (this.config === undefined) throw new Error('Coordinator execution is disabled')
+    const request = this.queue.list().find(item => sameWork(item, work))
+    if (!request || request.revision !== expectedRevision || request.cancelReason !== undefined) throw new Error('Stale or cancelled dispatch request')
+    const current = this.assignments.list().findLast(record => sameWork(record, work))
+    if (!current || current.attemptId !== attempt.attemptId || current.generation !== attempt.generation || current.revision !== attempt.expectedRevision) throw new Error('Stale provisioning retry attempt')
+    const eligibility = this.retryEligibility(current)
+    if (!eligibility.retryEligible) throw new Error(`Provisioning retry is not eligible: ${eligibility.retryReason}`)
+    // Keep the selected retry inside the scheduler's admission boundary. It
+    // must not evade a reopened dependency, batch gate, recovery-only
+    // provider, capacity, pause, or global dispatch pacing.
+    const status = this.status(request, this.latestViews, Date.now())
+    if (status.state !== 'ready') throw new Error(`Provisioning retry is blocked: ${status.blockers.map(blocker => blocker.code).join(', ') || status.state}`)
+    if (this.submissions.list().some(item => item.attemptId === current.attemptId) || this.reports.list().some(item => item.attemptId === current.attemptId)) throw new Error('Provisioning retry cannot bypass submission or report acceptance')
+    const project = this.projects().find(item => item.id === work.projectId && item.teamIds.includes(work.teamId))
+    if (!project) throw new Error('Registered project is unavailable')
+    const task = this.ctx.agentTeams.getTask(lead, TeamTaskId(work.taskId))
+    if (task.status !== 'pending' || !task.ready) throw new Error('Task is no longer eligible for provisioning retry')
+    if (this.workspaceBatchBlocker?.(work) !== undefined) throw new Error('Workspace batch prerequisite is no longer eligible for provisioning retry')
+    this.assignments.configure({ globalCapacity: this.config.maxConcurrent, projectCapacities: Object.fromEntries(this.projects().map(item => [item.id, item.capacity])) })
+    if (await this.queue.selectExact(work, Date.now(), this.config.dispatchIntervalMs ?? 0) === undefined) throw new Error('Provisioning retry is blocked by dispatch pacing or cancellation')
+    let replacement: AttemptRecord | undefined
+    let startInvoked = false
+    try {
+      replacement = await this.reserveDispatch(work, project, task, current)
+      startInvoked = true
+      await this.startAttempt(lead, replacement)
+    } catch (error) {
+      if (replacement !== undefined && !startInvoked) await this.assignments.retire(token(replacement), { runtimeId: replacement.runtimeId, kind: 'never-started', receipt: 'coordinator/retry-pre-start-failure' })
+      const persisted = replacement === undefined ? undefined : this.assignments.list().find(item => item.attemptId === replacement!.attemptId)
+      // A fresh classified failure retains its own deadline and becomes the
+      // only eligible replacement. Do not write a generic failure over it.
+      if (persisted?.provisioning?.retryable !== true) throw error
     }
   }
 

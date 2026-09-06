@@ -7,6 +7,7 @@ import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation }
 import type { WorkspaceBatchPlanRequestWire, WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
 import type { WorkspaceBatchNotification, WorkspaceBatchView } from './coordinator-batches.ts'
 import type { WorkspaceDashboardPageRequest, WorkspaceDashboardPage, WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'
+import type { WorkspaceActivityRequest, WorkspaceActivityPage } from './workspace-activity.ts'
 /** Agent Teams service façade over roster, mailbox, task, and runtime lifecycle owners. */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -543,100 +544,106 @@ export class TeamService extends TypertRemoteService {
 
   @Remote('scheduling')
   remoteScheduling(agent: Agent, request: SchedulingQuery): SchedulingView {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.scheduling(agent, request)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.scheduling(agent, request)
   }
 
   @Remote('controlScheduling')
   remoteControlScheduling(agent: Agent, request: SchedulingControl): Promise<SchedulingView> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.controlScheduling(agent, request)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.controlScheduling(agent, request)
   }
 
   @Remote('createWorkflow')
   remoteCreateWorkflow(agent: Agent, request: CreateWorkflowRequest): Promise<WorkflowRuntimeView> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.createWorkflow(agent, request)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.createWorkflow(agent, request)
   }
 
   @Remote('inspectWorkflow')
   remoteInspectWorkflow(agent: Agent, request: { executionId: string }): WorkflowRuntimeView {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.inspectWorkflow(agent, request.executionId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.inspectWorkflow(agent, request.executionId)
   }
 
   @Remote('resumeWorkflow')
   remoteResumeWorkflow(agent: Agent, request: { executionId: string }): Promise<WorkflowRuntimeView | undefined> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.resumeWorkflow(agent, request.executionId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.resumeWorkflow(agent, request.executionId)
   }
 
   @Remote('reviewReports')
   remoteReviewReports(agent: Agent, request: ReviewReportsRequest): ReviewableReport[] {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.reviewReports(agent, request.projectId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.reviewReports(agent, request.projectId)
   }
 
   @Remote('acceptReport')
   async remoteAcceptReport(agent: Agent, request: RemoteAcceptReportRequest): Promise<ReviewableReport> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
     const { projectId, ...review } = request
-    return await this.ctx.workspaceCoordinator.acceptReport(agent, projectId, review)
+    return await this.ctx.root.workspaceCoordinator.acceptReport(agent, projectId, review)
   }
 
   @Remote('planWorkspaceBatch')
   remotePlanWorkspaceBatch(agent: Agent, request: WorkspaceBatchPlanRequestWire): Promise<WorkspaceBatchView> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.planWorkspaceBatch(agent, request)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.planWorkspaceBatch(agent, request)
   }
 
   @Remote('inspectWorkspaceBatch')
   remoteInspectWorkspaceBatch(agent: Agent, request: WorkspaceBatchQuery): WorkspaceBatchView {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.inspectWorkspaceBatch(agent, request.batchId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.inspectWorkspaceBatch(agent, request.batchId)
   }
 
   @Remote('subscribeWorkspaceBatch')
   remoteSubscribeWorkspaceBatch(agent: Agent, request: WorkspaceBatchSubscriptionRequest): Promise<WorkspaceBatchView> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.subscribeWorkspaceBatch(agent, request.batchId, request.subscriptionId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.subscribeWorkspaceBatch(agent, request.batchId, request.subscriptionId)
   }
 
   @Remote('workspaceBatchInbox')
   remoteWorkspaceBatchInbox(agent: Agent, _request: WorkspaceBatchInboxRequest): Promise<WorkspaceBatchNotification[]> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.workspaceBatchInbox(agent)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.workspaceBatchInbox(agent)
   }
 
   @Remote('acknowledgeWorkspaceBatchNotification')
   async remoteAcknowledgeWorkspaceBatchNotification(agent: Agent, request: WorkspaceBatchAcknowledgementRequest): Promise<WorkspaceBatchNotification[]> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    await this.ctx.workspaceCoordinator.acknowledgeWorkspaceBatchNotification(agent, request.intentId)
-    return await this.ctx.workspaceCoordinator.workspaceBatchInbox(agent)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    await this.ctx.root.workspaceCoordinator.acknowledgeWorkspaceBatchNotification(agent, request.intentId)
+    return await this.ctx.root.workspaceCoordinator.workspaceBatchInbox(agent)
   }
 
   @Remote('workspaceDashboard')
   remoteWorkspaceDashboard(agent: Agent, _request: WorkspaceDashboardRequest): WorkspaceDashboardView {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.workspaceDashboard(agent)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.workspaceDashboard(agent)
   }
 
   @Remote('workspaceDashboardPage')
   remoteWorkspaceDashboardPage(agent: Agent, request: WorkspaceDashboardPageRequest): WorkspaceDashboardPage {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.workspaceDashboardPage(agent, request)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.workspaceDashboardPage(agent, request)
+  }
+
+  @Remote('workspaceActivityPage')
+  remoteWorkspaceActivityPage(agent: Agent, request: WorkspaceActivityRequest): Promise<WorkspaceActivityPage> {
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.workspaceActivityPage(agent, request)
   }
 
   @Remote('healthInbox')
   remoteHealthInbox(agent: Agent, request: HealthInboxRequest): OperatorEscalation[] {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.healthInbox(agent, request.projectId)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.healthInbox(agent, request.projectId)
   }
 
   @Remote('acknowledgeHealth')
   remoteAcknowledgeHealth(agent: Agent, request: AcknowledgeHealthRequest): Promise<OperatorEscalation> {
-    if (!this.ctx.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
-    return this.ctx.workspaceCoordinator.acknowledgeHealth(agent, request.projectId, request.escalationId, request.expectedRevision)
+    if (!this.ctx.root.workspaceCoordinator) throw new Error('Workspace coordinator is not enabled')
+    return this.ctx.root.workspaceCoordinator.acknowledgeHealth(agent, request.projectId, request.escalationId, request.expectedRevision)
   }
 
   /** Preserve Team task rejections while allowing unexpected failures to reject the Remote call. */

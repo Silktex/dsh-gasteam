@@ -142,7 +142,7 @@ const INTEGRATION_SCHEMA = {
     repository: { type: 'string', required: true }, cwd: { type: 'string', required: true },
     sourceBranch: { type: 'string', required: true }, sourceCommit: { type: 'string', required: true },
     targetBranch: { type: 'string', required: true }, targetCommit: { type: 'string' }, candidateCommit: { type: 'string' },
-    error: { type: 'string' },
+    error: { type: 'string' }, failureKind: { type: 'string', enum: ['verification'] },
     verification: { type: 'array', required: true, items: {
       type: 'object', additionalProperties: false, properties: {
         command: { type: 'string', required: true }, args: { type: 'array', required: true, items: { type: 'string' } },

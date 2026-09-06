@@ -3,9 +3,15 @@ import z from 'zod'
 const id = z.string().min(1).max(128)
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 export const schedulingQuerySchema = z.object({ projectId: id }).strict()
+const cancelControlSchema = z.object({ action: z.literal('cancel'), projectId: id, taskId: id, expectedRevision: revision.min(1), reason: z.string().trim().min(1).max(16_384), attemptId: id.optional(), generation: revision.min(1).optional(), expectedAttemptRevision: revision.min(1).optional() }).strict().superRefine((value, ctx) => {
+  const count = Number(value.attemptId !== undefined) + Number(value.generation !== undefined) + Number(value.expectedAttemptRevision !== undefined)
+  if (count !== 0 && count !== 3) ctx.addIssue({ code: 'custom', message: 'Cancellation attempt token must be complete when provided' })
+})
+const retryControlSchema = z.object({ action: z.literal('retry'), projectId: id, taskId: id, expectedRevision: revision.min(1), attemptId: id, generation: revision.min(1), expectedAttemptRevision: revision.min(1) }).strict()
 export const schedulingControlSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('pause'), projectId: id, expectedRevision: revision, paused: z.boolean() }).strict(),
-  z.object({ action: z.literal('cancel'), projectId: id, taskId: id, expectedRevision: revision.min(1), reason: z.string().trim().min(1).max(16_384) }).strict(),
+  cancelControlSchema,
+  retryControlSchema,
   z.object({ action: z.literal('priority'), projectId: id, taskId: id, expectedRevision: revision.min(1), priority: z.number().int().min(-1_000_000).max(1_000_000) }).strict(),
   z.object({ action: z.literal('handoff'), projectId: id, taskId: id, expectedRevision: revision.min(1), attemptId: id, generation: revision.min(1), expectedAttemptRevision: revision.min(1) }).strict(),
 ])
@@ -26,7 +32,7 @@ export const schedulingViewSchema = z.object({
     blockers: z.array(z.object({ code: z.enum(['execution-disabled', 'shutdown', 'project-unavailable', 'paused', 'team-unavailable',
       'task-unavailable', 'task-not-pending', 'task-owned', 'dependencies', 'global-capacity', 'project-capacity', 'pacing',
       'cancelled', 'execution-failure', 'awaiting-acceptance', 'recovery-required', 'workspace-batch-dependency', 'provider-admission']), detail: z.string() }).strict()),
-    cancelReason: z.string().optional(), attemptId: id.optional(), nextDispatchAt: z.number().optional(),
+    cancelReason: z.string().optional(), attemptId: id.optional(), enqueuedAt: z.number().int().nonnegative().optional(), nextDispatchAt: z.number().optional(),
   }).strict()),
 }).strict()
 export type SchedulingQuery = z.infer<typeof schedulingQuerySchema>

@@ -13,7 +13,7 @@ const resultSchema = { type: 'object', additionalProperties: false, properties: 
     projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true },
     order: { type: 'integer', required: true }, priority: { type: 'integer', required: true }, revision: { type: 'integer', required: true },
     state: { type: 'string', required: true, enum: ['ready', 'waiting', 'assigned', 'finished', 'cancelled', 'accepted'] },
-    cancelReason: { type: 'string' }, attemptId: { type: 'string' }, nextDispatchAt: { type: 'number' },
+    cancelReason: { type: 'string' }, attemptId: { type: 'string' }, enqueuedAt: { type: 'number' }, nextDispatchAt: { type: 'number' },
     blockers: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
       code: { type: 'string', required: true }, detail: { type: 'string', required: true },
     } } },
@@ -64,9 +64,9 @@ const batch = (value: WorkspaceBatchView) => {
 const batchInboxOutput = { schema: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { intentId: { type: 'string', required: true }, batchId: { type: 'string', required: true }, subscriptionId: { type: 'string', required: true }, destination: { type: 'string', required: true }, completionEpoch: { type: 'integer', required: true } } } } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const notifications = (value: readonly WorkspaceBatchNotification[]) => value.map(item => ({ ...item }))
 function value(view: SchedulingView) {
-  return { ...view, requests: view.requests.map(({ attemptId, nextDispatchAt, cancelReason, ...request }) => ({ ...request,
+  return { ...view, requests: view.requests.map(({ attemptId, enqueuedAt, nextDispatchAt, cancelReason, ...request }) => ({ ...request,
     ...(cancelReason === undefined ? {} : { cancelReason }),
-    ...(attemptId === undefined ? {} : { attemptId }), ...(nextDispatchAt === undefined ? {} : { nextDispatchAt }),
+    ...(attemptId === undefined ? {} : { attemptId }), ...(enqueuedAt === undefined ? {} : { enqueuedAt }), ...(nextDispatchAt === undefined ? {} : { nextDispatchAt }),
   })) }
 }
 function reports(value: readonly ReviewableReport[]) {
@@ -181,14 +181,24 @@ export function apply(ctx: Context): void {
       async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'pause', projectId: args.project_id, expectedRevision: args.expected_revision, paused: args.paused })) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
-      name: 'team_dispatch_cancel', description: 'Durably cancel queued or active work using its dispatch request revision. Active capacity remains reserved until shutdown is confirmed; timeout does not undo cancellation.',
-      parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, reason: { type: 'string', required: true } }, output,
-      async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'cancel', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, reason: args.reason })) },
+      name: 'team_dispatch_cancel', description: 'Durably cancel queued or active work using its dispatch request revision. When selecting an attempt, provide all three exact attempt fields. Active capacity remains reserved until shutdown is confirmed; timeout does not undo cancellation.',
+      parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, reason: { type: 'string', required: true }, attempt_id: { type: 'string' }, generation: { type: 'integer' }, expected_attempt_revision: { type: 'integer' } }, output,
+      async execute(args, exec) {
+        const supplied = [args.attempt_id, args.generation, args.expected_attempt_revision].filter(value => value !== undefined)
+        if (supplied.length !== 0 && supplied.length !== 3) throw new Error('Cancellation attempt token requires attempt_id, generation, and expected_attempt_revision together')
+        return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'cancel', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, reason: args.reason,
+          ...(supplied.length === 0 ? {} : { attemptId: args.attempt_id!, generation: args.generation!, expectedAttemptRevision: args.expected_attempt_revision! }) }))
+      },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_dispatch_priority', description: 'Set queued task priority using the current request revision. Existing attempts cannot be reprioritized.',
       parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, priority: { type: 'integer', required: true } }, output,
       async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'priority', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, priority: args.priority })) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_dispatch_retry', description: 'Start one due replacement for an exact terminal, classified retryable provisioning failure. The pinned retry budget, deadline, checkpoint, and provider policy remain unchanged.',
+      parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, attempt_id: { type: 'string', required: true }, generation: { type: 'integer', required: true }, expected_attempt_revision: { type: 'integer', required: true } }, output,
+      async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'retry', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, attemptId: args.attempt_id, generation: args.generation, expectedAttemptRevision: args.expected_attempt_revision })) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_dispatch_handoff', description: 'After authorized health nudges are exhausted, checkpoint, stop, and replace one exact active DSH attempt. The old worktree remains retained for the replacement.',

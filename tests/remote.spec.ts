@@ -42,6 +42,7 @@ describe('Team RPC codecs', () => {
         ['acknowledgeWorkspaceBatchNotification', 'remoteAcknowledgeWorkspaceBatchNotification', ['agentId', 'request']],
         ['workspaceDashboard', 'remoteWorkspaceDashboard', ['agentId', 'request']],
         ['workspaceDashboardPage', 'remoteWorkspaceDashboardPage', ['agentId', 'request']],
+        ['workspaceActivityPage', 'remoteWorkspaceActivityPage', ['agentId', 'request']],
         ['healthInbox', 'remoteHealthInbox', ['agentId', 'request']],
         ['acknowledgeHealth', 'remoteAcknowledgeHealth', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],

@@ -24,6 +24,10 @@ pnpm start
 
 `install:profile` links the five built Team packages into your existing `web` profile under `$DSH_HOME/profiles/web` (`~/.dsh/profiles/web` by default). It adds the host and Web bundle layers and preserves the other installed plugins. Stop an already-running Web service before starting another server on its port.
 
+To validate the distributable packages before touching an existing profile, run `GASTEAM_RELEASE_ROOT=/var/tmp pnpm test:release`. It packs all five plugins, installs them with the published DSH runtime and committed patches into an unrelated consumer and isolated Web/headless profiles, rejects checkout links, runs the actual headless CLI through deterministic worker commit/verification/promotion/release, restarts a deterministic coordinator through a four-task real-Git DAG, and exercises backup, upgrade, and restoration of committed legacy assignment/batch fixtures. See [installation and rollback](docs/installation.md) for the retained evidence and remaining service/registry steps.
+
+Use the [complete autonomous profile patch](examples/autonomous.cordis.patch.yml) as the deployment template after replacing its directory, branch, provider, model, and verification placeholders. The release validator composes this template against the packed profile without starting a model or localhost service.
+
 Open the authenticated URL printed by `dsh`; the usual local address is `http://127.0.0.1:3080`. Configure model credentials through your normal DSH settings or the `DEEPSEEK_API_KEY` environment variable. Keep credentials outside Git.
 
 **Launch through this checkout's `pnpm dsh` or `pnpm start`.** This selects the pinned runtime with the required patches. Installing the plugin links alone does not patch a separate global DSH installation.

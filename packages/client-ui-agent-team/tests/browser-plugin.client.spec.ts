@@ -87,7 +87,7 @@ async function bench(options: {
     },
     workspaceDashboard: (...args: unknown[]) => {
       calls.push({ method: 'agentTeams/workspaceDashboard', args })
-      return Promise.resolve({ ok: true as const, value: { projects: [], projectsTruncated: false, attempts: [], attemptsTruncated: false, workflows: [], workflowsTruncated: false, batches: [], batchesTruncated: false, queue: [], queueTruncated: false, escalations: [], escalationsTruncated: false } })
+      return Promise.resolve({ ok: true as const, value: { projects: [], projectsTruncated: false, attempts: [], attemptsTruncated: false, workflows: [], workflowsTruncated: false, batches: [], batchesTruncated: false, mergeBatches: [], mergeBatchesTruncated: false, queue: [], queueTruncated: false, escalations: [], escalationsTruncated: false } })
     },
   })
   const navigation: unknown[] = []

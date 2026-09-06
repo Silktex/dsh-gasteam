@@ -134,10 +134,16 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if (prior?.provisioning && (!prior.provisioning.retryable || prior.provisioning.count > prior.retryPolicy.maxAttempts)) {
       throw new Error(prior.provisioning.retryable ? 'Provisioning retry budget is exhausted' : 'Provisioning failure is not retryable')
     }
+    const carriesRepair = prior?.repair !== undefined && request.repair !== undefined && JSON.stringify(request.repair) === JSON.stringify(prior.repair)
     if (request.handoff && prior?.repair) {
       // A handoff carries an already-authorized repair forward unchanged. It
       // neither creates a repair nor spends another repair round.
-      if (!request.repair || JSON.stringify(request.repair) !== JSON.stringify(prior.repair)) throw new Error('Handoff must preserve the existing repair lineage')
+      if (!carriesRepair) throw new Error('Handoff must preserve the existing repair lineage')
+    } else if (prior?.provisioning && prior.repair) {
+      // A provision failure happened before this repair worker could make a
+      // new delivery. Its replacement must retain the already-spent repair
+      // round and checkpoint; it is not another repair authorization.
+      if (!carriesRepair) throw new Error('Provisioning replacement must preserve the existing repair lineage')
     } else if (request.repair) {
       if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.stopReason || !prior.result
         || request.repair.previousAttemptId !== prior.attemptId
@@ -241,7 +247,8 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
       next = { ...next, handoffIntent: event.handoff }
       break
     case 'attempt/provision-failed':
-      if (current.phase !== 'reserved' || event.evidence.runtimeId !== current.runtimeId) throw new Error('Provisioning failure requires a reserved attempt with matching runtime evidence')
+      if (!['reserved', 'active'].includes(current.phase) || event.evidence.runtimeId !== current.runtimeId
+        || current.phase === 'active' && (current.provider !== 'external' || event.evidence.kind !== 'stopped')) throw new Error('Provisioning failure requires a reserved attempt or an active external attempt with matching quiescence evidence')
       next = { ...next, phase: 'terminal', stopEvidence: event.evidence, stopReason: event.diagnostic,
         provisioning: { count: records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId && record.taskId === current.taskId && record.provisioning !== undefined).length + 1,
           notBefore: event.notBefore, diagnostic: event.diagnostic, retryable: event.retryable } }

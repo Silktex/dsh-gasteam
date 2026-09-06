@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest'
-import { readFile, realpath, rm } from 'node:fs/promises'
+import { chmod, copyFile, readFile, realpath, rm, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -144,6 +144,50 @@ it('blocks new selected-project non-code work during recovery-only admission wit
   expect(restored.view().attempts[0]).toMatchObject({ attemptId: 'attempt-1', provider: 'external', taskId: retainedTask.id })
   expect(ctx.agents.get(SessionId('retained-runtime'))).toBeUndefined()
   await expect(readFile(join(providerDirectory, 'attempt-1', 'manifest.json'), 'utf8')).rejects.toThrow()
+})
+
+it('persists a recoverable external CLI launch failure and performs one replacement after its restart deadline', async () => {
+  const { repo, ctx, lead, config, coordinator } = await setup()
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'codex-report', description: 'Classify an admitted CLI that disappears before launch', nonCodeCriteria: 'Return a report' })
+  await coordinator.close()
+  const executable = join(repo.root, 'codex-after-admission.mjs')
+  await copyFile(resolve('packages/agent-team/tests/fixtures/external-runtime-fixture.mjs'), executable)
+  await chmod(executable, 0o755)
+  const policy = execution(repo.root, repo.repository)
+  policy.externalCodex.executable = executable
+  const configured = { ...policy, retryPolicy: { maxAttempts: 1, initialDelayMs: 1_500, multiplier: 2, maxDelayMs: 1_500 } }
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution: configured })
+  let closed = false
+  cleanup.push(async () => { if (!closed) await running.close() })
+  await unlink(executable)
+  await waitFor(async () => {
+    await running.reconcile()
+    return running.view().attempts.some(item => item.taskId === task.id && item.phase === 'terminal')
+  })
+  const failed = running.view().attempts.find(item => item.taskId === task.id)!
+  expect(failed).toMatchObject({ provider: 'external', phase: 'terminal', provisioning: { count: 1, retryable: true }, stopEvidence: { kind: 'stopped' } })
+  expect(ctx.agents.get(SessionId(failed.runtimeId))).toBeUndefined()
+  const runtimeJournal = join(config.directory, 'external-runtime.jsonl')
+  expect((await readFile(runtimeJournal, 'utf8')).split('"type":"external/intent"')).toHaveLength(2)
+  await running.close()
+  closed = true
+
+  await copyFile(resolve('packages/agent-team/tests/fixtures/external-runtime-fixture.mjs'), executable)
+  await chmod(executable, 0o755)
+  const restored = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution: configured })
+  cleanup.push(() => restored.close())
+  expect(restored.view().attempts).toHaveLength(1)
+  expect(restored.view().dispatchStatus.find(item => item.taskId === task.id)).toMatchObject({ state: 'waiting', blockers: expect.arrayContaining([expect.objectContaining({ code: 'pacing' })]) })
+  expect((await readFile(runtimeJournal, 'utf8')).split('"type":"external/intent"')).toHaveLength(2)
+  expect(ctx.agents.get(SessionId(failed.runtimeId))).toBeUndefined()
+  await waitFor(async () => {
+    await restored.reconcile()
+    return restored.view().attempts.some(item => item.taskId === task.id && item.generation === failed.generation + 1 && item.phase === 'terminal' && item.result === 'fixture external report')
+  })
+  const replacement = restored.view().attempts.find(item => item.taskId === task.id && item.generation === failed.generation + 1)!
+  expect(replacement).toMatchObject({ provider: 'external', phase: 'terminal', result: 'fixture external report', stopEvidence: { kind: 'stopped' } })
+  expect((await readFile(runtimeJournal, 'utf8')).split('"type":"external/intent"')).toHaveLength(3)
+  expect(ctx.agents.get(SessionId(replacement.runtimeId))).toBeUndefined()
 })
 
 it('routes an explicit external code worktree through quiescent commit and verified integration acceptance', async () => {

@@ -61,3 +61,16 @@ it('skips paused, capacity-blocked or dependency-blocked work without changing i
   expect(await queue.select(request => request.projectId === 'a', 11, 0)).toMatchObject({ taskId: 'blocked' })
   expect(queue.list()).toEqual(original)
 })
+
+
+it('records a selected operator retry with durable enqueue age while preserving global pacing', async () => {
+  const { directory, queue } = await fixture()
+  await queue.enqueue(work('a', 'retry'), 123)
+  expect(queue.list()[0]).toMatchObject({ enqueuedAt: 123 })
+  expect(await queue.selectExact(work('a', 'retry'), 1_000, 100)).toMatchObject({ taskId: 'retry' })
+  await queue.close()
+  const restored = await DispatchQueue.open(directory)
+  queues.push(restored)
+  expect(restored.list()[0]).toMatchObject({ enqueuedAt: 123 })
+  expect(await restored.selectExact(work('a', 'retry'), 1_099, 100)).toBeUndefined()
+})

@@ -1,0 +1,38 @@
+# Replace every __...__ token before using this example. Directories must be absolute.
+- id: agent-team
+  config:
+    worktreeProvider: git
+    integrationProvider: git
+
+- insert:
+    - id: team-worktrees
+      name: '@deepseek-ai/dsh-experimental-agent-team/git-worktrees'
+      config:
+        directory: __WORKTREE_DIRECTORY__
+    - id: team-integration
+      name: '@deepseek-ai/dsh-experimental-agent-team/git-integration'
+      config:
+        targetBranch: __TARGET_BRANCH__
+        verification:
+          - command: node
+            args: [--version]
+    - id: team-integration-worker
+      name: '@deepseek-ai/dsh-experimental-agent-team/integration-worker'
+    - id: team-supervisor
+      name: '@deepseek-ai/dsh-experimental-agent-team/supervisor'
+      config:
+        scanIntervalMs: 1000
+        staleAfterMs: 60000
+        recoveryMessage: 'Resume your unfinished assigned tasks and report progress.'
+    - id: workspace-coordinator
+      name: '@deepseek-ai/dsh-experimental-agent-team/coordinator'
+      config:
+        directory: __COORDINATOR_DIRECTORY__
+        scanIntervalMs: 1000
+        execution:
+          modelProvider: __MODEL_PROVIDER__
+          model: __MODEL_ID__
+          maxConcurrent: 8
+          dispatchIntervalMs: 1000
+    - id: workspace-coordinator-tools
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team/coordinator'

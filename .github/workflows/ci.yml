@@ -8,7 +8,7 @@ permissions:
 jobs:
   plugin:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
@@ -30,3 +30,4 @@ jobs:
       - run: pnpm test
       - run: pnpm test:acceptance
       - run: pnpm test:smoke
+      - run: GASTEAM_RELEASE_ROOT=/var/tmp pnpm test:release

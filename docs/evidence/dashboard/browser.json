@@ -1,0 +1,82 @@
+{
+  "browser": "Chrome/145.0.7632.6 via Playwright CDP",
+  "viewport": {
+    "width": 1600,
+    "height": 1100
+  },
+  "workspace": "GasTeam dashboard demo",
+  "leadSessionId": "workspace-dashboard-demo-lead",
+  "states": {
+    "leadSelected": {
+      "selectedRowText": "Controlled dashboard demo model: no external provider call was made. 19min",
+      "transcriptMarker": "Workspace dashboard controlled-provider demonstration."
+    },
+    "activity": {
+      "rows": 128,
+      "hasRemoteRows": true,
+      "hasUnknownTime": true,
+      "historyGapNotice": true
+    },
+    "trustedControlEvents": [
+      {
+        "type": "keydown",
+        "key": "Enter",
+        "text": "Pause",
+        "isTrusted": true
+      },
+      {
+        "type": "click",
+        "key": null,
+        "text": "Pause",
+        "isTrusted": true
+      },
+      {
+        "type": "keydown",
+        "key": "Enter",
+        "text": "Resume",
+        "isTrusted": true
+      },
+      {
+        "type": "click",
+        "key": null,
+        "text": "Resume",
+        "isTrusted": true
+      }
+    ],
+    "observerRejected": "Caller is not the configured workspace operator (gateway/internal)",
+    "leadRestored": {
+      "activityRows": 32,
+      "unauthorizedAlertCount": 0
+    }
+  },
+  "actions": [
+    {
+      "action": "pause",
+      "input": "keyboard Enter",
+      "resultingControl": "Resume"
+    },
+    {
+      "action": "resume",
+      "input": "keyboard Enter",
+      "resultingControl": "Pause"
+    },
+    {
+      "action": "attempt-history",
+      "firstPage": {
+        "rows": 64,
+        "first": "attempt-1",
+        "last": "attempt-295"
+      },
+      "secondPage": {
+        "rows": 64,
+        "first": "attempt-299",
+        "last": "attempt-593"
+      },
+      "returnedPage": {
+        "rows": 64,
+        "first": "attempt-1"
+      }
+    }
+  ],
+  "consoleErrors": []
+}

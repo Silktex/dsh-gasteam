@@ -1,5 +1,6 @@
 /** Bridges a durable non-code assignment to the strictly supervised external runtime. */
 import { isAbsolute, join, resolve } from 'node:path'
+import { open } from 'node:fs/promises'
 import type { VerifiedCodexExecutionPolicy } from './codex-admission.ts'
 import type { AssignmentStore, AttemptRecord, AttemptToken, ExternalProviderPolicy } from './assignments.ts'
 import type { ExternalRuntimeRecord, ExternalRuntimeStore } from './external-runtime.ts'
@@ -7,6 +8,8 @@ import { ExternalAssignmentRuntime } from './external-assignment-runtime.ts'
 import { RuntimeDrain } from './runtime-drain.ts'
 import { ExternalCodeWorktreeProvider } from './external-code-worktree.ts'
 import type { ExternalCodeWorktreeReceipt } from './external-code-worktree.ts'
+import { nextAssignmentRetryAt } from './assignment-retry-policy.ts'
+import { parseCodexJsonLine } from './codex-runtime.ts'
 
 export interface ExternalNonCodeProviderPolicy extends ExternalProviderPolicy {
   readonly admission: VerifiedCodexExecutionPolicy
@@ -155,8 +158,19 @@ export class ExternalNonCodeAssignmentAdapter {
       return current.phase === 'reserved' ? await this.assignments.activate(token(current)) : current
     }
     if (external.phase === 'launch-intent' || external.phase === 'uncertain') return current
-    if (current.phase === 'reserved') current = await this.assignments.activate(token(current))
     if (external.terminal === undefined) return current
+    if ((current.phase === 'reserved' || current.phase === 'active') && external.terminal.outcome === 'failed' && external.turnCompleted !== true) {
+      const failedAttempt = current
+      const failure = await this.classifyStartupFailure(external)
+      if (failure !== undefined) {
+        const priorFailures = this.assignments.list().filter(candidate => candidate.projectId === failedAttempt.projectId
+          && candidate.teamId === failedAttempt.teamId && candidate.taskId === failedAttempt.taskId && candidate.provisioning !== undefined).length
+        return await this.assignments.provisionFailed(token(failedAttempt), {
+          runtimeId: failedAttempt.runtimeId, kind: 'stopped', receipt: `external/${external.terminal.receipt.receiptId}`,
+        }, failure.diagnostic, nextAssignmentRetryAt(failedAttempt.retryPolicy, priorFailures, Date.now()), failure.retryable)
+      }
+    }
+    if (current.phase === 'reserved') current = await this.assignments.activate(token(current))
     if (external.terminal.outcome === 'cancelled' && external.cancellation?.reason === 'Coordinator shutdown' && current.phase !== 'stopping') {
       return await this.assignments.interrupt(token(current), { runtimeId: current.runtimeId, kind: 'stopped', receipt: `external/${external.terminal.receipt.receiptId}` })
     }
@@ -171,6 +185,32 @@ export class ExternalNonCodeAssignmentAdapter {
     return await this.assignments.retire(token(current), {
       runtimeId: current.runtimeId, kind: 'stopped', receipt: `external/${external.terminal.receipt.receiptId}`,
     })
+  }
+
+  private async classifyStartupFailure(external: ExternalRuntimeRecord): Promise<{ diagnostic: string; retryable: boolean } | undefined> {
+    const spool = external.spool
+    if (spool === undefined || external.terminal === undefined) return undefined
+    const limit = spool.maxBytes + 1_024
+    const [stdout, stderr] = await Promise.all([readBoundedSpool(spool.stdout, limit), readBoundedSpool(spool.stderr, limit)])
+    const providerEvents = stdout.split('\n').flatMap(line => {
+      try {
+        return [parseCodexJsonLine(line, 16_384)]
+      } catch { return [] }
+    })
+    if (external.threadId !== undefined || providerEvents.some(event => event.type === 'thread.started' || event.type === 'turn.started')) return undefined
+    const authentication = providerEvents.find(event => (event.type === 'error' || event.type === 'turn.failed')
+      && /(?:not logged in|login required|authentication|unauthorized|invalid api key|credentials?)/i.test(event.message))
+    const missingEntrypoint = external.admission?.executable !== undefined
+      && stderr.includes(`Cannot find module '${external.admission.executable}'`) && stderr.includes("code: 'MODULE_NOT_FOUND'")
+    const launch = /(?:failed to execute|no such file|command not found|cannot execute|\benoent\b)/i.test(stderr) || missingEntrypoint ? stderr : undefined
+    if (authentication === undefined && launch === undefined) return undefined
+    const exit = external.processExit === undefined ? 'unknown exit' : external.processExit.signal === null ? `exit code ${external.processExit.code ?? 'unknown'}` : `signal ${external.processExit.signal}`
+    return {
+      diagnostic: authentication !== undefined
+        ? `External CLI authentication failed before a completed turn (${exit}); credentials are not retained`
+        : `External CLI launch failed before a completed turn (${exit})`,
+      retryable: authentication === undefined,
+    }
   }
 
   private launch(record: AttemptRecord, worktree?: ExternalCodeWorktreeReceipt) {
@@ -201,6 +241,16 @@ export class ExternalNonCodeAssignmentAdapter {
     if (directory === undefined) throw new Error('External code task lacks immutable worktree directory')
     return { attemptId: record.attemptId, generation: record.generation, runtimeId: record.runtimeId, repository: this.pinned(record).admission.cwd, directory }
   }
+}
+
+async function readBoundedSpool(filename: string, limit: number): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    handle = await open(filename, 'r')
+    const bytes = Buffer.alloc(limit + 1)
+    const { bytesRead } = await handle.read(bytes, 0, bytes.byteLength, 0)
+    return bytesRead > limit ? '' : bytes.subarray(0, bytesRead).toString('utf8')
+  } catch { return '' } finally { await handle?.close().catch(() => {}) }
 }
 
 function validate(policy: ExternalNonCodeProviderPolicy): void {

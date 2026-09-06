@@ -4,6 +4,7 @@ import { sessionIdSchema, createTaskSchema, updateTaskSchema, taskResultSchema, 
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from './scheduling-schemas.ts'
 import { workspaceBatchPlanRequestSchema, workspaceBatchQuerySchema, workspaceBatchSubscriptionRequestSchema, workspaceBatchInboxRequestSchema, workspaceBatchAcknowledgementRequestSchema, workspaceBatchViewSchema, workspaceBatchNotificationsSchema } from './workspace-batch-remote.ts'
 import { workspaceDashboardPageRequestSchema, workspaceDashboardPageSchema, workspaceDashboardRequestSchema, workspaceDashboardViewSchema } from './workspace-dashboard.ts'
+import { workspaceActivityPageSchema, workspaceActivityRequestSchema } from './workspace-activity.ts'
 import type { TeamService } from './index.ts'
 
 export const TEAM_PACKAGE = '@deepseek-ai/dsh-experimental-agent-team'
@@ -39,6 +40,7 @@ export const descriptors: readonly InvocationDescriptor[] = [
   invocation('acknowledgeWorkspaceBatchNotification', 'remoteAcknowledgeWorkspaceBatchNotification', codec('WorkspaceBatchNotification[]', workspaceBatchNotificationsSchema), codec('WorkspaceBatchAcknowledgementRequest', workspaceBatchAcknowledgementRequestSchema)),
   invocation('workspaceDashboard', 'remoteWorkspaceDashboard', codec('WorkspaceDashboardView', workspaceDashboardViewSchema), codec('WorkspaceDashboardRequest', workspaceDashboardRequestSchema)),
   invocation('workspaceDashboardPage', 'remoteWorkspaceDashboardPage', codec('WorkspaceDashboardPage', workspaceDashboardPageSchema), codec('WorkspaceDashboardPageRequest', workspaceDashboardPageRequestSchema)),
+  invocation('workspaceActivityPage', 'remoteWorkspaceActivityPage', codec('WorkspaceActivityPage', workspaceActivityPageSchema), codec('WorkspaceActivityRequest', workspaceActivityRequestSchema)),
   invocation('healthInbox', 'remoteHealthInbox', codec('OperatorEscalation[]', operatorEscalationsSchema), codec('HealthInboxRequest', healthInboxRequestSchema)),
   invocation('acknowledgeHealth', 'remoteAcknowledgeHealth', codec('OperatorEscalation', operatorEscalationSchema), codec('AcknowledgeHealthRequest', acknowledgeHealthRequestSchema)),
   invocation('view', 'remoteView', codec('TeamView', teamViewSchema)),
