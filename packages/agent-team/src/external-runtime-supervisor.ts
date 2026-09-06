@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFile, link, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import z from 'zod'
 import { acquireFileOwnership } from './file-ownership.ts'
@@ -203,7 +203,11 @@ export class ExternalRuntimeSupervisor {
       }
       inheritedLock = true
       let identity: ProcessBirthIdentity
-      try { identity = await processBirthIdentity(child.pid) } catch (error) {
+      // Capture before yielding to libuv: even an already-exited child retains
+      // its Linux birth identity as a zombie until ChildProcess reaps it. An
+      // asynchronous /proc read can run after that reap and lose the identity
+      // forever, despite owning the actual child and its subsequent close.
+      try { identity = parseProcessBirthIdentity(child.pid, readFileSync(`/proc/${child.pid}/stat`, 'utf8')) } catch (error) {
         await writeUncertain(request.directory, `process started but birth identity could not be read: ${error instanceof Error ? error.message : String(error)}`)
         void retainLockThroughDrain(lifecycle, child.pid, lock, spool)
         throw new Error('External runtime launch identity is uncertain; preserve capacity', { cause: error })
@@ -366,7 +370,10 @@ async function waitForLifecycle(lifecycle: Promise<{ code: number | null; signal
 /** Linux start ticks prevent a persisted PID from being confused with a reused PID. */
 export async function processBirthIdentity(pid: number): Promise<ProcessBirthIdentity> {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Invalid process id')
-  const statLine = await readFile(`/proc/${pid}/stat`, 'utf8')
+  return parseProcessBirthIdentity(pid, await readFile(`/proc/${pid}/stat`, 'utf8'))
+}
+
+function parseProcessBirthIdentity(pid: number, statLine: string): ProcessBirthIdentity {
   const close = statLine.lastIndexOf(')')
   if (close < 0) throw new Error('Cannot parse Linux process identity')
   const fields = statLine.slice(close + 1).trim().split(/\s+/)

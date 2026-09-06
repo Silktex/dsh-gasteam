@@ -9,10 +9,31 @@ import { acquireFileOwnership } from '../src/file-ownership.ts'
 
 const fsyncEvents = vi.hoisted((): string[] => [])
 const procDirentEnumerations = vi.hoisted((): number[] => [])
+const birthReadRace = vi.hoisted((): { enabled: boolean; pid?: number; closed?: Promise<void> } => ({ enabled: false }))
+vi.mock('node:child_process', async importOriginal => {
+  const processes = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...processes,
+    spawn: (...args: Parameters<typeof processes.spawn>) => {
+      const child = processes.spawn(...args)
+      if (birthReadRace.enabled && args[0] === 'unshare') {
+        birthReadRace.pid = child.pid
+        birthReadRace.closed = new Promise(resolveClose => child.once('close', () => resolveClose()))
+      }
+      return child
+    },
+  }
+})
 vi.mock('node:fs/promises', async importOriginal => {
   const filesystem = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...filesystem,
+    readFile: async (...args: Parameters<typeof filesystem.readFile>) => {
+      // Model the filesystem worker losing the race to libuv's real child
+      // reap. Keep the OS process, exit event, stderr and receipts genuine.
+      if (birthReadRace.enabled && args[0] === `/proc/${birthReadRace.pid}/stat`) await birthReadRace.closed
+      return await filesystem.readFile(...args)
+    },
     link: async (...args: Parameters<typeof filesystem.link>) => {
       fsyncEvents.push(`link:${String(args[1])}`)
       return await filesystem.link(...args)
@@ -41,6 +62,9 @@ const roots: string[] = []
 const live: Array<{ pid: number }> = []
 
 afterEach(async () => {
+  birthReadRace.enabled = false
+  delete birthReadRace.pid
+  delete birthReadRace.closed
   for (const process of live.splice(0)) {
     try { process.kill(process.pid, 'SIGKILL') } catch { /* already stopped */ }
   }
@@ -81,11 +105,24 @@ it('requires strict PID namespace containment before creating a target', async (
 it('captures a fast launch failure before asynchronous identity persistence completes', async () => {
   const root = await directory()
   const missing = await request(root, 'unused')
-  const supervised = await new ExternalRuntimeSupervisor().launch({ ...missing, command: join(root, 'missing-executable'), args: [] })
+  birthReadRace.enabled = true
+  const failedRequest = { ...missing, command: join(root, 'missing-executable'), args: [] }
+  const supervised = await new ExternalRuntimeSupervisor().launch(failedRequest)
   const terminal = await supervised.finished
   expect(terminal).toMatchObject({ signal: null, overflowed: false })
   expect(terminal.code).not.toBe(0)
   expect(await readFile(join(root, 'stderr.log'), 'utf8')).toMatch(/no such file/i)
+  const identity = await readSupervisorIdentity(root)
+  expect(identity?.process).toEqual(supervised.identity)
+  expect(JSON.parse(await readFile(join(root, 'helper-exit.json'), 'utf8'))).toMatchObject({
+    attemptId: missing.attemptId, generation: missing.generation, process: supervised.identity,
+    exit: { code: terminal.code, signal: terminal.signal },
+  })
+  expect(JSON.parse(await readFile(join(root, 'terminal-proof.json'), 'utf8'))).toMatchObject({
+    process: supervised.identity, spool: { stderr: { bytes: expect.any(Number), sha256: expect.stringMatching(/^[a-f0-9]{64}$/) } },
+  })
+  expect(await new ExternalRuntimeSupervisorObserver().observe(root)).toEqual({ state: 'stopped' })
+  await expect(new ExternalRuntimeSupervisor().launch(failedRequest)).rejects.toThrow(/already claimed; preserve capacity/i)
 })
 
 it('fsyncs the parent directory after a successful hard-link claim', async () => {
