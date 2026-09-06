@@ -48,6 +48,9 @@ const requestSchema = legacyRequestSchema.superRefine((value, ctx) => {
 })
 const tokenSchema = z.object({ attemptId: id, generation: positive, expectedRevision: positive }).strict()
 const stopSchema = z.object({ runtimeId: id, kind: z.enum(['stopped', 'never-started']), receipt: text }).strict()
+const externalUsageSchema = z.object({ provider: z.literal('external'), attemptId: id, generation: positive, runtimeRevision: positive,
+  inputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), cachedInputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), outputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), reasoningOutputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict().refine(value => value.inputTokens !== undefined || value.cachedInputTokens !== undefined || value.outputTokens !== undefined || value.reasoningOutputTokens !== undefined, 'External usage needs a reported token count')
 const interruptionRequestSchema = z.object({ reason: z.literal('coordinator-shutdown'), receipt: text }).strict()
 const interruptionSchema = interruptionRequestSchema.extend({ count: positive }).strict()
 const envelope = { version: z.literal(1), sequence: positive }
@@ -59,6 +62,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('attempt/activated'), token: tokenSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/checkpoint'), token: tokenSchema, checkpoint: checkpointSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/reported'), token: tokenSchema, result: text }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/external-usage'), token: tokenSchema, usage: externalUsageSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/stopping'), token: tokenSchema, reason: text }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/retired'), token: tokenSchema, evidence: stopSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/interrupted'), token: tokenSchema, evidence: stopSchema, interruption: interruptionRequestSchema }).strict(),
@@ -88,6 +92,8 @@ export interface AttemptRecord extends Omit<ReserveAssignmentRequest, 'expectedG
   readonly stopEvidence?: RuntimeStopEvidence
   /** A coordinator shutdown is recoverable after a positive provider stop receipt. */
   readonly interruption?: z.output<typeof interruptionSchema>
+  /** Provider-reported external tokens only; absent means unknown. */
+  readonly externalUsage?: z.output<typeof externalUsageSchema>
 }
 const limitsSchema = z.object({
   globalCapacity: positive, projectCapacities: z.record(id, positive),
@@ -129,7 +135,12 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
   const index = records.findIndex(record => record.attemptId === event.token.attemptId)
   const current = records[index]
   if (!current || current.generation !== event.token.generation) throw new Error('Stale attempt generation')
-  if (current.phase === 'terminal') throw new Error('Attempt is terminal; stale workers have no authority')
+  if (current.phase === 'terminal') {
+    if (event.type === 'attempt/external-usage' && (current.provider !== 'external' || event.usage.attemptId !== current.attemptId || event.usage.generation !== current.generation)) throw new Error('External usage does not bind this external attempt')
+    if (event.type === 'attempt/external-usage' && current.externalUsage !== undefined && JSON.stringify(current.externalUsage) === JSON.stringify(event.usage)) return records
+    if (event.type === 'attempt/external-usage' && current.externalUsage !== undefined) throw new Error('External usage receipt is immutable')
+    throw new Error('Attempt is terminal; stale workers have no authority')
+  }
   // The delivery identity is reserved before the external mailbox effect. On a
   // post-effect crash, replaying that exact identity must preserve the original
   // recovery revision and budget rather than consume another recovery slot.
@@ -141,6 +152,15 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
   if (current.revision !== event.token.expectedRevision) throw new Error('Stale attempt revision')
   let next: AttemptRecord = { ...current, revision: current.revision + 1 }
   switch (event.type) {
+    case 'attempt/external-usage':
+      if (current.provider !== 'external' || event.usage.attemptId !== current.attemptId || event.usage.generation !== current.generation) throw new Error('External usage does not bind this external attempt')
+      if (current.phase === 'stopping') throw new Error('External usage is fenced after assignment cancellation')
+      if (current.externalUsage !== undefined) {
+        if (JSON.stringify(current.externalUsage) === JSON.stringify(event.usage)) return records
+        throw new Error('External usage receipt is immutable')
+      }
+      next = { ...next, externalUsage: event.usage }
+      break
     case 'attempt/recovery':
       if (current.phase !== 'active' || (current.recovery?.count ?? 0) >= current.retryPolicy.maxAttempts) throw new Error('Recovery requires an active attempt with remaining budget')
       next = { ...next, recovery: { count: (current.recovery?.count ?? 0) + 1, observedSequence: event.observedSequence, notBefore: event.notBefore, messageId: event.messageId } }
@@ -267,6 +287,7 @@ export class AssignmentStore {
     return this.mutate({ type: 'attempt/checkpoint', token, checkpoint })
   }
   report(token: AttemptToken, result: string): Promise<AttemptRecord> { return this.mutate({ type: 'attempt/reported', token, result }) }
+  externalUsage(token: AttemptToken, usage: z.input<typeof externalUsageSchema>): Promise<AttemptRecord> { return this.mutate({ type: 'attempt/external-usage', token, usage: externalUsageSchema.parse(usage) }) }
   stop(token: AttemptToken, reason: string): Promise<AttemptRecord> { return this.mutate({ type: 'attempt/stopping', token, reason }) }
   retire(token: AttemptToken, evidence: RuntimeStopEvidence): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/retired', token, evidence })

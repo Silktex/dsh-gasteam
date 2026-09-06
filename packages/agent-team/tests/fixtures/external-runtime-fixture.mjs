@@ -44,6 +44,10 @@ if (mode === 'silent') {
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-usage-thread"}\n')
   process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture usage report"}}\n')
   process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":101,"cached_input_tokens":23,"output_tokens":37,"reasoning_output_tokens":11}}\n')
+} else if (mode === 'codex-zero-usage-report') {
+  process.stdout.write('{"type":"thread.started","thread_id":"fixture-zero-usage-thread"}\n')
+  process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture zero usage report"}}\n')
+  process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}\n')
 } else if (mode === 'codex-malformed-usage-report') {
   process.stdout.write('{"type":"thread.started","thread_id":"fixture-malformed-usage-thread"}\n')
   process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"fixture malformed usage report"}}\n')

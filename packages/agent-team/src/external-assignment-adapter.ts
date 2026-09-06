@@ -143,6 +143,13 @@ export class ExternalNonCodeAssignmentAdapter {
   private async reconcile(record: AttemptRecord, external: ExternalRuntimeRecord): Promise<AttemptRecord> {
     let current = this.assignments.list().find(item => item.attemptId === record.attemptId)
     if (current === undefined) throw new Error('External assignment disappeared from durable ownership')
+    if (external.attemptId !== current.attemptId || external.generation !== current.generation) throw new Error('External runtime receipt does not bind the assignment attempt')
+    // A cancellation/retirement wins over a late completed-turn receipt. The
+    // runtime keeps that receipt durable, but it must not revive or block the
+    // assignment's fenced terminal reconciliation.
+    if ((current.phase === 'reserved' || current.phase === 'active') && external.usage !== undefined && current.externalUsage === undefined) {
+      current = await this.assignments.externalUsage(token(current), { provider: 'external', attemptId: current.attemptId, generation: current.generation, ...external.usage })
+    }
     if (current.phase === 'terminal') return current
     if (external.phase === 'running' || external.phase === 'cancelling') {
       return current.phase === 'reserved' ? await this.assignments.activate(token(current)) : current

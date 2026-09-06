@@ -307,7 +307,7 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 Continuation fields:
 
 - Active goal identifier/objective: existing active thread goal `/home/dsh/projects/gasteam/finishme.md`; no token budget.
-- Current milestone and acceptance slice: M3 positively stopped provisioning retry and requirement audit; M6 handoff/replacement/resolution; M8 pagination/activity/controls; M9 first-class usage projection and full provider capability audit.
+- Current milestone and acceptance slice: M3 positively stopped provisioning retry and requirement audit; M6 handoff/replacement/resolution; M8 pagination/activity/controls; M9 shared routed-provider contract and consistent capabilities (usage projection validated).
 - Last completed slice: M2 provisioning/mail replay is published in ec57909; canonical Git metadata grant and real authenticated verified integration are published in 6bef1a2, whose exact CI passed.
 - Red evidence: non-code test initially entered Git submission; review caught report receipt replay/durability gaps and missing review queue. Workflow review caught erased authorization history, unenforced backoff and conflated receipt stages. Consolidated tests caught two obsolete Remote expectations; new codec tests tighten report revision/rationale validation.
 - Green evidence and exact commands: published6bef1a2 passed GitHub run33998413601 (build/types/regular/process/docs/smoke). M2 process suite has21 scenarios. See completion evidence for the exact source and scenario coverage.

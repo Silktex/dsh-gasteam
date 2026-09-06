@@ -43,6 +43,50 @@ it('routes an explicitly non-code assignment through verified external admission
   await assignments.close()
 })
 
+it('projects only exact provider-reported usage onto its external attempt and preserves reported zero', async () => {
+  const { assignments, external, adapter, attempt } = await setup('codex-usage-report')
+  await adapter.start(attempt)
+  await waitFor(async () => { const current = assignments.list().find(item => item.attemptId === attempt.attemptId)!; await adapter.observe(current); return current.externalUsage !== undefined || assignments.list().find(item => item.attemptId === attempt.attemptId)?.externalUsage !== undefined })
+  const projected = assignments.list().find(item => item.attemptId === attempt.attemptId)!
+  expect(projected.externalUsage).toMatchObject({ provider: 'external', attemptId: attempt.attemptId, generation: attempt.generation, inputTokens: 101, cachedInputTokens: 23, outputTokens: 37, reasoningOutputTokens: 11, runtimeRevision: expect.any(Number) })
+  await external.close(); await assignments.close()
+})
+
+it('keeps absent usage unknown, preserves provider-reported zero, and rejects a mismatched receipt', async () => {
+  const unknown = await setup('codex-report')
+  await unknown.adapter.start(unknown.attempt)
+  await waitFor(async () => { const current = unknown.assignments.list().find(item => item.attemptId === unknown.attempt.attemptId)!; await unknown.adapter.observe(current); return unknown.assignments.list().find(item => item.attemptId === unknown.attempt.attemptId)?.phase === 'terminal' })
+  expect(unknown.assignments.list().find(item => item.attemptId === unknown.attempt.attemptId)?.externalUsage).toBeUndefined()
+  await unknown.external.close(); await unknown.assignments.close()
+
+  const zero = await setup('codex-zero-usage-report')
+  await zero.adapter.start(zero.attempt)
+  await waitFor(async () => { const current = zero.assignments.list().find(item => item.attemptId === zero.attempt.attemptId)!; await zero.adapter.observe(current); return zero.assignments.list().find(item => item.attemptId === zero.attempt.attemptId)?.externalUsage !== undefined })
+  const receipt = zero.assignments.list().find(item => item.attemptId === zero.attempt.attemptId)!.externalUsage!
+  expect(receipt).toMatchObject({ inputTokens: 0, outputTokens: 0 })
+  const current = zero.assignments.list().find(item => item.attemptId === zero.attempt.attemptId)!
+  await expect(zero.assignments.externalUsage({ attemptId: current.attemptId, generation: current.generation, expectedRevision: current.revision }, { ...receipt, generation: current.generation + 1 })).rejects.toThrow(/bind/i)
+  expect(() => zero.assignments.externalUsage({ attemptId: current.attemptId, generation: current.generation, expectedRevision: current.revision }, { ...receipt, provider: 'other' as never })).toThrow()
+  await zero.external.close(); await zero.assignments.close()
+})
+
+it('fences a first usage receipt after assignment cancellation or terminal retirement, but exactly replays a persisted receipt after reopen', async () => {
+  const { assignments, external, attempt } = await setup('silent')
+  const usage = { provider: 'external' as const, attemptId: attempt.attemptId, generation: attempt.generation, runtimeRevision: 7, inputTokens: 0 }
+  const stopping = await assignments.stop({ attemptId: attempt.attemptId, generation: attempt.generation, expectedRevision: attempt.revision }, 'operator cancellation')
+  await expect(assignments.externalUsage({ attemptId: stopping.attemptId, generation: stopping.generation, expectedRevision: stopping.revision }, usage)).rejects.toThrow(/fenced/i)
+  const terminal = await assignments.retire({ attemptId: stopping.attemptId, generation: stopping.generation, expectedRevision: stopping.revision }, { runtimeId: stopping.runtimeId, kind: 'stopped', receipt: 'test' })
+  await expect(assignments.externalUsage({ attemptId: terminal.attemptId, generation: terminal.generation, expectedRevision: terminal.revision }, usage)).rejects.toThrow(/terminal/i)
+  await external.close(); await assignments.close()
+
+  const projected = await setup('silent')
+  const recorded = await projected.assignments.externalUsage({ attemptId: projected.attempt.attemptId, generation: projected.attempt.generation, expectedRevision: projected.attempt.revision }, { ...usage, attemptId: projected.attempt.attemptId, generation: projected.attempt.generation })
+  await projected.assignments.close(); await projected.external.close()
+  const restored = await AssignmentStore.open(projected.attempt.externalPolicy!.directory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+  await expect(restored.externalUsage({ attemptId: recorded.attemptId, generation: recorded.generation, expectedRevision: recorded.revision }, recorded.externalUsage!)).resolves.toMatchObject({ revision: recorded.revision })
+  await restored.close()
+})
+
 it('cancels through the live external helper and never turns cancellation output into a report', async () => {
   const { assignments, external, adapter, attempt } = await setup('silent')
   const active = await adapter.start(attempt)
@@ -61,13 +105,14 @@ it('cancels through the live external helper and never turns cancellation output
   await assignments.close()
 })
 
-it('fences a completed external report when assignment cancellation wins before assignment reconciliation', async () => {
-  const { assignments, external, runtime, adapter, attempt } = await setup('codex-report')
+it('fences a completed external report and usage when assignment cancellation wins before reconciliation', async () => {
+  const { assignments, external, runtime, adapter, attempt } = await setup('codex-usage-report')
   const active = await adapter.start(attempt)
   await waitFor(async () => (await runtime.observe(attempt.attemptId, attempt.generation, join(external.list().find(item => item.attemptId === attempt.attemptId)!.spool!.directory))).terminal !== undefined)
   const stopping = await assignments.stop({ attemptId: active.attemptId, generation: active.generation, expectedRevision: active.revision }, 'operator cancellation won race')
   await expect(adapter.observe(stopping)).resolves.toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation won race' })
   expect(assignments.list().find(item => item.attemptId === attempt.attemptId)?.result).toBeUndefined()
+  expect(assignments.list().find(item => item.attemptId === attempt.attemptId)?.externalUsage).toBeUndefined()
   expect(external.get(attempt.attemptId, attempt.generation)).toMatchObject({ terminal: { outcome: 'completed' } })
   await external.close()
   await assignments.close()
