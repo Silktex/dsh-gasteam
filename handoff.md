@@ -1,16 +1,18 @@
 # GasTeam handoff
 
-## Resumed session status
+## Completed resumed goal
 
-The user resumed the goal, confirmed accidentally deleting the local checkout, authorized committing/pushing completed work, and requested task-appropriate agents do most implementation. Lost changes have been reconstructed and verified. Historical stop instructions below are superseded by that authorization.
+All M0–M11 milestones and the final acceptance matrix in [finishme.md](finishme.md) are complete. The user-confirmed accidental deletion was recovered, lost work reconstructed, reviewed, tested and pushed. The user authorized committing/pushing and requested task-appropriate agents for most implementation; root integrated and verified their work.
 
-Published `19cf882` completed the dashboard/release source but its exact CI failed a fast external-launch scenario. The supervisor output-capture and deterministic fixture correction is integrated for corrective publication; see the newest evidence. The last prior green checkpoint was `1045d4a`. M0–M10 are complete. Current staged dashboard/provider changes pass build, types, 504 regular tests (two optional skips), 21 process acceptance scenarios and installed CLI smoke. Recorded real-browser evidence is in `docs/evidence/dashboard`; real authenticated Codex task and restart/cancel receipts are described in completion evidence. The remaining active work is M11 packed-CLI release validation, documentation coverage and exact published CI. Do not use an earlier commit's CI as evidence for a later delta.
+Implementation commit `6c30f5b27184362ea64208aacb0fe942f929d83f` passed [exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/34006045928), including frozen install, documentation checks, build/types, host/client tests, process acceptance, installed CLI smoke, and independent packed release/legacy upgrade validation. The preceding two failed CI checkpoints and their deterministic fixes remain recorded in [completion evidence](docs/completion-evidence.md). This final documentation checkpoint must also pass its own CI before the execution is closed.
 
-Use `TMPDIR=/var/tmp` and `PATH=/home/linuxbrew/.linuxbrew/bin:$PATH`; `/tmp` exhausted inodes during this session. Agents work in isolated checkouts, root reviews and integrates exact deltas. Preserve unrelated `docs/README.md`, `darkfactory.md`, `docs/worklist.md`, and `pending.md`. Do not replace the restored checkout with an old archive.
+Real browser evidence is retained in `docs/evidence/dashboard`. Authenticated Codex task and restart/cancel evidence are mapped in completion evidence. Disposable dashboard/CDP ports are closed. Standalone validation uses published DSH and committed patches without a full-Harness source checkout. Production service installation/restart and public registry publication were not requested; no production migration is claimed.
 
-No production service restart is authorized merely by passing tests. Demo setup accidentally modified the user's Web profile; the affected metadata was backed up and only the five temporary Team links were corrected to this checkout. This is not claimed as a byte-identical restoration of the prior profile. See the incident record in completion evidence. Disposable services/consumer installations provide release proof without restarting the user's service.
+Preserve unrelated `docs/README.md`, `darkfactory.md`, `docs/worklist.md`, and `pending.md`. Use `TMPDIR=/var/tmp` and `PATH=/home/linuxbrew/.linuxbrew/bin:$PATH`; `/tmp` exhausted inodes during this session. Do not restore an old archive over the recovered checkout.
 
-Read the newest [completion evidence](docs/completion-evidence.md) and [continuation record](finishme.md) first. Older notes below are historical and contain superseded status claims.
+Demo setup previously modified the user's Web profile accidentally. The affected metadata was backed up and only five temporary Team links were corrected to this checkout. That narrow correction is not claimed as a byte-identical restoration of the prior profile. See the incident entry in completion evidence. No user service was restarted during release validation.
+
+The older notes below are historical. Their stop instructions and unfinished feature claims were superseded by the resumed request and completed implementation. No further implementation is queued for this goal.
 
 ## Stop point and authority
 

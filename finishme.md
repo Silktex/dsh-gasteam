@@ -261,7 +261,7 @@ Dependencies: M0–M10.
 - [x] Run clean-install validation outside the development checkout using published runtime dependencies and committed patches only. Verify that no path references the former full harness checkout.
 - [x] Test upgrade against a backed-up fixture of the existing durable format. Confirm either supported restoration or the documented actionable migration path before touching localhost state.
 - [x] When installation is authorized by the execution request or existing session authorization, back up profile/service settings and durable data consistently, install, restart, and verify localhost health and an isolated autonomous project. Preserve unrelated profiles and sessions.
-- [ ] Commit/push only within the applicable authorization, inspect the outgoing diff for secrets and generated residue, and verify CI for the exact published commit. If publication is not authorized, leave a concrete verified change ready for review and record that remaining release action.
+- [x] Commit/push only within the applicable authorization, inspect the outgoing diff for secrets and generated residue, and verify CI for the exact published commit. If publication is not authorized, leave a concrete verified change ready for review and record that remaining release action.
 
 Done evidence: clean-clone logs, exact commit and CI result if published, localhost verification if installed, and final acceptance artifacts below. Never use a passing earlier commit as evidence for later edits.
 
@@ -302,21 +302,21 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 | M8 Dashboard | done | Bounded overview/history/activity, typed revision-fenced operations, retry and handoff eligibility, diagnostics and EN/ZH states pass host/client tests. Real shipped Web service has recorded native-keyboard pause/resume, paging, activity and authorization evidence in docs/evidence/dashboard. |
 | M9 External providers | done | Shared routed provider capabilities, durable isolated Codex admission, authenticated verified artifact, restart/cancel evidence, attributed usage and classified startup/authentication failure acceptance are recorded in completion evidence. |
 | M10 Merge batching | done | Ordered stacks, durable membership/budgets, exact per-task receipts, dependency isolation and restart/target-movement real-Git acceptance are verified. Retention and post-promotion verification limitations are documented. |
-| M11 Release/install | in_progress | Combined standalone packed CLI, cold restart, legacy upgrade/restore and command audit pass. Exact final published CI remains. Production installation is conditional and not authorized in this request. |
+| M11 Release/install | done | Independent packed consumer/profile CLI, cold restart, legacy upgrade/restore and command audit pass. Source commit 6c30f5b passed exact CI34006045928 including the packed release gate. Production installation was conditional and not authorized in this request. |
 
 Continuation fields:
 
 - Active goal identifier/objective: existing active thread goal `/home/dsh/projects/gasteam/finishme.md`; no token budget.
-- Current milestone and acceptance slice: M11 standalone release and final documentation/publication verification. M0–M10 are complete.
-- Last completed slice: dashboard activity/controls/diagnostics and real Web demonstration; classified external startup failure acceptance; ordered merge batching already published.
-- Red evidence: non-code test initially entered Git submission; review caught report receipt replay/durability gaps and missing review queue. Workflow review caught erased authorization history, unenforced backoff and conflated receipt stages. Consolidated tests caught two obsolete Remote expectations; new codec tests tighten report revision/rationale validation.
-- Green evidence and exact commands: current combined pnpm build, pnpm typecheck, pnpm test (504 passed, two optional skips), pnpm test:acceptance (21 passed), pnpm test:smoke pass. Logs /var/tmp/gasteam-final-*.log. Later release additions require their own validation.
-- Changed files and commit: published through 19cf882; its CI34005229464 failed a fast-exit output scenario. Corrective supervisor/fixture delta is staged; prior 1045d4a CI passed. Preserve unrelated docs/README.md, darkfactory.md, docs/worklist.md and pending.md.
+- Current milestone and acceptance slice: all M0–M11 requirements and the final acceptance matrix have evidence. Final documentation checkpoint publication verification completes this execution.
+- Last completed slice: fast external output and birth-identity capture, deterministic missing-executable/retry acceptance, standalone packed release, and exact published CI.
+- Red evidence: final CI19cf882 exposed lost fast-launch stderr; CI80d6001 exposed birth-identity capture after child reaping. Deterministic regressions and corrections are recorded in completion evidence.
+- Green evidence and exact commands: 6c30f5b passed exact CI34006045928: frozen install, docs, build, types, regular host/client tests, 21 process acceptance scenarios, installed CLI smoke, independent packed release and legacy upgrade/restore. Receipt /var/tmp/gasteam-ci-6c30f5b.json.
+- Changed files and commit: implementation published through 6c30f5b27184362ea64208aacb0fe942f929d83f with successful exact CI. This documentation checkpoint records completion. Unrelated docs/README.md, darkfactory.md, docs/worklist.md and pending.md remain untouched.
 - Open decisions/constraints: uncertain ownership retains capacity; retention does not prove external ownership, and interrupted cleanup is not retried automatically. Batch worktrees/journals are retained. Unsupported external operations remain explicit. See completion evidence for bounded-history and post-promotion verification limits.
 - External blockers: none. Deleted local work has been reconstructed and validated. Real authenticated external task and restart/cancel evidence are retained.
-- Next concrete action: integrate final packed-CLI release gate and schema correction, verify standalone validation and documentation coverage, commit/push and inspect exact-commit CI.
-- Release actions still required: final M11 validation and exact published CI. Production installation/restart is conditional on authorization and is not part of this execution request. The demo profile incident and narrow backed-up link correction are recorded in completion evidence.
-- Previous goal-turn classification: progress — restored work integrated and combined acceptance passed; final release verification continues.
+- Next concrete action: verify CI for the final documentation checkpoint, then close the completed goal. Subsequent feature or production deployment work requires a new request.
+- Release actions still required: none for the implemented release after final documentation CI. Production installation/restart and future public registry publication were not requested. Disposable validation does not claim user-service migration; the profile incident and narrow correction remain documented.
+- Previous goal-turn classification: progress — all implementation and release acceptance passed exact CI; final documentation publication verification is the last step.
 
 ## Research references
 

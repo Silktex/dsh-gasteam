@@ -766,3 +766,10 @@ The output-capture checkpoint `80d60014a80c85719b6fc7cb11e9a96a8d8c069b` passed 
 
 
 The follow-up `8b4edf9e32e01438b2dd009b346cff54c2e551e0` changes only initial wrapper birth capture: it synchronously reads the actual `/proc/<pid>/stat` before yielding to libuv, sharing the existing parser. Later observation stays asynchronous. A deterministic regression delays the old asynchronous read until the real child closes, reproducing ENOENT; the fixed path preserves genuine stderr, matching identity/terminal/helper receipts, stopped observation, and rejection of a second launch. Agent build/types and 56 focused runtime tests pass with one existing skip; root inspected the exact delta and all 13 supervisor tests pass (`/var/tmp/gasteam-birth-capture-combined.log`). Node 24 GitHub CI remains the publication gate; local execution uses Node 26.8.1.
+
+
+## 2026-09-05 — Final successful release verification
+
+Implementation commit `6c30f5b27184362ea64208aacb0fe942f929d83f` passed [exact-commit CI34006045928](https://github.com/Silktex/dsh-gasteam/actions/runs/34006045928). Every step succeeded: clean frozen install, docs, build, types, regular tests, process acceptance, installed CLI smoke, and `GASTEAM_RELEASE_ROOT=/var/tmp pnpm test:release`. Detailed receipt: `/var/tmp/gasteam-ci-6c30f5b.json`. This validates the final output-capture and birth-identity corrections on Node 24 together with the full standalone gate.
+
+All milestone requirements and final acceptance scenarios now have the mapped evidence above. The final documentation checkpoint updates the handoff/status and preserves the failed intermediate receipts and material limitations. Its exact CI must also be inspected after publication; a documentation-only delta does not inherit the earlier commit's CI identity. No further feature work or production service deployment is authorized by this completed goal. Unrelated user drafts remain excluded from all release commits.
