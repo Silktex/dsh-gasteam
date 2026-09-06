@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/coordinator'
-import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView, WorkspaceBatchView, WorkspaceBatchNotification } from '@deepseek-ai/dsh-experimental-agent-team/client'
+import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView, WorkspaceBatchView, WorkspaceBatchNotification, SystemDiagnosticsView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'tool-team-coordinator'
@@ -82,6 +82,30 @@ function escalation(item: OperatorEscalation) { const { acknowledgement, resolut
   ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution: { reason: resolution.reason, source: resolution.source, at: resolution.at,
     ...(resolution.replacementAttemptId === undefined ? {} : { replacementAttemptId: resolution.replacementAttemptId }) } }) } }
 function escalations(value: readonly OperatorEscalation[]) { return value.map(escalation) }
+const diagnosticsSchema = { type: 'object', additionalProperties: false, properties: {
+  projectId: { type: 'string', required: true }, healthy: { type: 'boolean', required: true }, paused: { type: 'boolean', required: true },
+  activeAttempts: { type: 'integer', required: true }, blockedDispatches: { type: 'integer', required: true },
+  activeEscalations: { type: 'array', required: true, items: escalationSchema },
+  recentErrors: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+    timestamp: { type: 'string', required: true }, source: { type: 'string', required: true }, message: { type: 'string', required: true },
+    stack: { type: 'string' }, runtimeId: { type: 'string' }, attemptId: { type: 'string' }, operationId: { type: 'string' },
+  } } },
+} } as const
+const diagnosticsOutput = { schema: diagnosticsSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+function diagnostics(value: SystemDiagnosticsView) {
+  return {
+    projectId: value.projectId, healthy: value.healthy, paused: value.paused,
+    activeAttempts: value.activeAttempts, blockedDispatches: value.blockedDispatches,
+    activeEscalations: value.activeEscalations.map(escalation),
+    recentErrors: value.recentErrors.map(err => ({
+      timestamp: err.timestamp, source: err.source, message: err.message,
+      ...(err.stack === undefined ? {} : { stack: err.stack }),
+      ...(err.runtimeId === undefined ? {} : { runtimeId: err.runtimeId }),
+      ...(err.attemptId === undefined ? {} : { attemptId: err.attemptId }),
+      ...(err.operationId === undefined ? {} : { operationId: err.operationId }),
+    })),
+  }
+}
 export function apply(ctx: Context): void {
   const installed = new Map<Agent, (() => unknown)[]>()
   const install = (agent: Agent) => {
@@ -111,6 +135,11 @@ export function apply(ctx: Context): void {
       name: 'team_health_ack', description: 'Acknowledge one health escalation using its current revision. Acknowledgement does not change task ownership.',
       parameters: { project_id: { type: 'string', required: true }, escalation_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true } }, output: healthOutput,
       async execute(args, exec) { return escalation(await ctx.workspaceCoordinator.acknowledgeHealth(caller(exec.agent), args.project_id, args.escalation_id, args.expected_revision)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_system_diagnostics', description: 'Read coordinator system diagnostics including health escalations, worker states, and recent error telemetry.',
+      parameters: { project_id: { type: 'string', required: true } }, output: diagnosticsOutput,
+      async execute(args, exec) { return diagnostics(await ctx.workspaceCoordinator.systemDiagnostics(caller(exec.agent), args.project_id)) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_report_accept', description: 'Accept a terminal non-code worker report after reviewing its evidence against the task criteria. This records an immutable rationale. Pinned candidate-review tasks additionally require approved or rejected; rejected preserves the audited report while preventing that candidate from merging.',

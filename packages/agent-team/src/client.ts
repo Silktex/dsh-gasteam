@@ -27,3 +27,5 @@ export type { WorkspaceBatchView, WorkspaceBatchNotification } from './coordinat
 export type { WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
 export type { WorkspaceDashboardCollection, WorkspaceDashboardInput, WorkspaceDashboardLimits, WorkspaceDashboardPage, WorkspaceDashboardPageRequest, WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'
 export type { WorkspaceActivityItem, WorkspaceActivityPage, WorkspaceActivityRequest, WorkspaceActivitySource } from './workspace-activity.ts'
+export type { SystemDiagnosticsView } from './system-diagnostics.ts'
+export type { StructuredErrorRecord } from './error-sink.ts'

@@ -38,6 +38,8 @@ import { WorkspacePageSnapshotStore } from './workspace-pagination.ts'
 import { WorkspaceActivityReader } from './workspace-activity.ts'
 import type { WorkspaceActivityPage, WorkspaceActivityRequest } from './workspace-activity.ts'
 import type { RuntimeProviderCapabilities } from './runtime-provider.ts'
+import { readStructuredErrors } from './error-sink.ts'
+import type { SystemDiagnosticsView } from './system-diagnostics.ts'
 
 function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
   return ctx.agentTeams.listIntegrations(lead).some(integration => integration.id === integrationId && integration.phase === 'failed')
@@ -498,6 +500,26 @@ export class WorkspaceCoordinator {
       if (!this.execution || !this.execution.healthInbox(projectId, caller.id).some(item => item.id === escalationId)) throw new Error('Escalation is not in this Lead inbox')
       return await this.execution.acknowledgeHealth(escalationId, expectedRevision, caller.id)
     })
+  }
+
+  async systemDiagnostics(caller: Agent, projectId: string): Promise<SystemDiagnosticsView> {
+    this.authorize(caller, projectId)
+    const view = this.view()
+    const project = view.projects.find(p => p.project.id === projectId)
+    const escalations = this.healthInbox(caller, projectId)
+    const activeAttempts = view.attempts.filter(a => a.projectId === projectId && a.phase !== 'terminal').length
+    const blockedDispatches = view.dispatchStatus.filter(r => r.projectId === projectId && r.blockers.length > 0).length
+    const recentErrors = await readStructuredErrors({ since: Date.now() - 24 * 60 * 60 * 1000, limit: 10 })
+    const healthy = escalations.length === 0 && blockedDispatches === 0 && recentErrors.filter(e => e.source === 'cordis' || e.source === 'coordinator').length === 0
+    return {
+      projectId,
+      healthy,
+      paused: project?.paused ?? false,
+      activeAttempts,
+      activeEscalations: escalations,
+      recentErrors,
+      blockedDispatches,
+    }
   }
 
   async controlScheduling(caller: Agent, request: SchedulingControl): Promise<SchedulingView> {

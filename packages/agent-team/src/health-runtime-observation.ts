@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import type { AttemptHealthObservation } from './health.ts'
+import { recordStructuredError } from './error-sink.ts'
 import type {} from './index.ts'
 
 export interface HealthRuntimeAttempt {
@@ -35,6 +36,7 @@ export class DshHealthRuntimeObserver {
   /** Per-dispatch token, not rootCallId: nested calls share a root call id. */
   private readonly active = new Map<string, Map<ToolExecutionToken, string>>()
   private readonly dispose: () => void
+  private readonly errorDispose?: () => void
 
   constructor(private readonly ctx: Context) {
     this.dispose = ctx.on('tools/execute', async (execution, next) => {
@@ -45,14 +47,41 @@ export class DshHealthRuntimeObserver {
       if (operations === undefined) this.active.set(runtimeId, operations = new Map())
       operations.set(execution.token, operationId)
       try { return await next() }
+      catch (error: unknown) {
+        recordStructuredError({
+          source: 'tool',
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          runtimeId,
+          operationId,
+        }).catch(() => {})
+        throw error
+      }
       finally {
         operations.delete(execution.token)
         if (operations.size === 0) this.active.delete(runtimeId)
       }
     })
+    try {
+      const emitter = ctx as unknown as { on?(event: string, callback: (err: unknown) => void): () => void }
+      if (typeof emitter.on === 'function') {
+        this.errorDispose = emitter.on('error', (error: unknown) => {
+          recordStructuredError({
+            source: 'cordis',
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          }).catch(() => {})
+        })
+      }
+    } catch {
+      // Context event hook error ignored
+    }
   }
 
-  close(): void { this.dispose() }
+  close(): void {
+    this.dispose()
+    this.errorDispose?.()
+  }
 
   observe(attempt: LiveDshRuntimeAttempt): DshRuntimeEvidence {
     const lead = this.ctx.agents.get(SessionId(attempt.teamId))
