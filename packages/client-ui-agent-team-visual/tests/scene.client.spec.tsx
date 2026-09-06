@@ -94,13 +94,31 @@ describe('VisualAgentsAction', () => {
     await screen.findByRole('dialog', { name: zh.title })
     fireEvent.click(screen.getByRole('switch', { name: zh['toggle.off'], checked: false }))
     expect(container.querySelector('canvas')).not.toBeNull()
-    // jsdom canvases have no 2D context; the ~150ms interval repaint must be a safe no-op.
+    // jsdom canvases have no 2D context; the RAF/setTimeout-fallback repaint
+    // loop must be a safe no-op.
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
     expect(container.querySelector('canvas')).not.toBeNull()
     expect(screen.getByRole('dialog', { name: zh.title })).toBeTruthy()
-    // Unmount stops the repaint interval; no stray repaints afterwards.
+    // Unmount stops the repaint loop and poller; no stray work afterwards.
     unmount()
     await new Promise(resolve => setTimeout(resolve, 350))
+  })
+
+  it('clears a stale project selection and shows the dashboard.stale notice', async () => {
+    let current = dashboard
+    const load = vi.fn(() => Promise.resolve({ ok: true as const, value: current }))
+    render(<VisualAgentsAction {...props(actions({ load }))} />)
+    fireEvent.click(screen.getByRole('button', { name: zh.trigger }))
+    expect(await screen.findByRole('combobox')).toHaveProperty('value', 'project-a')
+    // The next refresh no longer lists the selected project → cleared + notice.
+    current = {
+      ...dashboard,
+      projects: [{ id: 'project-b', revision: 1, paused: false, capacity: 2, active: 0 }],
+      attempts: [],
+    }
+    fireEvent.click(screen.getByRole('button', { name: zh.refresh }))
+    expect(await screen.findByText(zh['dashboard.stale'])).toBeTruthy()
+    expect(screen.getByRole('combobox')).toHaveProperty('value', '')
   })
 
   it('shows a Remote carrier failure unchanged', async () => {

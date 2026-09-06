@@ -5,8 +5,8 @@ import { palette } from '../src/client/assets/palette.ts'
 import {
   AGENT_TINTS, TINT_SLOT, drawSprite, pickFrame, validateSheet, type SpriteSheet,
 } from '../src/engine/sprites.ts'
-import { leadIdle, leadWork } from '../src/assets/sprites/lead.ts'
-import { teammateIdle, teammateWork } from '../src/assets/sprites/teammate.ts'
+import { leadIdle, leadWalk, leadWork } from '../src/assets/sprites/lead.ts'
+import { teammateIdle, teammateWalk, teammateWork } from '../src/assets/sprites/teammate.ts'
 
 /** Minimal valid 4x3 two-frame sheet used as the baseline for violation tests. */
 function validSheet(overrides: Partial<SpriteSheet> = {}): SpriteSheet {
@@ -130,7 +130,7 @@ describe('validateSheet', () => {
 
 describe('generated sheets', () => {
   it('validate clean against the shared rules', () => {
-    for (const sheet of [leadIdle, leadWork, teammateIdle, teammateWork]) {
+    for (const sheet of [leadIdle, leadWork, leadWalk, teammateIdle, teammateWork, teammateWalk]) {
       expect(validateSheet(sheet)).toEqual([])
     }
   })
@@ -140,10 +140,14 @@ describe('generated sheets', () => {
       .toEqual(['lead.idle', 64, 64, 4, 6])
     expect([leadWork.name, leadWork.frameWidth, leadWork.frameHeight, leadWork.frames.length, leadWork.fps])
       .toEqual(['lead.work', 64, 64, 4, 6])
+    expect([leadWalk.name, leadWalk.frameWidth, leadWalk.frameHeight, leadWalk.frames.length, leadWalk.fps])
+      .toEqual(['lead.walk', 64, 64, 4, 6])
     expect([teammateIdle.name, teammateIdle.frameWidth, teammateIdle.frameHeight, teammateIdle.frames.length, teammateIdle.fps])
       .toEqual(['teammate.idle', 48, 48, 4, 6])
     expect([teammateWork.name, teammateWork.frameWidth, teammateWork.frameHeight, teammateWork.frames.length, teammateWork.fps])
       .toEqual(['teammate.work', 48, 48, 4, 6])
+    expect([teammateWalk.name, teammateWalk.frameWidth, teammateWalk.frameHeight, teammateWalk.frames.length, teammateWalk.fps])
+      .toEqual(['teammate.walk', 48, 48, 4, 6])
   })
 
   it('idle frames differ from each other (breathing/blink motion)', () => {
@@ -151,6 +155,21 @@ describe('generated sheets', () => {
       const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
       expect(distinct.size).toBe(sheet.frames.length)
     }
+  })
+
+  it('walk frames differ from each other (leg alternation, bob, tail sway)', () => {
+    for (const sheet of [leadWalk, teammateWalk]) {
+      const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
+      expect(distinct.size).toBe(sheet.frames.length)
+    }
+  })
+
+  it('walk sheets keep the idle head (goggles/muzzle identical to idle frame 0)', () => {
+    // Head block occupies the top 24 rows on the teammate; walk frames 0/2 are
+    // unbobbed, so those rows match idle frame 0 exactly.
+    expect(teammateWalk.frames[0]?.slice(0, 24)).toEqual(teammateIdle.frames[0]?.slice(0, 24))
+    expect(teammateWalk.frames[2]?.slice(0, 24)).toEqual(teammateIdle.frames[0]?.slice(0, 24))
+    expect(leadWalk.frames[0]?.slice(0, 37)).toEqual(leadIdle.frames[0]?.slice(0, 37))
   })
 })
 

@@ -1,16 +1,18 @@
-/** M1 Canvas 2D scene painter: factory floor, plaque, desks, and animated agent sprites. */
+/** M2 Canvas 2D scene painter: factory floor, plaque, desks, and actor-driven sprites. */
 
 import { useEffect, useRef } from 'react'
 import { palette } from './assets/palette.ts'
 import { drawSprite, pickFrame, type SpriteSheet } from '../engine/sprites.ts'
+import { startLoop } from '../engine/loop.ts'
 import type { DeskSlot } from '../scenes/layout.ts'
-import type { VisualSceneModel } from './reconcile.ts'
 import css from './VisualAgentsAction.module.css'
 
-/** One animated agent placed at a desk slot in the scene. */
+/** One actor-driven agent placement in the scene (normalized 0..1 coords). */
 export interface SceneAgent {
   readonly sheet: SpriteSheet
-  readonly slot: DeskSlot
+  readonly x: number
+  readonly y: number
+  readonly desk: DeskSlot
   readonly tint?: string
 }
 
@@ -100,12 +102,14 @@ function paintPlaque(
 
 /**
  * Paint the factory-floor scene: background, gears, plaque, then each agent's
- * desk and animated sprite (sprite bottom aligned just above the desk top).
+ * desk (at agent.desk) and animated sprite, bottom-centered at
+ * (agent.x * width, agent.y * height) — the actor FSM places settled actors
+ * 0.10 in front of the desk line, so no extra offset is applied here.
  * @param ctx2d - Canvas 2D context already scaled for the device pixel ratio.
  * @param width - CSS-pixel scene width.
  * @param height - CSS-pixel scene height.
  * @param plaqueText - engraved plaque copy (selected project id or the no-project notice).
- * @param agents - animated agents to paint at their desk slots (M1).
+ * @param agents - actor-driven agents to paint (M2); optional for M0 compatibility.
  * @param timeMs - wall-clock milliseconds driving `pickFrame` animation.
  */
 export function paintScene(
@@ -145,9 +149,7 @@ export function paintScene(
 
   const now = timeMs ?? 0
   for (const agent of agents ?? []) {
-    const centerX = agent.slot.x * width
-    const deskTop = agent.slot.y * height
-    paintDesk(ctx2d, centerX, deskTop)
+    paintDesk(ctx2d, agent.desk.x * width, agent.desk.y * height)
     const scale = spriteScale(agent.sheet)
     const spriteWidth = agent.sheet.frameWidth * scale
     const spriteHeight = agent.sheet.frameHeight * scale
@@ -155,8 +157,8 @@ export function paintScene(
       ctx2d,
       agent.sheet,
       pickFrame(agent.sheet, now),
-      centerX - spriteWidth / 2,
-      deskTop - spriteHeight - 2,
+      agent.x * width - spriteWidth / 2,
+      agent.y * height - spriteHeight,
       scale,
       agent.tint,
     )
@@ -165,24 +167,26 @@ export function paintScene(
 
 /** Props of the scene canvas. */
 export interface SceneCanvasProps {
-  scene: VisualSceneModel
   plaqueText: string
-  agents?: readonly SceneAgent[]
+  /** Actor getter read every frame (actors live outside React state at 60fps). */
+  getAgents: () => readonly SceneAgent[]
+  /** Called inside the RAF loop BEFORE painting (actor stepping hook). */
+  onFrame?: (timeMs: number, dtMs: number) => void
 }
 
 /**
- * devicePixelRatio-aware canvas repainting the scene on prop or window-size
- * changes. With agents present, a ~150ms interval repaints the animation
- * (M1 interim; a RAF loop lands in M2). Interval is cleaned up on
- * unmount/props change; a missing 2D context (jsdom) is a safe no-op.
+ * devicePixelRatio-aware canvas repainting the scene via a single RAF loop
+ * (setTimeout fallback in jsdom): each frame calls onFrame (actor stepping)
+ * then repaints with timeMs = now(). The loop stops on unmount; a missing 2D
+ * context (jsdom) skips painting but keeps the loop alive.
  */
-export function SceneCanvas({ scene, plaqueText, agents }: SceneCanvasProps) {
+export function SceneCanvas({ plaqueText, getAgents, onFrame }: SceneCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const animated = (agents?.length ?? 0) > 0
   useEffect(() => {
     const canvas = canvasRef.current
     if (canvas === null) return
-    const repaint = (): void => {
+    const repaint = (timeMs: number, dtMs: number): void => {
+      onFrame?.(timeMs, dtMs)
       const ratio = window.devicePixelRatio || 1
       const cssWidth = canvas.clientWidth > 0 ? canvas.clientWidth : 640
       const cssHeight = canvas.clientHeight > 0 ? canvas.clientHeight : 360
@@ -191,15 +195,15 @@ export function SceneCanvas({ scene, plaqueText, agents }: SceneCanvasProps) {
       const ctx2d = canvas.getContext('2d')
       if (ctx2d === null) return
       ctx2d.setTransform(ratio, 0, 0, ratio, 0, 0)
-      paintScene(ctx2d, cssWidth, cssHeight, plaqueText, agents, animated ? Date.now() : 0)
+      paintScene(ctx2d, cssWidth, cssHeight, plaqueText, getAgents(), timeMs)
     }
-    repaint()
-    window.addEventListener('resize', repaint)
-    const interval = animated ? window.setInterval(repaint, 150) : null
+    const handle = startLoop(repaint)
+    const onResize = (): void => { repaint(Date.now(), 0) }
+    window.addEventListener('resize', onResize)
     return () => {
-      window.removeEventListener('resize', repaint)
-      if (interval !== null) window.clearInterval(interval)
+      handle.stop()
+      window.removeEventListener('resize', onResize)
     }
-  }, [scene, plaqueText, agents, animated])
+  }, [plaqueText, getAgents, onFrame])
   return <canvas ref={canvasRef} className={css.canvas} data-team-visual-scene />
 }

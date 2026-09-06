@@ -19,6 +19,7 @@ export const zh = {
   'scene.projectPlaque': '项目 {projectId}',
   'scene.agents': '代理',
   'scene.overseer': '监工',
+  'dashboard.stale': '所选项目已不在最新概览中，已清除选择。',
 } satisfies Record<string, string>
 
 /** Visual agents locale key union. */
@@ -40,4 +41,5 @@ export const en = {
   'scene.projectPlaque': 'Project {projectId}',
   'scene.agents': 'Agents',
   'scene.overseer': 'Overseer',
+  'dashboard.stale': 'The selected project is absent from the latest dashboard and was cleared.',
 } satisfies Record<TeamVisualKey, string>
