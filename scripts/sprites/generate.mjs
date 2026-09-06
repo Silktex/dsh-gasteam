@@ -577,3 +577,581 @@ const LEAD_WORK = [
     '....................XXXXXXXXXX....XXXXXXXXXX....................',
   ],
 ]
+
+const TEAMMATE_IDLE = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmXX..........',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmX...........',
+    '...........XmmmmmmmmppppppppmmmmmmmmX...........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmX...........',
+    '..........XXXXhtttttttttttttttttttXXXX..........',
+    '.........XhmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmttttbttttttttttbttttmmmmX.........',
+    '.........XmmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XppppsttstPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '..........XXXXtssttPPPPPPPPPPtttttXXXX..........',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX..XXtttttttXXtttttttXX..............',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX.............',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX.............',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmXX..........',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmX...........',
+    '...........XmmmmmmmmppppppppmmmmmmmmX...........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmX...........',
+    '..........XXXXhtttttttttttttttttttXXXX..........',
+    '.........XhmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmttttbttttttttttbttttmmmmX.........',
+    '.........XmmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XppppsttstPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '..........XXXXtssttPPPPPPPPPPtttttXXXX..........',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX..XXtttttttXXtttttttXX..............',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX.............',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX.............',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwcwwwcwwwwwwwwcwwwcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcwwwcwwwwwwwwcwwwcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmXX..........',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmX...........',
+    '...........XmmmmmmmmppppppppmmmmmmmmX...........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmX...........',
+    '..........XXXXhtttttttttttttttttttXXXX..........',
+    '.........XhmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmttttbttttttttttbttttmmmmX.........',
+    '.........XmmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XppppsttstPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '..........XXXXtssttPPPPPPPPPPtttttXXXX..........',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX..XXtttttttXXtttttttXX..............',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX.............',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX.............',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmXX..........',
+    '...........XmmmmmmmmpXppXpppmmmmmmmmX...........',
+    '...........XmmmmmmmmppppppppmmmmmmmmX...........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmX...........',
+    '..........XXXXhtttttttttttttttttttXXXX..........',
+    '.........XhmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmttttbttttttttttbttttmmmmX.........',
+    '.........XmmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XppppsttstPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '.........XpppptssttPPPPPPPPPPtttttppppX.........',
+    '..........XXXXtssttPPPPPPPPPPtttttXXXX..........',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX...............',
+    '......XmmmmX..XXtttttttXXtttttttXX..............',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX.............',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX.............',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+const TEAMMATE_WORK = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmXXXXXXX...',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmhsssssssssX..',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmssssssssssX..',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmssssssssssX..',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbwwwXXXXXX...',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmwwwX........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwwwwX........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwwwwX........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwwwwX........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmwwwX........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmwwwX........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmppwwwX........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmppppX.........',
+    '.........XmmmmmmmmppppppppppppmmmmppppX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmmmX.........',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmmmX.........',
+    '...........XmmmmmmmmppppppppmmmmmmmmmmX.........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '..........XXXXhttttttttttttttttttmmmmmX.........',
+    '.........XhmmmttttttttttttttttttttXXXX..........',
+    '.........XmmmmttttbttttttttttbttttX.............',
+    '.........XmmmmttttttttttttttttttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XppppsttstPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '..........XXXXtssttPPPPPPPPPPtttttX.............',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX.......XXXXXX..',
+    '......XmmmmX...XtttttttXXtttttttX......XhsssssX.',
+    '......XmmmmX..XXtttttttXXtttttttXX.....XssssssX.',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.....XXXXXX..',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmXXXXXXXX..',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmhsssssssX.',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmssssssssX.',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmssssssssX.',
+    '..........XXmmmmmmpppppXppppppmmmmmmXXXwwwXXXX..',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmX.XwwwX.....',
+    '...........XmmmmmmmmppppppppmmmmmmmmX.XwwwX.....',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmXXXwwwX.....',
+    '..........XXXXhtttttttttttttttttttmmmmpwwwX.....',
+    '.........XhmmmttttttttttttttttttttmmmmppppX.....',
+    '.........XmmmmttttbttttttttttbttttmmmmppppX.....',
+    '.........XmmmmttttttttttttttttttttmmmmppppX.....',
+    '.........XmmmmtttttPPPPPPPPPPtttttXXXXXXXX......',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XppppsttstPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '..........XXXXtssttPPPPPPPPPPtttttX.............',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX.......XXXXXX..',
+    '......XmmmmX...XtttttttXXtttttttX......XhsssssX.',
+    '......XmmmmX..XXtttttttXXtttttttXX.....XssssssX.',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.....XXXXXX..',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwwmmX.........',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmmmX.........',
+    '.........XmmmmmmmmppppppppppppmmmmmmmmX.........',
+    '..........XXmmmmmmpppppXppppppmmmmmmXX..........',
+    '...........XmmmmmmmmppXpXpppmmmmmmmmX...........',
+    '...........XmmmmmmmmppppppppmmmmmmmmX...........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmX...........',
+    '..........XXXXhtttttttttttttttttttXX............',
+    '.........XhmmmttttttttttttttttttttXXXX..........',
+    '.........XmmmmttttbttttttttttbttttmmmmX.........',
+    '.........XmmmmttttttttttttttttttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XmmmmtttttPPPPPPPPPPtttttmmmmX.........',
+    '.........XppppsttstPPPPPPPPPPtttttmmmmXX........',
+    '.........XpppptssttPPPPPPPPPPtttttXppwwwX.......',
+    '.........XpppptssttPPPPPPPPPPtttttXppwwwX.......',
+    '..........XXXXtssttPPPPPPPPPPtttttXppwwwX.......',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwXXXwwwX.......',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.XwwwX.......',
+    '......XwwwwX..XXtttttttXXtttttttXX..XwwwXXXXXX..',
+    '......XwwwwX...XtttttttXXtttttttX..XssssssssshX.',
+    '......XmmmmX...XtttttttXXtttttttX..XsssssssssX..',
+    '......XmmmmX...XtttttttXXtttttttX...XXXXhsssssX.',
+    '......XmmmmX..XXtttttttXXtttttttXX.....XssssssX.',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.....XXXXXX..',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhmX....................XmmX..........',
+    '.........XmmmmX..................XmmmmX.........',
+    '.........XmmmmXXXXXXXXXXXXXXXXXXXXmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '.........XhhbbbbbbbbbbbbbbbbbbbbbbbbbbXXXXXX....',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmhssssssssX...',
+    '.........XmmwwwchXXcwwwwwwwwchXXcwwsssssssssX...',
+    '.........XmmwwwwXXXwwwwwwwwwwXXXwwwsssssssssX...',
+    '.........XmmwwwcXXXcwwwwwwwwcXXXcwwwwwwXXXXX....',
+    '.........XmmmmmmcccmmmmmmmmmmcccmmmmwwwX........',
+    '.........XmmmmmmmmmmmmmmmmmmmmmmmmmmwwwX........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmwwwX........',
+    '.........XmmmmmmmmpppXXXXXXpppmmmmmmwwwX........',
+    '.........XmmmmmmmmppppppppppppmmmmmmwwwX........',
+    '..........XXmmmmmmpppppXppppppmmmmppwwwX........',
+    '...........XmmmmmmmmppXpXpppmmmmmmppppX.........',
+    '...........XmmmmmmmmppppppppmmmmmmppppX.........',
+    '...........XmmmmmmmmmmmmmmmmmmmmmmmmmmX.........',
+    '..........XXXXhttttttttttttttttttmmmmmX.........',
+    '.........XhmmmtttttttttttttttttttmmmmmX.........',
+    '.........XmmmmttttbttttttttttbttttXXXX..........',
+    '.........XmmmmttttttttttttttttttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XmmmmtttttPPPPPPPPPPtttttX.............',
+    '.........XppppsttstPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '.........XpppptssttPPPPPPPPPPtttttX.............',
+    '..........XXXXtssttPPPPPPPPPPtttttX.............',
+    '.......XXXX..XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '......XwwwwX..XXtttttttXXtttttttXX..............',
+    '......XwwwwX...XtttttttXXtttttttX...............',
+    '......XmmmmX...XtttttttXXtttttttX.......XXXXXX..',
+    '......XmmmmX...XtttttttXXtttttttX......XhsssssX.',
+    '......XmmmmX..XXtttttttXXtttttttXX.....XssssssX.',
+    '.....XmmmmmX.XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '......XXXXX..XrrrrrrrrrXXrrrrrrrrrX....XssssssX.',
+    '.............XrrrrrrrrrXXrrrrrrrrrX.....XXXXXX..',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+// ---------------------------------------------------------------------------
+// Walk sheets (M2): derived from idle frame 0 via deterministic pixel
+// transforms — the walk art keeps the idle head/torso and re-poses the legs.
+// ---------------------------------------------------------------------------
+
+/**
+ * Shift the pixel run at columns [start, start+len) by `dx` within one row,
+ * filling vacated cells with '.'. Callers must ensure the target cells are
+ * transparent in the original row.
+ */
+function shiftSpan(row, start, len, dx) {
+  const cells = row.split('')
+  const span = cells.slice(start, start + len)
+  for (let i = start; i < start + len; i += 1) cells[i] = '.'
+  for (let i = 0; i < len; i += 1) cells[start + dx + i] = span[i]
+  return cells.join('')
+}
+
+/** Return a copy of `frame` with rows [start, start+rows.length) replaced. */
+function withRows(frame, start, rows) {
+  return [...frame.slice(0, start), ...rows, ...frame.slice(start + rows.length)]
+}
+
+/**
+ * Body bob: the whole body drops 1px while the sole row stays planted (the
+ * boot row above the soles is squashed out). Used for the "legs together"
+ * walk frames.
+ */
+function bob(frame, frameWidth) {
+  return ['.'.repeat(frameWidth), ...frame.slice(0, -2), frame[frame.length - 1]]
+}
+
+/**
+ * teammateWalk (48x48, 4f @6fps): left leg forward / legs together / right
+ * leg forward / together. Leg alternation shifts the forward leg+boot 1px
+ * outward; the together frames bob the body 1px down. Frame 3 additionally
+ * swings the visible paw 1px right so the two bob frames stay distinct.
+ * Head rows 0..23 of the unbobbed frames are byte-identical to teammateIdle
+ * frame 0 (goggles/muzzle unchanged).
+ */
+function buildTeammateWalk(base) {
+  const leftForward = withRows(base, 39, [
+    shiftSpan(base[39], 14, 10, -1), // 'XXtttttttX' left leg top
+    shiftSpan(base[40], 15, 9, -1),  // 'XtttttttX' left leg
+    shiftSpan(base[41], 15, 9, -1),
+    shiftSpan(base[42], 15, 9, -1),
+    shiftSpan(base[43], 14, 10, -1), // left leg bottom
+    shiftSpan(base[44], 13, 11, -1), // 'XrrrrrrrrrX' left boot
+    shiftSpan(base[45], 13, 11, -1),
+    shiftSpan(base[46], 13, 11, -1),
+    shiftSpan(base[47], 14, 9, -1),  // left sole
+  ])
+  const rightForward = withRows(base, 39, [
+    shiftSpan(base[39], 24, 10, 1),  // 'XtttttttXX' right leg top
+    shiftSpan(base[40], 24, 9, 1),   // 'XtttttttX' right leg
+    shiftSpan(base[41], 24, 9, 1),
+    shiftSpan(base[42], 24, 9, 1),
+    shiftSpan(base[43], 24, 10, 1),  // right leg bottom
+    shiftSpan(base[44], 24, 11, 1),  // 'XrrrrrrrrrX' right boot
+    shiftSpan(base[45], 24, 11, 1),
+    shiftSpan(base[46], 24, 11, 1),
+    shiftSpan(base[47], 25, 9, 1),   // right sole
+  ])
+  const bobbed = bob(base, 48)
+  const bobbedSwing = withRows(bobbed, 42, [
+    shiftSpan(bobbed[42], 6, 6, 1),  // 'XmmmmX' paw swings 1px right
+    shiftSpan(bobbed[43], 6, 6, 1),
+    shiftSpan(bobbed[44], 6, 6, 1),
+  ])
+  return [leftForward, bobbed, rightForward, bobbedSwing]
+}
+
+/**
+ * leadWalk (64x64, 4f @6fps): same leg alternation/bob scheme as the
+ * teammate walk, plus a tail sway — the parchment tail-tip point pixel
+ * shifts 1px right on frame 1 and 1px left on frame 3.
+ */
+function buildLeadWalk(base) {
+  const leftForward = withRows(base, 54, [
+    shiftSpan(base[54], 20, 11, -1), // 'XhmmmmmmmmX' left leg top
+    shiftSpan(base[55], 20, 11, -1), // 'XmmmmmmmmmX' left leg
+    shiftSpan(base[56], 20, 11, -1),
+    shiftSpan(base[57], 20, 11, -1),
+    shiftSpan(base[58], 20, 11, -1),
+    shiftSpan(base[59], 19, 12, -1), // 'XwwwwwwwwwwX' left boot
+    shiftSpan(base[60], 19, 12, -1),
+    shiftSpan(base[61], 19, 12, -1),
+    shiftSpan(base[62], 19, 12, -1),
+    shiftSpan(base[63], 20, 10, -1), // left sole
+  ])
+  const rightForward = withRows(base, 54, [
+    shiftSpan(base[54], 33, 11, 1),  // right leg top
+    shiftSpan(base[55], 33, 11, 1),  // right leg
+    shiftSpan(base[56], 33, 11, 1),
+    shiftSpan(base[57], 33, 11, 1),
+    shiftSpan(base[58], 33, 11, 1),
+    shiftSpan(base[59], 33, 12, 1),  // right boot
+    shiftSpan(base[60], 33, 12, 1),
+    shiftSpan(base[61], 33, 12, 1),
+    shiftSpan(base[62], 33, 12, 1),
+    shiftSpan(base[63], 34, 10, 1),  // right sole
+  ])
+  const bobbed = bob(base, 64)
+  // Tail sway: only the tip point pixel (post-bob row 42, col 58) can move —
+  // the 'XXpX'/'XppppX' cluster below is boxed in by its own outline. The
+  // point shifts 1px right on frame 1 and 1px left on frame 3.
+  const tailRight = withRows(bobbed, 42, [shiftSpan(bobbed[42], 58, 1, 1)])
+  const tailLeft = withRows(bobbed, 42, [shiftSpan(bobbed[42], 58, 1, -1)])
+  return [leftForward, tailRight, rightForward, tailLeft]
+}
+
+const TEAMMATE_WALK = buildTeammateWalk(TEAMMATE_IDLE[0])
+const LEAD_WALK = buildLeadWalk(LEAD_IDLE[0])
+
+// ---------------------------------------------------------------------------
+// Sheet assembly, validation, and deterministic emission.
+// ---------------------------------------------------------------------------
+
+/** @type {{ file: string, exports: [string, object][] }[]} */
+const SHEETS = [
+  {
+    file: 'lead.ts',
+    exports: [
+      ['leadIdle', { name: 'lead.idle', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_IDLE }],
+      ['leadWork', { name: 'lead.work', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_WORK }],
+      ['leadWalk', { name: 'lead.walk', frameWidth: 64, frameHeight: 64, fps: 6, legend: LEGEND, frames: LEAD_WALK }],
+    ],
+  },
+  {
+    file: 'teammate.ts',
+    exports: [
+      ['teammateIdle', { name: 'teammate.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_IDLE }],
+      ['teammateWork', { name: 'teammate.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WORK }],
+      ['teammateWalk', { name: 'teammate.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WALK }],
+    ],
+  },
+]
+
+const HEADER = '/** GENERATED by scripts/sprites/generate.mjs — do not edit by hand. */\n'
+  + "import type { SpriteSheet } from '../../engine/sprites.ts'\n\n"
+
+function emit(exports) {
+  return HEADER + exports
+    .map(([exportName, sheet]) => `export const ${exportName}: SpriteSheet =\n${JSON.stringify(sheet, null, 2)}\n`)
+    .join('\n')
+}
+
+const outDir = join(dirname(fileURLToPath(import.meta.url)), '../../packages/client-ui-agent-team-visual/src/assets/sprites')
+
+// Validate every sheet before writing anything: refuse to write invalid sheets.
+let failed = false
+for (const { exports } of SHEETS) {
+  for (const [exportName, sheet] of exports) {
+    const violations = validateSheetRules(sheet)
+    if (violations.length > 0) {
+      failed = true
+      console.error(`✗ ${sheet.name} (${exportName}) refuses to write:`)
+      for (const violation of violations) console.error(`    ${violation}`)
+    }
+  }
+}
+if (failed) {
+  console.error('generate: aborted, no files written')
+  process.exit(1)
+}
+mkdirSync(outDir, { recursive: true })
+for (const { file, exports } of SHEETS) {
+  writeFileSync(join(outDir, file), emit(exports))
+  console.log(`wrote ${file} (${exports.map(([name]) => name).join(', ')})`)
+}
+console.log('generate: 6 sheets written')
