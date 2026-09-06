@@ -1,4 +1,5 @@
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
+import type { Context } from '@deepseek-ai/cordis'
 
 const teamSessionEventTypes = [
   'team/batch',
@@ -14,4 +15,4 @@ for (const eventType of teamSessionEventTypes) registry.add(eventType)
 
 export const name = 'dsh-team-compat'
 
-export function apply(): void {}
+export function apply(_ctx: Context): void {}

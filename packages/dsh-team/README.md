@@ -36,6 +36,12 @@ not need a local build step.
 - Batch coordination and status tools
 - A web workspace dashboard with roster, tasks, and activity
 
+## Screenshots
+
+![Workspace controls](docs/dashboard-controls.png)
+
+![Workspace activity](docs/dashboard-activity.png)
+
 The default bundle uses DSH's built-in `spawn` and `fork` continuable-agent
 providers. It supports the `web` profile on DSH `0.1.2-rc.1`, Node.js 22.19+
 or 24+, and pnpm 11.

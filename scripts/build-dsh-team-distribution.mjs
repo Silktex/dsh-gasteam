@@ -130,6 +130,11 @@ export async function buildDshTeamDistribution(requestedOutput) {
     await cp(resolve(packageSource, file), resolve(output, file))
   }
   await cp(resolve(root, 'LICENSE'), resolve(output, 'LICENSE'))
+  await mkdir(resolve(output, 'docs'))
+  await Promise.all([
+    cp(resolve(root, 'docs/evidence/dashboard/controls.png'), resolve(output, 'docs/dashboard-controls.png')),
+    cp(resolve(root, 'docs/evidence/dashboard/activity.png'), resolve(output, 'docs/dashboard-activity.png')),
+  ])
   await copyDistributionSources(output)
 
   const commit = sourceCommit()

@@ -26,7 +26,8 @@
     "cordis.patch.yml",
     "LICENSE",
     "README.md",
-    "SOURCE.md"
+    "SOURCE.md",
+    "docs"
   ],
   "license": "MIT",
   "repository": {
