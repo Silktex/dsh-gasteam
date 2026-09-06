@@ -322,7 +322,7 @@ export const coordinatorWork: SpriteSheet =
       ".........XccccccccPPPPPPPPXPPPPPcccccccXX.......",
       "..........XcccccccPPPPPPPPPPPPPPccccccX.........",
       "...........XXcccccPPPPPPPPPPPPPPcccccXX.........",
-      "............XccccccPPPPPPPPPPPPccccX............",
+      "............XccccccPPPPPPPPPPPPccccccX..........",
       ".............XcccccPPPPPPPPPPPPccccX............",
       "..........XXXXhtttppttpptttttttttXXXX...........",
       ".........XhcctttccttwwttcctttttttttcccX.........",
