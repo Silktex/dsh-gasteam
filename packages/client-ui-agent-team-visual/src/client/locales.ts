@@ -17,6 +17,8 @@ export const zh = {
   'toggle.disabledNotice': '此项目尚未启用视觉代理；打开开关以查看场景。',
   'scene.noProject': '未选择项目',
   'scene.projectPlaque': '项目 {projectId}',
+  'scene.agents': '代理',
+  'scene.overseer': '监工',
 } satisfies Record<string, string>
 
 /** Visual agents locale key union. */
@@ -36,4 +38,6 @@ export const en = {
   'toggle.disabledNotice': 'Visual agents are off for this project; flip the switch to view the scene.',
   'scene.noProject': 'No project selected',
   'scene.projectPlaque': 'Project {projectId}',
+  'scene.agents': 'Agents',
+  'scene.overseer': 'Overseer',
 } satisfies Record<TeamVisualKey, string>

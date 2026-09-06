@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { makeTranslate } from '../../../tests/support/translate.ts'
@@ -86,6 +86,21 @@ describe('VisualAgentsAction', () => {
     fireEvent.click(screen.getByRole('switch', { name: zh['toggle.on'], checked: true }))
     expect(await screen.findByText(zh['toggle.disabledNotice'])).toBeTruthy()
     expect(container.querySelector('canvas')).toBeNull()
+  })
+
+  it('repaints the animated agent scene without crashing when no 2D context exists', async () => {
+    const { container, unmount } = render(<VisualAgentsAction {...props(actions())} />)
+    fireEvent.click(screen.getByRole('button', { name: zh.trigger }))
+    await screen.findByRole('dialog', { name: zh.title })
+    fireEvent.click(screen.getByRole('switch', { name: zh['toggle.off'], checked: false }))
+    expect(container.querySelector('canvas')).not.toBeNull()
+    // jsdom canvases have no 2D context; the ~150ms interval repaint must be a safe no-op.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
+    expect(container.querySelector('canvas')).not.toBeNull()
+    expect(screen.getByRole('dialog', { name: zh.title })).toBeTruthy()
+    // Unmount stops the repaint interval; no stray repaints afterwards.
+    unmount()
+    await new Promise(resolve => setTimeout(resolve, 350))
   })
 
   it('shows a Remote carrier failure unchanged', async () => {

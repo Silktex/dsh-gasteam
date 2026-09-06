@@ -9,8 +9,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
 import { reconcileDashboard } from './reconcile.ts'
 import { createVisualToggleStore, type VisualToggleStore } from './toggle.ts'
-import { SceneCanvas } from './SceneCanvas.tsx'
+import { SceneCanvas, type SceneAgent } from './SceneCanvas.tsx'
+import { AGENT_TINTS } from '../engine/sprites.ts'
+import { deskSlotFor } from '../scenes/layout.ts'
+import { leadIdle } from '../assets/sprites/lead.ts'
+import { teammateIdle, teammateWork } from '../assets/sprites/teammate.ts'
+import { palette } from './assets/palette.ts'
 import css from './VisualAgentsAction.module.css'
+
+/** Fixed overseer slot beside the plaque for the lead fox (normalized coords). */
+const OVERSEER_SLOT = { x: 0.5, y: 0.18 } as const
 
 /** Generated Remote result consumed directly by the visual agents UI. */
 export type TeamVisualActionResult = RemoteResult<WorkspaceDashboardView>
@@ -77,6 +85,18 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
     () => projectId !== null && store.isEnabled(projectId),
   )
   const scene = useMemo(() => view === null ? null : reconcileDashboard(view, projectId), [view, projectId])
+  const agents = useMemo<readonly SceneAgent[]>(() => {
+    if (scene === null || projectId === null) return []
+    const placed: SceneAgent[] = scene.agents.map((agent, index) => ({
+      sheet: agent.state === 'working' ? teammateWork : teammateIdle,
+      slot: deskSlotFor(agent.id, index),
+      tint: AGENT_TINTS[index % AGENT_TINTS.length] ?? palette.copper,
+    }))
+    if (scene.agents.length >= 1) {
+      placed.unshift({ sheet: leadIdle, slot: OVERSEER_SLOT, tint: palette.surfaceDark })
+    }
+    return placed
+  }, [scene, projectId])
   const showCanvas = scene !== null && projectId !== null && enabled
 
   return (
@@ -133,7 +153,7 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
                 </button>
               </div>
               {showCanvas
-                ? <SceneCanvas scene={scene} plaqueText={t('scene.projectPlaque', { projectId })} />
+                ? <SceneCanvas scene={scene} plaqueText={t('scene.projectPlaque', { projectId })} agents={agents} />
                 : <div className={css.notice} role="status">{t('toggle.disabledNotice')}</div>}
             </>
           )}
