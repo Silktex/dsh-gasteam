@@ -788,3 +788,12 @@ Root's combined supervisor run then exposed an unhandled stdin EPIPE after early
 Corrective commit `a67e71651aabe7b930dcbc5503aa0c7e553e118e` passed [exact-commit CI34006610442](https://github.com/Silktex/dsh-gasteam/actions/runs/34006610442). Every job step succeeded: frozen install, documentation checks, build, types, regular tests, fresh-process acceptance, installed CLI smoke, and the independent packed release/legacy upgrade gate. This validates the overflow/close receipt, stdin EPIPE, and unexpected-input-error corrections on the published commit.
 
 The subsequent documentation checkpoint `07f9d7a8881b8beeebded45d97daca9515818283` passed [exact-commit CI34008410193](https://github.com/Silktex/dsh-gasteam/actions/runs/34008410193) with the same complete gate. All M0–M11 requirements and final acceptance scenarios are complete. No feature work, production service installation/restart, or public registry publication is implied or remains authorized by this goal.
+
+
+## 2026-09-05 — Concurrent terminal observation correction
+
+Closure-documentation checkpoint `3c081ec0514187a6927a1510ea3ef3b61c4b67ca` failed [exact-commit CI34009553832](https://github.com/Silktex/dsh-gasteam/actions/runs/34009553832) after 508 regular tests passed and two optional probes skipped. Two simultaneous observers of the same stopped external runtime could race: one published its immutable terminal receipt while the other's error path attempted to append uncertainty to the now-terminal record. That invalid transition failed the otherwise idempotent concurrent replay scenario.
+
+The correction treats a concurrently published terminal receipt as authoritative when an observer's uncertainty append loses that race; all nonterminal write failures still propagate. The existing replay test now forces the stale-observer ordering with a barrier. Local validation passed build, types, 509 regular tests with two skips, 21 process scenarios, installed smoke, documentation checks, and the independent packed release/legacy-upgrade gate at `/var/tmp/gasteam-standalone-release-TUxlGT`.
+
+Corrective commit `b78acfcfa394c31fa03f5f152d087ab0e1057220` passed [exact-commit CI34009813442](https://github.com/Silktex/dsh-gasteam/actions/runs/34009813442). Frozen install, documentation checks, build, types, regular tests, fresh-process acceptance, installed smoke, and the packed release gate all succeeded. No remaining implementation or release task is queued by this goal.
