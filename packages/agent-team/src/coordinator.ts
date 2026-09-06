@@ -35,6 +35,7 @@ import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, Workspace
 import { projectWorkspaceDashboard } from './workspace-dashboard.ts'
 import type { WorkspaceDashboardPageRequest, WorkspaceDashboardPage, WorkspaceDashboardView } from './workspace-dashboard.ts'
 import { WorkspacePageSnapshotStore } from './workspace-pagination.ts'
+import type { RuntimeProviderCapabilities } from './runtime-provider.ts'
 
 function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
   return ctx.agentTeams.listIntegrations(lead).some(integration => integration.id === integrationId && integration.phase === 'failed')
@@ -154,6 +155,7 @@ export interface CoordinatorView {
   readonly readyTasks: { projectId: string; teamId: string; taskId: string }[]
   readonly workflows: WorkflowRuntimeView[]
   readonly batches: WorkspaceBatchView[]
+  readonly runtimeCapabilities: { dsh: RuntimeProviderCapabilities; external?: RuntimeProviderCapabilities }
   readonly batchNotifications: WorkspaceBatchNotification[]
 }
 
@@ -504,6 +506,7 @@ export class WorkspaceCoordinator {
       workflows: this.workflowViews(),
       batches: this.batches?.list() ?? [],
       batchNotifications: this.batches?.pendingNotifications() ?? [],
+      runtimeCapabilities: this.execution?.routedCapabilities() ?? disabledRuntimeCapabilities(),
       // This mirrors the scheduler's authoritative batch fence for dashboard callers.
       readyTasks: this.projects.flatMap(project => project.paused ? [] : project.teams.flatMap(team =>
         team.status !== 'available' ? [] : team.tasks.filter(task => task.status === 'pending' && task.blockedBy.every(id => team.tasks.find(task => task.id === id)?.status === 'completed')
@@ -714,4 +717,9 @@ export class WorkspaceCoordinator {
     }
     this.projects = projects
   }
+}
+
+function disabledRuntimeCapabilities(): { dsh: RuntimeProviderCapabilities } {
+  const disabled = { supported: false as const, reason: 'execution is disabled' }
+  return { dsh: { start: disabled, resume: disabled, status: disabled, cancel: disabled, message: disabled, usage: disabled, artifacts: disabled } }
 }

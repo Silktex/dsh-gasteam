@@ -21,6 +21,8 @@ import type { DispatchRequest, DispatchWork } from './dispatch-queue.ts'
 import { DshAssignmentRuntime } from './dsh-assignment-runtime.ts'
 import { ExternalNonCodeAssignmentAdapter } from './external-assignment-adapter.ts'
 import { ExternalAssignmentRuntime } from './external-assignment-runtime.ts'
+import { RoutedDshAssignmentRuntime, RoutedExternalAssignmentRuntime } from './routed-assignment-runtime.ts'
+import type { RuntimeProviderCapabilities } from './runtime-provider.ts'
 import { ExternalRuntimeStore } from './external-runtime.ts'
 import { admitCodex } from './codex-admission.ts'
 import { DurableJournal } from './durable-journal.ts'
@@ -241,6 +243,10 @@ export class CoordinatorExecution {
     const now = Date.now()
     return { submissions: this.submissions.list(), reports: this.reports.list(), attempts: this.assignments.list(), executionBlocks: this.failures.snapshot(), dispatchRequests: this.queue.list(), candidateRetention: this.retention.list(),
       dispatchStatus: this.queue.list().map(request => this.status(request, views, now)), health: this.health?.listHealth() ?? [], escalations: this.health?.listEscalations() ?? [] }
+  }
+
+  routedCapabilities(): { dsh: RuntimeProviderCapabilities; external?: RuntimeProviderCapabilities } {
+    return { dsh: new RoutedDshAssignmentRuntime(this.runtime).capabilities, ...(this.external === undefined ? {} : { external: new RoutedExternalAssignmentRuntime(this.external).capabilities }) }
   }
 
   /** Install the coordinator's authoritative batch dependency gate. */
@@ -902,25 +908,25 @@ export class CoordinatorExecution {
   private async startAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
     if (record.provider === 'external') {
       if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
-      return await this.external.start(record)
+      return await new RoutedExternalAssignmentRuntime(this.external).start(lead, record)
     }
-    return await this.runtime.start(lead, token(record))
+    return await new RoutedDshAssignmentRuntime(this.runtime).start(lead, record)
   }
 
   private async observeAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
     if (record.provider === 'external') {
       if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
-      return await this.external.observe(record)
+      return await new RoutedExternalAssignmentRuntime(this.external).observe(lead, record)
     }
-    return await this.runtime.observe(lead, token(record))
+    return await new RoutedDshAssignmentRuntime(this.runtime).observe(lead, record)
   }
 
   private async cancelAttempt(lead: Agent, record: AttemptRecord, reason: string): Promise<AttemptRecord> {
     if (record.provider === 'external') {
       if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
-      return await this.external.cancel(record, reason)
+      return await new RoutedExternalAssignmentRuntime(this.external).cancel(lead, record, reason)
     }
-    return await this.runtime.cancel(lead, token(record), reason)
+    return await new RoutedDshAssignmentRuntime(this.runtime).cancel(lead, record, reason)
   }
 
   async cancel(lead: Agent, work: DispatchWork, expectedRevision: number, reason: string): Promise<void> {

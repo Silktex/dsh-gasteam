@@ -137,6 +137,8 @@ node --import tsx packages/agent-team/tests/fixtures/real-codex-conformance.mts
 
 If a restart finds retained external work but current admission is unavailable or differs from its pinned policy, the coordinator enters recovery-only mode for that project. It can observe or safely stop the retained helper, but it blocks every new selected-project non-code task with `provider-admission`; it never falls back to DSH. Restore the exact admitted policy to resume dispatch. Legacy external journal records without a pinned policy remain readable and intentionally require manual recovery.
 
+The host `view().runtimeCapabilities` describes the operations the coordinator can actually route. DSH recovery continues an already-owned identity; it does not expose a new-turn resume operation. The Codex command builder can construct a CLI resume command with an exact thread and quiescent receipt, but routed external assignments deliberately do not expose that operation. Provider usage is limited to reported completed-turn receipts. Code artifacts are supported through the host-managed immutable worktree and verified Git integration path, not through a provider upload API.
+
 Set `execution.candidateRetention` only when automatic cleanup is desired. The delay starts when the coordinator first observes the current final accepted merged candidate, not from a merge timestamp. Pause suppresses deletion. Cleanup records uncertain interrupted work and does not automatically retry it; ownership checks cover live in-process Agents only.
 
 ## Workflow vertical slice

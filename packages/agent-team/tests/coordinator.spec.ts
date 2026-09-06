@@ -66,6 +66,16 @@ async function fixture(integration = false) {
   return { ...repo, ctx, lead, config, coordinator, request }
 }
 
+it('exposes routed DSH lifecycle capabilities through the host view', async () => {
+  const { coordinator, lead, request, ctx, config } = await fixture()
+  expect(coordinator.view().runtimeCapabilities.external).toBeUndefined()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
+  cleanup.push(() => running.close())
+  expect(running.view().runtimeCapabilities).toMatchObject({ dsh: { start: { supported: true }, status: { supported: true }, cancel: { supported: true }, resume: { supported: false }, message: { supported: false }, usage: { supported: false }, artifacts: { supported: true } } })
+})
+
 it('returns ordered exact repair source lineage when replacement was already submitted before workflow reconciliation', async () => {
   const original = 'a'.repeat(40), repaired = 'b'.repeat(40)
   const taskId = 'workflow-intent'
