@@ -13,12 +13,17 @@ import { SceneCanvas, type SceneAgent } from './SceneCanvas.tsx'
 import { AGENT_TINTS } from '../engine/sprites.ts'
 import { buildNavGrid } from '../engine/pathfinding.ts'
 import {
-  reconcileActors, sheetForActor, stepActors, type Actor, type ActorSheets,
+  reconcileActors, sheetForActor, stepActors, type Actor, type SheetLibrary,
 } from '../engine/stateMachine.ts'
 import { startPoller, type Poller } from '../engine/poll.ts'
 import { DESK_SLOTS } from '../scenes/layout.ts'
 import { leadIdle } from '../assets/sprites/lead.ts'
-import { teammateIdle, teammateWalk, teammateWork } from '../assets/sprites/teammate.ts'
+import {
+  teammateBlocked, teammateDone, teammateError, teammateIdle, teammateWalk, teammateWork,
+} from '../assets/sprites/teammate.ts'
+import { reviewerIdle, reviewerWalk, reviewerWork } from '../assets/sprites/reviewer.ts'
+import { coordinatorIdle, coordinatorWalk, coordinatorWork } from '../assets/sprites/coordinator.ts'
+import { badgeForState } from '../engine/badges.ts'
 import { palette } from './assets/palette.ts'
 import css from './VisualAgentsAction.module.css'
 
@@ -28,8 +33,15 @@ const OVERSEER_SLOT = { x: 0.5, y: 0.18 } as const
 /** Desk obstacle rects for the nav grid (desk footprint + 2% approach line). */
 const DESK_OBSTACLES = DESK_SLOTS.map(slot => ({ x: slot.x - 0.06, y: slot.y - 0.02, w: 0.12, h: 0.06 }))
 
-/** Teammate sheets per actor phase/state (lead overseer stays static on leadIdle). */
-const TEAMMATE_SHEETS: ActorSheets = { idle: teammateIdle, work: teammateWork, walk: teammateWalk }
+/** Sheet library across all archetypes (lead overseer stays static on leadIdle). */
+const LIBRARY: SheetLibrary = {
+  teammate: {
+    idle: teammateIdle, work: teammateWork, walk: teammateWalk,
+    blocked: teammateBlocked, error: teammateError, done: teammateDone,
+  },
+  reviewer: { idle: reviewerIdle, work: reviewerWork, walk: reviewerWalk },
+  coordinator: { idle: coordinatorIdle, work: coordinatorWork, walk: coordinatorWalk },
+}
 
 /** Poll cadence: 2s while actors move or work, 10s otherwise. */
 const ACTIVE_POLL_MS = 2000
@@ -148,7 +160,8 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
 
   const getAgents = useCallback((): readonly SceneAgent[] => {
     const agents: SceneAgent[] = actorsRef.current.map((actor, index) => ({
-      sheet: sheetForActor(actor, TEAMMATE_SHEETS),
+      sheet: sheetForActor(actor, LIBRARY),
+      badge: actor.phase === 'settled' ? badgeForState(actor.state) : null,
       x: actor.x,
       y: actor.y,
       desk: actor.desk,

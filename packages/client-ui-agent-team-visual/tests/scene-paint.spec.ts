@@ -117,6 +117,50 @@ describe('paintScene', () => {
     ])
   })
 
+  it('draws the badge above the head, centered at scale 2, when agent.badge is set', () => {
+    const stub = stubContext()
+    // 2x2 agent sheet at scale 2 → sprite 4x4 at (48,46); center-x = 50, top = 46.
+    // Badge: 8x8 sheet at scale 2 → badgeX = 50 - 8 = 42, badgeY = 46 - 20 = 26.
+    const badge: SpriteSheet = {
+      name: 'badge.done', frameWidth: 8, frameHeight: 8, fps: 4,
+      legend: { '.': null, b: 'brass' },
+      frames: [
+        ['........', '........', '........', '..b.....', '........', '........', '........', '........'],
+        ['........', '........', '........', '........', '........', '........', '........', '........'],
+      ],
+    }
+    const agent: SceneAgent = { ...agentAt(0.5, 0.5), badge }
+    paintScene(stub.ctx, 100, 100, 'p', [agent], 0)
+    const badgePixels = stub.rects.filter(rect => rect.style === palette.brass && rect.w === 2 && rect.h === 2)
+    // frame 0: single 'b' pixel at sheet (row 3, col 2) → (42 + 2*2, 26 + 3*2).
+    expect(badgePixels).toEqual([{ x: 46, y: 32, w: 2, h: 2, style: palette.brass }])
+  })
+
+  it('draws no badge pixels when agent.badge is null or absent', () => {
+    const stub = stubContext()
+    paintScene(stub.ctx, 100, 100, 'p', [{ ...agentAt(0.5, 0.5), badge: null }, agentAt(0.7, 0.5)], 0)
+    const badgePixels = stub.rects.filter(rect => rect.style === palette.brass && rect.w === 2 && rect.h === 2)
+    expect(badgePixels).toEqual([])
+  })
+
+  it('picks the badge frame from timeMs (badge fps)', () => {
+    const stub = stubContext()
+    const badge: SpriteSheet = {
+      name: 'badge.error', frameWidth: 8, frameHeight: 8, fps: 4,
+      legend: { '.': null, r: 'oxide' },
+      frames: [
+        ['........', '........', '........', '........', '........', '........', '........', '........'],
+        ['........', '........', '........', '..r.....', '........', '........', '........', '........'],
+      ],
+    }
+    const agent: SceneAgent = { ...agentAt(0.5, 0.5), badge }
+    paintScene(stub.ctx, 100, 100, 'p', [agent], 0) // 4fps → frame 0: no badge pixel
+    expect(stub.rects.filter(rect => rect.style === palette.oxide)).toEqual([])
+    paintScene(stub.ctx, 100, 100, 'p', [agent], 250) // 4fps → frame 1
+    const painted = stub.rects.filter(rect => rect.style === palette.oxide)
+    expect(painted).toEqual([{ x: 46, y: 32, w: 2, h: 2, style: palette.oxide }])
+  })
+
   it('applies the agent tint to tint-slot pixels', () => {
     const stub = stubContext()
     const tinted: SceneAgent = {

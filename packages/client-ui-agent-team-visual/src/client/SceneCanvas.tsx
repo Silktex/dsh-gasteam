@@ -14,6 +14,8 @@ export interface SceneAgent {
   readonly y: number
   readonly desk: DeskSlot
   readonly tint?: string
+  /** Optional 8x8 state badge hovering above the head (M3). */
+  readonly badge?: SpriteSheet | null
 }
 
 /** Pixel scale for a sheet: lead (64px) → 1.5, teammate (48px) → 2 (both → 96px tall). */
@@ -153,15 +155,29 @@ export function paintScene(
     const scale = spriteScale(agent.sheet)
     const spriteWidth = agent.sheet.frameWidth * scale
     const spriteHeight = agent.sheet.frameHeight * scale
+    const spriteX = agent.x * width - spriteWidth / 2
+    const spriteY = agent.y * height - spriteHeight
     drawSprite(
       ctx2d,
       agent.sheet,
       pickFrame(agent.sheet, now),
-      agent.x * width - spriteWidth / 2,
-      agent.y * height - spriteHeight,
+      spriteX,
+      spriteY,
       scale,
       agent.tint,
     )
+    // State badge (M3): 8px sheet at scale 2 → 16px wide, centered on the
+    // sprite's center-x (center - 8), hovering 20px above the sprite top.
+    if (agent.badge != null) {
+      drawSprite(
+        ctx2d,
+        agent.badge,
+        pickFrame(agent.badge, now),
+        spriteX + spriteWidth / 2 - 8,
+        spriteY - 20,
+        2,
+      )
+    }
   }
 }
 

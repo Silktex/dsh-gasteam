@@ -6,7 +6,12 @@ import {
   AGENT_TINTS, TINT_SLOT, drawSprite, pickFrame, validateSheet, type SpriteSheet,
 } from '../src/engine/sprites.ts'
 import { leadIdle, leadWalk, leadWork } from '../src/assets/sprites/lead.ts'
-import { teammateIdle, teammateWalk, teammateWork } from '../src/assets/sprites/teammate.ts'
+import {
+  teammateBlocked, teammateDone, teammateError, teammateIdle, teammateWalk, teammateWork,
+} from '../src/assets/sprites/teammate.ts'
+import { reviewerIdle, reviewerWalk, reviewerWork } from '../src/assets/sprites/reviewer.ts'
+import { coordinatorIdle, coordinatorWalk, coordinatorWork } from '../src/assets/sprites/coordinator.ts'
+import { blockedBadge, doneBadge, errorBadge } from '../src/engine/badges.ts'
 
 /** Minimal valid 4x3 two-frame sheet used as the baseline for violation tests. */
 function validSheet(overrides: Partial<SpriteSheet> = {}): SpriteSheet {
@@ -129,9 +134,22 @@ describe('validateSheet', () => {
 })
 
 describe('generated sheets', () => {
-  it('validate clean against the shared rules', () => {
-    for (const sheet of [leadIdle, leadWork, leadWalk, teammateIdle, teammateWork, teammateWalk]) {
+  const LEAD = [leadIdle, leadWork, leadWalk]
+  const TEAMMATE = [teammateIdle, teammateWork, teammateWalk, teammateBlocked, teammateError, teammateDone]
+  const REVIEWER = [reviewerIdle, reviewerWork, reviewerWalk]
+  const COORDINATOR = [coordinatorIdle, coordinatorWork, coordinatorWalk]
+  const ALL = [...LEAD, ...TEAMMATE, ...REVIEWER, ...COORDINATOR]
+
+  it('validate clean against the shared rules (15 generated sheets)', () => {
+    expect(ALL).toHaveLength(15)
+    for (const sheet of ALL) {
       expect(validateSheet(sheet)).toEqual([])
+    }
+  })
+
+  it('badges imported alongside also validate clean', () => {
+    for (const badge of [blockedBadge, errorBadge, doneBadge]) {
+      expect(validateSheet(badge)).toEqual([])
     }
   })
 
@@ -148,28 +166,103 @@ describe('generated sheets', () => {
       .toEqual(['teammate.work', 48, 48, 4, 6])
     expect([teammateWalk.name, teammateWalk.frameWidth, teammateWalk.frameHeight, teammateWalk.frames.length, teammateWalk.fps])
       .toEqual(['teammate.walk', 48, 48, 4, 6])
+    expect([teammateBlocked.name, teammateBlocked.frameWidth, teammateBlocked.frameHeight, teammateBlocked.frames.length, teammateBlocked.fps])
+      .toEqual(['teammate.blocked', 48, 48, 4, 6])
+    expect([teammateError.name, teammateError.frameWidth, teammateError.frameHeight, teammateError.frames.length, teammateError.fps])
+      .toEqual(['teammate.error', 48, 48, 4, 6])
+    expect([teammateDone.name, teammateDone.frameWidth, teammateDone.frameHeight, teammateDone.frames.length, teammateDone.fps])
+      .toEqual(['teammate.done', 48, 48, 4, 6])
+    expect([reviewerIdle.name, reviewerIdle.frameWidth, reviewerIdle.frameHeight, reviewerIdle.frames.length, reviewerIdle.fps])
+      .toEqual(['reviewer.idle', 48, 48, 4, 6])
+    expect([reviewerWork.name, reviewerWork.frameWidth, reviewerWork.frameHeight, reviewerWork.frames.length, reviewerWork.fps])
+      .toEqual(['reviewer.work', 48, 48, 4, 6])
+    expect([reviewerWalk.name, reviewerWalk.frameWidth, reviewerWalk.frameHeight, reviewerWalk.frames.length, reviewerWalk.fps])
+      .toEqual(['reviewer.walk', 48, 48, 4, 6])
+    expect([coordinatorIdle.name, coordinatorIdle.frameWidth, coordinatorIdle.frameHeight, coordinatorIdle.frames.length, coordinatorIdle.fps])
+      .toEqual(['coordinator.idle', 48, 48, 4, 6])
+    expect([coordinatorWork.name, coordinatorWork.frameWidth, coordinatorWork.frameHeight, coordinatorWork.frames.length, coordinatorWork.fps])
+      .toEqual(['coordinator.work', 48, 48, 4, 6])
+    expect([coordinatorWalk.name, coordinatorWalk.frameWidth, coordinatorWalk.frameHeight, coordinatorWalk.frames.length, coordinatorWalk.fps])
+      .toEqual(['coordinator.walk', 48, 48, 4, 6])
   })
 
   it('idle frames differ from each other (breathing/blink motion)', () => {
-    for (const sheet of [leadIdle, teammateIdle]) {
+    for (const sheet of [leadIdle, teammateIdle, reviewerIdle, coordinatorIdle]) {
       const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
       expect(distinct.size).toBe(sheet.frames.length)
     }
   })
 
-  it('walk frames differ from each other (leg alternation, bob, tail sway)', () => {
-    for (const sheet of [leadWalk, teammateWalk]) {
+  it('walk frames differ from each other (leg alternation, bob, sway)', () => {
+    for (const sheet of [leadWalk, teammateWalk, reviewerWalk, coordinatorWalk]) {
       const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
       expect(distinct.size).toBe(sheet.frames.length)
     }
   })
 
-  it('walk sheets keep the idle head (goggles/muzzle identical to idle frame 0)', () => {
-    // Head block occupies the top 24 rows on the teammate; walk frames 0/2 are
-    // unbobbed, so those rows match idle frame 0 exactly.
+  it('work frames differ from each other (tool motion)', () => {
+    for (const sheet of [leadWork, teammateWork, reviewerWork, coordinatorWork]) {
+      const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
+      expect(distinct.size).toBe(sheet.frames.length)
+    }
+  })
+
+  it('teammate state sheets are pairwise distinct across all four frames', () => {
+    for (const sheet of [teammateBlocked, teammateError, teammateDone]) {
+      const distinct = new Set(sheet.frames.map(frame => frame.join('\n')))
+      expect(distinct.size).toBe(sheet.frames.length)
+    }
+  })
+
+  it('walk sheets keep the idle head (identical to idle frame 0)', () => {
+    // Head block occupies the top 24 rows on the 48px archetypes; walk frames
+    // 0/2 are unbobbed, so those rows match idle frame 0 exactly.
     expect(teammateWalk.frames[0]?.slice(0, 24)).toEqual(teammateIdle.frames[0]?.slice(0, 24))
     expect(teammateWalk.frames[2]?.slice(0, 24)).toEqual(teammateIdle.frames[0]?.slice(0, 24))
+    expect(reviewerWalk.frames[0]?.slice(0, 24)).toEqual(reviewerIdle.frames[0]?.slice(0, 24))
+    expect(reviewerWalk.frames[2]?.slice(0, 24)).toEqual(reviewerIdle.frames[0]?.slice(0, 24))
+    expect(coordinatorWalk.frames[0]?.slice(0, 24)).toEqual(coordinatorIdle.frames[0]?.slice(0, 24))
+    expect(coordinatorWalk.frames[2]?.slice(0, 24)).toEqual(coordinatorIdle.frames[0]?.slice(0, 24))
     expect(leadWalk.frames[0]?.slice(0, 37)).toEqual(leadIdle.frames[0]?.slice(0, 37))
+  })
+
+  it('teammate state sheets derive from idle frame 0 (head/body preserved)', () => {
+    // Blocked adds only the watch (rows 37+) and toe taps (rows 44+): the body
+    // above the belt is byte-identical to teammateIdle frame 0.
+    for (const frame of teammateBlocked.frames) {
+      expect(frame.slice(0, 37)).toEqual(teammateIdle.frames[0]?.slice(0, 37))
+    }
+    // Error/done raise the arms (rows 19+; error frame 3 flicks a paw pixel at
+    // row 18) and add the alarm/confetti (rows 0-3); the face band in between
+    // stays identical to teammateIdle frame 0.
+    for (const frame of teammateError.frames) {
+      expect(frame.slice(4, 18)).toEqual(teammateIdle.frames[0]?.slice(4, 18))
+    }
+    // Done frames 1/3 jump 1px (body rows shift up), so the band compares
+    // offset by one row there.
+    for (const [index, frame] of teammateDone.frames.entries()) {
+      if (index % 2 === 0) {
+        expect(frame.slice(4, 19)).toEqual(teammateIdle.frames[0]?.slice(4, 19))
+      } else {
+        expect(frame.slice(4, 18)).toEqual(teammateIdle.frames[0]?.slice(5, 19))
+      }
+    }
+  })
+
+  it('teammateDone carries at least 5 confetti pixels per frame (h/b/r above the head)', () => {
+    for (const frame of teammateDone.frames) {
+      const confetti = frame.slice(0, 4).join('').split('').filter(char => 'hbr'.includes(char))
+      expect(confetti.length).toBeGreaterThanOrEqual(5)
+    }
+  })
+
+  it('teammateError flashes the oxide alarm on frames 0/2 only', () => {
+    const alarmCount = (frame: readonly string[]): number =>
+      frame.slice(0, 4).join('').split('').filter(char => char === 'r').length
+    expect(alarmCount(teammateError.frames[0] as string[])).toBeGreaterThan(0)
+    expect(alarmCount(teammateError.frames[1] as string[])).toBe(0)
+    expect(alarmCount(teammateError.frames[2] as string[])).toBeGreaterThan(0)
+    expect(alarmCount(teammateError.frames[3] as string[])).toBe(0)
   })
 })
 
