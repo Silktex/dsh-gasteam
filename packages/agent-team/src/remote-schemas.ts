@@ -63,7 +63,7 @@ export const operatorEscalationSchema = wireSchema<OperatorEscalation>(z.object(
   work: z.object({ projectId: z.string().readonly(), teamId: z.string().readonly(), taskId: z.string().readonly(), state: z.union([z.literal('active'), z.literal('dependency-wait'), z.literal('operator-wait'), z.literal('failed'), z.literal('unavailable')]).readonly() }).strict().readonly(),
   revision: z.number().int().positive().readonly(), cooldownUntil: z.number().readonly(),
   acknowledgement: z.object({ actor: z.string().readonly(), at: z.number().readonly() }).strict().readonly().optional(),
-  resolution: z.object({ reason: z.union([z.literal('condition-cleared'), z.literal('accepted-terminal')]).readonly(), source: z.union([z.literal('health-observation'), z.literal('accepted-report'), z.literal('accepted-submission'), z.literal('accepted-integration')]).readonly(), at: z.number().readonly() }).strict().readonly().optional(),
+  resolution: z.object({ reason: z.union([z.literal('condition-cleared'), z.literal('accepted-terminal'), z.literal('handoff-replaced')]).readonly(), source: z.union([z.literal('health-observation'), z.literal('accepted-report'), z.literal('accepted-submission'), z.literal('accepted-integration'), z.literal('operator-handoff')]).readonly(), at: z.number().readonly(), replacementAttemptId: z.string().readonly().optional() }).strict().readonly().optional(),
 }).strict().readonly())
 export const operatorEscalationsSchema = wireSchema<OperatorEscalation[]>(z.array(operatorEscalationSchema))
 

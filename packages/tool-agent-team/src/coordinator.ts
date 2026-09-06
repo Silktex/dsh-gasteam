@@ -39,7 +39,7 @@ const escalationSchema = { type: 'object', additionalProperties: false, properti
   id: { type: 'string', required: true }, attemptId: { type: 'string', required: true }, generation: { type: 'integer', required: true }, condition: { type: 'string', required: true, enum: ['stale', 'failed'] }, severity: { type: 'string', required: true, enum: ['warning', 'critical'] }, source: { type: 'string', required: true, enum: ['health'] }, diagnostics: { type: 'string', required: true }, revision: { type: 'integer', required: true }, cooldownUntil: { type: 'number', required: true },
   work: { type: 'object', additionalProperties: false, required: true, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true }, state: { type: 'string', required: true, enum: ['active', 'dependency-wait', 'operator-wait', 'failed', 'unavailable'] } } },
   acknowledgement: { type: 'object', additionalProperties: false, properties: { actor: { type: 'string', required: true }, at: { type: 'number', required: true } } },
-  resolution: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true, enum: ['condition-cleared', 'accepted-terminal'] }, source: { type: 'string', required: true, enum: ['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration'] }, at: { type: 'number', required: true } } },
+  resolution: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true, enum: ['condition-cleared', 'accepted-terminal', 'handoff-replaced'] }, source: { type: 'string', required: true, enum: ['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration', 'operator-handoff'] }, at: { type: 'number', required: true }, replacementAttemptId: { type: 'string' } } },
 } } as const
 const healthInboxOutput = { schema: { type: 'array', items: escalationSchema } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const healthOutput = { schema: escalationSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
@@ -79,7 +79,8 @@ function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.
   ...(retryNotBefore === undefined ? {} : { retryNotBefore }),
 })) } }
 function escalation(item: OperatorEscalation) { const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
-  ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution }) } }
+  ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution: { reason: resolution.reason, source: resolution.source, at: resolution.at,
+    ...(resolution.replacementAttemptId === undefined ? {} : { replacementAttemptId: resolution.replacementAttemptId }) } }) } }
 function escalations(value: readonly OperatorEscalation[]) { return value.map(escalation) }
 export function apply(ctx: Context): void {
   const installed = new Map<Agent, (() => unknown)[]>()

@@ -24,6 +24,7 @@ import TeamService from '../src/index.ts'
 import { ProjectCatalog } from '../src/projects.ts'
 import { WorkspaceCoordinator } from '../src/coordinator.ts'
 import { CoordinatorExecution } from '../src/coordinator-execution.ts'
+import { AssignmentStore, type AttemptRecord, type AttemptToken } from '../src/assignments.ts'
 import { HealthStore } from '../src/health.ts'
 import { HealthRecoveryStore } from '../src/health-recovery.ts'
 import * as CoordinatorPlugin from '../src/coordinator.ts'
@@ -436,6 +437,95 @@ it('restores a Lead-scoped health inbox and acknowledges it with a durable revis
   const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
   cleanup.push(() => restored.close())
   expect(restored.healthInbox(lead, 'project')[0]).toMatchObject({ id: escalation.id, acknowledgement: { actor: lead.id } })
+})
+
+it('keeps an acknowledged stale incident visible until a handoff replacement is actually active', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  await coordinator.register(lead, request)
+  const task = await coordinator.acceptTask(lead, 'project', { subject: 'Fenced replacement', description: 'Do not resolve until the successor starts' })
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const healthConfig = { dshDeadlineMs: 1, externalDeadlineMs: 1, escalationCooldownMs: 10, maxEscalationsPerCondition: 2, recovery: { maxNudges: 1 } }
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
+  cleanup.push(() => running.close())
+  const internals = running as unknown as { execution: { assignments: AssignmentStore; health: HealthStore; runtime: {
+    handoff(lead: typeof lead, token: AttemptToken): Promise<AttemptRecord>
+    start(lead: typeof lead, token: AttemptToken): Promise<AttemptRecord>
+  } } }
+  const initial = internals.execution.assignments.list()[0]!
+  const observedAt = Date.now() + 1_000
+  await internals.execution.health.assess({ attemptId: initial.attemptId, generation: initial.generation, provider: 'dsh',
+    work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, observedAt)
+  const observed = (await internals.execution.health.assess({ attemptId: initial.attemptId, generation: initial.generation, provider: 'dsh',
+    work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, observedAt + 1)).escalation
+  const escalation = observed ?? internals.execution.health.listEscalations().find(item => item.attemptId === initial.attemptId)!
+  await running.acknowledgeHealth(lead, 'project', escalation.id, escalation.revision)
+  const current = await internals.execution.assignments.recoverHealth({ attemptId: initial.attemptId, generation: initial.generation, expectedRevision: initial.revision }, 0, 0, 'health-nudge-fenced')
+  const reserved = { ...current, attemptId: 'reserved-replacement', assignmentId: 'reserved-assignment', generation: current.generation + 1, revision: 1, phase: 'reserved' as const }
+  const failed = { ...reserved, phase: 'terminal' as const, stopReason: 'provisioning failed', stopEvidence: { runtimeId: reserved.runtimeId, kind: 'stopped' as const, receipt: 'failed-start' } }
+  const active = { ...reserved, phase: 'active' as const }
+  const handoff = vi.spyOn(internals.execution.runtime, 'handoff').mockResolvedValue(reserved)
+  const start = vi.spyOn(internals.execution.runtime, 'start').mockResolvedValue(reserved)
+  const resolved = vi.spyOn(internals.execution.health, 'clearHandoffAttempt')
+  const control = { action: 'handoff' as const, projectId: 'project', taskId: task.id, expectedRevision: 1,
+    attemptId: current.attemptId, generation: current.generation, expectedAttemptRevision: current.revision }
+  await running.controlScheduling(lead, control)
+  expect(resolved).not.toHaveBeenCalled()
+  expect(running.healthInbox(lead, 'project').find(item => item.id === escalation.id)?.resolution).toBeUndefined()
+  handoff.mockResolvedValue(failed); start.mockResolvedValue(failed)
+  await running.controlScheduling(lead, control)
+  expect(resolved).not.toHaveBeenCalled()
+  handoff.mockResolvedValue(active); start.mockResolvedValue(active)
+  await running.controlScheduling(lead, control)
+  expect(resolved).toHaveBeenCalledWith(current.attemptId, current.generation, active.attemptId, expect.any(Number))
+  expect(running.healthInbox(lead, 'project').find(item => item.id === escalation.id)?.resolution).toMatchObject({ reason: 'handoff-replaced', replacementAttemptId: active.attemptId })
+})
+
+it('reconciles a real handoff across restart without failing its retired predecessor and independently escalates the replacement', async () => {
+  const { ctx, lead, coordinator, request, config } = await fixture()
+  let now = 0
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    await coordinator.register(lead, request)
+    const task = await coordinator.acceptTask(lead, 'project', { subject: 'Real handoff', description: 'Retain the old worktree and health history' })
+    await coordinator.close()
+    ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang', 'hang']))
+    const healthConfig = { dshDeadlineMs: 1, externalDeadlineMs: 1, escalationCooldownMs: 10, maxEscalationsPerCondition: 2, recovery: { maxNudges: 1 } }
+    const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
+    cleanup.push(() => running.close())
+    const internals = running as unknown as { execution: { assignments: AssignmentStore; health: HealthStore } }
+    const initial = internals.execution.assignments.list()[0]!
+    await internals.execution.health.assess({ attemptId: initial.attemptId, generation: initial.generation, provider: 'dsh',
+      work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, now)
+    now = 1
+    const stale = (await internals.execution.health.assess({ attemptId: initial.attemptId, generation: initial.generation, provider: 'dsh',
+      work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, now)).escalation
+      ?? internals.execution.health.listEscalations().find(item => item.attemptId === initial.attemptId)!
+    await running.acknowledgeHealth(lead, 'project', stale.id, stale.revision)
+    const current = await internals.execution.assignments.recoverHealth({ attemptId: initial.attemptId, generation: initial.generation, expectedRevision: initial.revision }, 0, now, 'health-nudge-real-handoff')
+    await running.controlScheduling(lead, { action: 'handoff', projectId: 'project', taskId: task.id, expectedRevision: 1,
+      attemptId: current.attemptId, generation: current.generation, expectedAttemptRevision: current.revision })
+    const replacement = internals.execution.assignments.list().find(item => item.handoff?.previousAttemptId === initial.attemptId)!
+    expect(replacement).toMatchObject({ phase: 'active', handoff: { previousAttemptId: initial.attemptId } })
+    expect(running.healthInbox(lead, 'project').find(item => item.id === stale.id)).toMatchObject({ acknowledgement: { actor: lead.id },
+      resolution: { reason: 'handoff-replaced', replacementAttemptId: replacement.attemptId } })
+    await running.reconcile()
+    expect(running.healthInbox(lead, 'project').filter(item => item.attemptId === initial.attemptId)).toEqual([
+      expect.objectContaining({ id: stale.id, resolution: expect.objectContaining({ reason: 'handoff-replaced' }) }),
+    ])
+    await internals.execution.health.assess({ attemptId: replacement.attemptId, generation: replacement.generation, provider: 'dsh',
+      work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, now)
+    now = 2
+    const replacementEscalation = await internals.execution.health.assess({ attemptId: replacement.attemptId, generation: replacement.generation, provider: 'dsh',
+      work: { projectId: 'project', teamId: lead.id, taskId: task.id, state: 'active' }, runtime: { availability: 'available', execution: 'known-active-operation' } }, now)
+    expect(replacementEscalation.escalation).toMatchObject({ attemptId: replacement.attemptId, generation: replacement.generation })
+    await running.close()
+    const restored = await WorkspaceCoordinator.open(ctx, { ...config, execution: { ...execution, health: healthConfig } })
+    cleanup.push(() => restored.close())
+    expect(restored.healthInbox(lead, 'project').filter(item => item.attemptId === initial.attemptId)).toEqual([
+      expect.objectContaining({ id: stale.id, resolution: expect.objectContaining({ reason: 'handoff-replaced' }) }),
+    ])
+  } finally { clock.mockRestore() }
 })
 
 it('nudges one exact stale live tool only after its durable provider deadline', async () => {

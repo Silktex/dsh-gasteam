@@ -125,6 +125,22 @@ it('acknowledges with a revision fence and only re-escalates after the condition
   expect(store.listEscalations()).toHaveLength(2)
 })
 
+it('records a fenced handoff as resolution of only the retired stale generation and re-escalates the replacement independently', async () => {
+  const { directory, store } = await fixture()
+  await store.assess(active(), 0)
+  const stale = (await store.assess(active(), 1_000)).escalation!
+  await store.acknowledge(stale.id, stale.revision, 'operator', 1_001)
+  await store.clearHandoffAttempt('attempt-1', 1, 'attempt-2', 1_002)
+  expect(store.listEscalations()[0]).toMatchObject({ acknowledgement: { actor: 'operator' }, resolution: {
+    reason: 'handoff-replaced', source: 'operator-handoff', replacementAttemptId: 'attempt-2', at: 1_002,
+  } })
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const restored = await HealthStore.open(directory, config); stores.push(restored)
+  expect(restored.listEscalations()[0]?.resolution).toMatchObject({ reason: 'handoff-replaced', replacementAttemptId: 'attempt-2' })
+  await restored.assess(active({ attemptId: 'attempt-2', generation: 2 }), 2_000)
+  expect((await restored.assess(active({ attemptId: 'attempt-2', generation: 2 }), 3_000)).escalation).toMatchObject({ attemptId: 'attempt-2', generation: 2 })
+})
+
 it('does not append unchanged uncertain patrols and clears only from an accepted terminal receipt', async () => {
   const { directory, store } = await fixture()
   await store.assess(active({ runtime: { availability: 'available', execution: 'unknown' } }), 0)

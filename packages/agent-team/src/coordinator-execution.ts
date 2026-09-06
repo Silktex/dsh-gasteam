@@ -68,6 +68,8 @@ const blockedEvent = z.object({ version: z.literal(1), sequence: z.number().int(
 const token = (record: AttemptRecord) => ({ attemptId: record.attemptId, generation: record.generation, expectedRevision: record.revision })
 const sameWork = (left: { projectId: string; teamId: string; taskId: string }, right: { projectId: string; teamId: string; taskId: string }) =>
   left.projectId === right.projectId && left.teamId === right.teamId && left.taskId === right.taskId
+const safeHandoffReplacement = (attempt: AttemptRecord): boolean => attempt.phase === 'active'
+  || (attempt.phase === 'terminal' && attempt.stopEvidence?.kind === 'stopped' && attempt.stopReason === undefined && attempt.result !== undefined)
 
 export type DispatchBlockCode = 'execution-disabled' | 'shutdown' | 'project-unavailable' | 'paused' | 'team-unavailable'
   | 'task-unavailable' | 'task-not-pending' | 'task-owned' | 'dependencies' | 'global-capacity' | 'project-capacity'
@@ -597,12 +599,18 @@ export class CoordinatorExecution {
     if (!this.health) return
     const now = Date.now()
     for (const existing of this.health.listHealth()) {
+      const replacement = this.assignments.list().find(attempt => attempt.handoff?.previousAttemptId === existing.attemptId)
+      if (replacement && safeHandoffReplacement(replacement)) await this.health.clearHandoffAttempt(existing.attemptId, existing.generation, replacement.attemptId, now)
       const report = this.reports.list().find(item => item.attemptId === existing.attemptId && item.generation === existing.generation && item.projectId === existing.work.projectId && item.teamId === existing.work.teamId && item.taskId === existing.work.taskId && item.phase === 'accepted')
       const submission = this.submissions.list().find(item => item.attemptId === existing.attemptId && item.generation === existing.generation && item.projectId === existing.work.projectId && item.teamId === existing.work.teamId && item.taskId === existing.work.taskId && item.phase === 'accepted')
       if (report) await this.health.clearAcceptedAttempt(existing.attemptId, existing.generation, 'accepted-report', report.id, now)
       else if (submission) await this.health.clearAcceptedAttempt(existing.attemptId, existing.generation, 'accepted-submission', submission.id, now)
     }
     for (const attempt of this.assignments.list()) {
+      // A checkpointed handoff has deliberately stopped this predecessor.
+      // Keep its stale inbox item open until the successor is proven safe;
+      // never reinterpret the intentional stop as a fresh worker failure.
+      if (attempt.handoffIntent !== undefined) continue
       const project = views.find(view => view.project.id === attempt.projectId)
       const team = project?.teams.find(team => team.teamId === attempt.teamId)
       const task = team?.tasks.find(task => task.id === attempt.taskId)
@@ -965,7 +973,8 @@ export class CoordinatorExecution {
     if (allowedNudges === undefined || (current.healthRecovery?.count ?? 0) < allowedNudges) throw new Error('Handoff requires exhausted authorized health nudges')
     if ((this.assignments.list().filter(record => sameWork(record, work) && record.handoff !== undefined).length) >= (current.handoffLimit ?? 1)) throw new Error('Handoff budget is exhausted')
     const replacement = await this.runtime.handoff(lead, token(current))
-    await this.startAttempt(lead, replacement)
+    const started = await this.startAttempt(lead, replacement)
+    if (safeHandoffReplacement(started)) await this.health?.clearHandoffAttempt(current.attemptId, current.generation, started.attemptId, Date.now())
   }
 
   async reprioritize(work: DispatchWork, expectedRevision: number, priority: number): Promise<void> {

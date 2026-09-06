@@ -34,7 +34,8 @@ const escalationSchema = z.object({
   severity: z.enum(['warning', 'critical']), source: z.literal('health'), diagnostics: z.string().min(1).max(16_384), work: workSchema,
   revision: positive, cooldownUntil: time,
   acknowledgement: z.object({ actor: z.string().trim().min(1).max(512), at: time }).strict().optional(),
-  resolution: z.object({ reason: z.enum(['condition-cleared', 'accepted-terminal']), source: z.enum(['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration']), at: time }).strict().optional(),
+  resolution: z.object({ reason: z.enum(['condition-cleared', 'accepted-terminal', 'handoff-replaced']), source: z.enum(['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration', 'operator-handoff']), at: time,
+    replacementAttemptId: id.optional() }).strict().optional(),
 }).strict()
 export const healthConfigSchema = z.object({
   dshDeadlineMs: positive, externalDeadlineMs: positive, escalationCooldownMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -56,6 +57,7 @@ type Payload =
   | { type: 'health/escalated'; attemptId: string; generation: number; condition: 'stale' | 'failed'; observedAt: number; cooldownUntil: number }
   | { type: 'health/escalation-acknowledged'; id: string; expectedRevision: number; actor: string; acknowledgedAt: number }
   | { type: 'health/escalation-resolved'; id: string; resolvedAt: number }
+  | { type: 'health/escalation-handoff-resolved'; id: string; replacementAttemptId: string; resolvedAt: number }
   | { type: 'health/attempt-cleared'; attemptId: string; generation: number; source: 'accepted-report' | 'accepted-submission' | 'accepted-integration'; receiptId: string; clearedAt: number }
 type Event = Payload & { version: 1; sequence: number }
 const eventSchema = z.discriminatedUnion('type', [
@@ -63,6 +65,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ version: z.literal(1), sequence: positive, type: z.literal('health/escalated'), attemptId: id, generation: positive, condition: z.enum(['stale', 'failed']), observedAt: time, cooldownUntil: time }).strict(),
   z.object({ version: z.literal(1), sequence: positive, type: z.literal('health/escalation-acknowledged'), id, expectedRevision: positive, actor: z.string().trim().min(1).max(512), acknowledgedAt: time }).strict(),
   z.object({ version: z.literal(1), sequence: positive, type: z.literal('health/escalation-resolved'), id, resolvedAt: time }).strict(),
+  z.object({ version: z.literal(1), sequence: positive, type: z.literal('health/escalation-handoff-resolved'), id, replacementAttemptId: id, resolvedAt: time }).strict(),
   z.object({ version: z.literal(1), sequence: positive, type: z.literal('health/attempt-cleared'), attemptId: id, generation: positive, source: z.enum(['accepted-report', 'accepted-submission', 'accepted-integration']), receiptId: id, clearedAt: time }).strict(),
 ])
 
@@ -146,6 +149,12 @@ function reduce(state: State, raw: unknown): State {
     const next = { ...current, acknowledgement: { actor: event.actor, at: event.acknowledgedAt }, revision: current.revision + 1 }
     return { ...state, escalations: state.escalations.map((record, position) => position === index ? next : record) }
   }
+  if (event.type === 'health/escalation-handoff-resolved') {
+    if (current.resolution || current.condition !== 'stale' || event.replacementAttemptId === current.attemptId) throw new Error('Handoff cannot resolve this escalation')
+    const next = { ...current, resolution: { reason: 'handoff-replaced' as const, source: 'operator-handoff' as const,
+      replacementAttemptId: event.replacementAttemptId, at: event.resolvedAt }, revision: current.revision + 1 }
+    return { ...state, escalations: state.escalations.map((record, position) => position === index ? next : record) }
+  }
   if (current.resolution) throw new Error('Escalation is already resolved')
   const health = state.health.find(record => key(record) === key(current))
   if (!health || health.classification === current.condition || !positiveRecovery(health)) throw new Error('Escalation condition is not positively cleared')
@@ -224,6 +233,14 @@ export class HealthStore {
     const health = this.journal.snapshot().health.find(record => key(record) === `${attemptId}:${generation}`)
     if (!health || health.terminalClearance) return
     await this.journal.append(() => ({ type: 'health/attempt-cleared', attemptId, generation, source, receiptId, clearedAt }))
+  }
+
+  /** A fenced replacement resolves only the retired stale generation's inbox item. */
+  async clearHandoffAttempt(attemptId: string, generation: number, replacementAttemptId: string, clearedAt: number): Promise<void> {
+    const active = this.journal.snapshot().escalations.filter(record => record.attemptId === attemptId && record.generation === generation
+      && record.condition === 'stale' && record.resolution === undefined)
+    for (const escalation of active) await this.journal.append(() => ({ type: 'health/escalation-handoff-resolved', id: escalation.id,
+      replacementAttemptId: id.parse(replacementAttemptId), resolvedAt: time.parse(clearedAt) }))
   }
 
   listHealth(): AttemptHealth[] { return this.journal.snapshot().health }
