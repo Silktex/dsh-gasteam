@@ -108,7 +108,6 @@ export const teammateIdle: SpriteSheet =
       ".........XmmmmtttttPPPPPPPPPPtttttmmmmX.........",
       ".........XmmmmtttttPPPPPPPPPPtttttmmmmX.........",
       ".........XmmmmtttttPPPPPPPPPPtttttmmmmX.........",
-      ".........XmmmmtttttPPPPPPPPPPtttttmmmmX.........",
       ".........XppppsttstPPPPPPPPPPtttttppppX.........",
       ".........XpppptssttPPPPPPPPPPtttttppppX.........",
       ".........XpppptssttPPPPPPPPPPtttttppppX.........",
