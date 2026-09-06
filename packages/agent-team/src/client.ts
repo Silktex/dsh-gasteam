@@ -25,4 +25,4 @@ export type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runt
 export type { AttemptHealth, OperatorEscalation, HealthInboxRequest, AcknowledgeHealthRequest } from './health.ts'
 export type { WorkspaceBatchView, WorkspaceBatchNotification } from './coordinator-batches.ts'
 export type { WorkspaceBatchQuery, WorkspaceBatchSubscriptionRequest, WorkspaceBatchInboxRequest, WorkspaceBatchAcknowledgementRequest } from './workspace-batch-remote.ts'
-export type { WorkspaceDashboardInput, WorkspaceDashboardLimits, WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'
+export type { WorkspaceDashboardCollection, WorkspaceDashboardInput, WorkspaceDashboardLimits, WorkspaceDashboardPage, WorkspaceDashboardPageRequest, WorkspaceDashboardRequest, WorkspaceDashboardView } from './workspace-dashboard.ts'

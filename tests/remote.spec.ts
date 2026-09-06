@@ -17,7 +17,7 @@ import {
 } from '../packages/agent-team/src/remote-schemas.ts'
 import { workspaceBatchPlanRequestSchema, workspaceBatchQuerySchema, workspaceBatchSubscriptionRequestSchema, workspaceBatchInboxRequestSchema, workspaceBatchAcknowledgementRequestSchema, workspaceBatchViewSchema, workspaceBatchNotificationsSchema } from '../packages/agent-team/src/workspace-batch-remote.ts'
 import { schedulingQuerySchema, schedulingControlSchema, schedulingViewSchema } from '../packages/agent-team/src/scheduling-schemas.ts'
-import { workspaceDashboardRequestSchema } from '../packages/agent-team/src/workspace-dashboard.ts'
+import { workspaceDashboardPageRequestSchema, workspaceDashboardRequestSchema } from '../packages/agent-team/src/workspace-dashboard.ts'
 import { TYPERT } from '../packages/agent-team/src/typert.ts'
 import { TYPERT_REMOTE } from '../packages/agent-team/src/remote.ts'
 
@@ -41,6 +41,7 @@ describe('Team RPC codecs', () => {
         ['workspaceBatchInbox', 'remoteWorkspaceBatchInbox', ['agentId', 'request']],
         ['acknowledgeWorkspaceBatchNotification', 'remoteAcknowledgeWorkspaceBatchNotification', ['agentId', 'request']],
         ['workspaceDashboard', 'remoteWorkspaceDashboard', ['agentId', 'request']],
+        ['workspaceDashboardPage', 'remoteWorkspaceDashboardPage', ['agentId', 'request']],
         ['healthInbox', 'remoteHealthInbox', ['agentId', 'request']],
         ['acknowledgeHealth', 'remoteAcknowledgeHealth', ['agentId', 'request']],
         ['view', 'remoteView', ['agentId']],
@@ -75,6 +76,9 @@ describe('Team RPC codecs', () => {
   it('validates the strict read-only workspace dashboard request', () => {
     expect(workspaceDashboardRequestSchema.parse({})).toEqual({})
     expect(() => workspaceDashboardRequestSchema.parse({ projectId: 'project' })).toThrow()
+    expect(workspaceDashboardPageRequestSchema.parse({ collection: 'projects', pageSize: 1 })).toEqual({ collection: 'projects', pageSize: 1 })
+    expect(() => workspaceDashboardPageRequestSchema.parse({ collection: 'projects', pageSize: 257 })).toThrow()
+    expect(() => workspaceDashboardPageRequestSchema.parse({ collection: 'projects', snapshotRevision: 'browser-controlled' })).toThrow()
   })
 
   it('validates revision-fenced health inbox controls', () => {

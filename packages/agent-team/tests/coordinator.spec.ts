@@ -1,3 +1,4 @@
+import type { WorkspacePageSnapshotStore } from '../src/workspace-pagination.ts'
 import { afterEach, expect, it, vi } from 'vitest'
 import { rm, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -7,7 +8,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import * as CoordinatorTools from '../../tool-agent-team/src/coordinator.ts'
 import { schedulingViewSchema, schedulingControlSchema } from '../src/scheduling-schemas.ts'
-import { workspaceDashboardViewSchema } from '../src/workspace-dashboard.ts'
+import { workspaceDashboardPageSchema, workspaceDashboardViewSchema } from '../src/workspace-dashboard.ts'
 import { createTaskSchema, remoteAcceptReportRequestSchema, reviewableReportSchema, reviewableReportsSchema, updateTaskSchema } from '../src/remote-schemas.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -207,6 +208,39 @@ it('restores a two-project batch between controlled-worker report and acceptance
   expect(restored.inspectWorkspaceBatch(restoredLead, 'two-repositories')).toMatchObject({ required: 2, completedRequired: 2, phase: 'completed', completionEpoch: 1 })
   expect(restoredCtx.agentTeams.listTasks(restoredLead).filter(task => task.subject === 'First repository')).toHaveLength(1)
   expect(restoredCtx.agentTeams.listTasks(restoredOtherLead).filter(task => task.subject === 'Second repository')).toHaveLength(1)
+})
+
+it('authorizes and pages a retained workspace snapshot through the actual dashboard Remote', async () => {
+  const { root, ctx, lead, config, coordinator, request } = await fixture()
+  const other = await gitFixture(value => cleanup.push(() => rm(value, { recursive: true, force: true })))
+  const otherLead = ctx.agentLoop.create(SessionId('paged-team-b'), { provider: 'mock', model: 'mock' }, { cwd: other.repository })
+  await coordinator.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id })
+  cleanup.push(() => running.close())
+  ctx.provide('workspaceCoordinator', running)
+  await running.register(lead, request)
+  await running.register(otherLead, { ...request, id: 'paged-project-b', repository: other.repository, teamIds: [otherLead.id] })
+  const first = workspaceDashboardPageSchema.parse(ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'projects', pageSize: 1 }))
+  expect(first.items).toHaveLength(1)
+  await running.pause(lead, 'project', 0, true)
+  const second = workspaceDashboardPageSchema.parse(ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'projects', pageSize: 1, cursor: first.nextCursor }))
+  expect(second.items.map(item => item.id)).not.toEqual(first.items.map(item => item.id))
+  expect(() => ctx.agentTeams.remoteWorkspaceDashboardPage(otherLead, { collection: 'projects' })).toThrow(/operator/i)
+})
+
+it('pages beyond the overview attempt bound through the actual Remote', async () => {
+  const { ctx, lead, config, coordinator, request } = await fixture()
+  await coordinator.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id })
+  cleanup.push(() => running.close()); ctx.provide('workspaceCoordinator', running)
+  await running.register(lead, request)
+  await running.acceptTask(lead, 'project', { subject: 'Many dashboard attempts', description: 'Provides a host projection base' })
+  const actual = running.view()
+  vi.spyOn(running, 'view').mockReturnValue({ ...actual, attempts: Array.from({ length: 513 }, (_, index) => ({ attemptId: `page-attempt-${index}`, generation: 1, revision: 1, projectId: 'project', teamId: lead.id, taskId: `page-task-${index}`, phase: 'active' })) as typeof actual.attempts })
+  const first = ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'attempts', pageSize: 256 })
+  const second = ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'attempts', pageSize: 256, cursor: first.nextCursor! })
+  const last = ctx.agentTeams.remoteWorkspaceDashboardPage(lead, { collection: 'attempts', pageSize: 256, cursor: second.nextCursor! })
+  expect(last.items.map(item => item.attemptId)).toEqual(['page-attempt-512'])
 })
 
 it('admits a workspace batch code item only through verified integration and retains it across restart', async () => {
@@ -1279,4 +1313,24 @@ it('replays the exact Team report receipt after its durable acknowledgement cras
   const restoredLead = restoredCtx.agents.get(SessionId(lead.id))!
   expect(restored.view().reports).toMatchObject([{ phase: 'accepted', attemptId: attempt.attemptId }])
   expect(restoredCtx.agentTeams.getTask(restoredLead, task.id)).toMatchObject({ status: 'completed', revision: 2 })
+})
+
+
+it('keeps snapshot cleanup inside the retained aggregate shutdown deadline', async () => {
+  const { ctx, config, coordinator } = await fixture()
+  await coordinator.close()
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, shutdownDeadlineMs: 20 })
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const pages = (running as unknown as { workspacePages: WorkspacePageSnapshotStore }).workspacePages
+  const closePages = vi.spyOn(pages, 'close').mockImplementation(() => blocked)
+  try {
+    await expect(running.close()).rejects.toThrow(/shutdown timed out/)
+    await expect(WorkspaceCoordinator.open(ctx, config)).rejects.toThrow(/already owned/)
+    release()
+    await running.close()
+    expect(closePages).toHaveBeenCalledTimes(1)
+    const reopened = await WorkspaceCoordinator.open(ctx, config)
+    await reopened.close()
+  } finally { release(); closePages.mockRestore(); await running.close() }
 })

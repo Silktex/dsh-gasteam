@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
+import type { WorkspaceDashboardPage, WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { WorkspaceDashboard } from '../src/client/WorkspaceDashboard.tsx'
 import { en, zh } from '../src/client/locales.ts'
@@ -104,5 +104,37 @@ describe('WorkspaceDashboard', () => {
     expect(screen.queryByText('wrong-b')).toBeNull()
     freshA.resolve({ ok: true, value: view })
     expect(await screen.findByText('attempt-api')).toBeTruthy()
+  })
+
+  it('navigates retained pages and offers an explicit stale restart', async () => {
+    const first: WorkspaceDashboardPage = { collection: 'projects', snapshotRevision: 'a'.repeat(64), items: [{ id: 'one', revision: 1, paused: false, capacity: 1, active: 0 }], nextCursor: 'next', truncated: true }
+    const second: WorkspaceDashboardPage = { ...first, items: [{ id: 'two', revision: 2, paused: false, capacity: 1, active: 0 }], nextCursor: undefined }
+    const loadPage = vi.fn().mockResolvedValueOnce({ ok: true, value: first }).mockResolvedValueOnce({ ok: true, value: second }).mockResolvedValueOnce({ ok: true, value: first }).mockResolvedValueOnce({ ok: false, error: { code: 'WORKSPACE_PAGE_STALE', message: 'restart' } }).mockResolvedValueOnce({ ok: true, value: first })
+    render(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok(view)} loadPage={loadPage} t={english} />)
+    expect(await screen.findByText('one')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['dashboard.pageNext'] }))
+    expect(await screen.findByText('two')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['dashboard.pagePrevious'] }))
+    expect(await screen.findByText('one')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['dashboard.pageNext'] }))
+    expect(await screen.findByText(/restart \(WORKSPACE_PAGE_STALE\)/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['dashboard.pageRestart'] }))
+    expect(await screen.findByText('one')).toBeTruthy()
+  })
+
+  it('ignores a late paged B result after A-to-B-to-A and keeps native pager controls focusable', async () => {
+    const pendingA = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardPage }>()
+    const pendingB = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardPage }>()
+    const freshA = Promise.withResolvers<{ ok: true; value: WorkspaceDashboardPage }>()
+    const page = (id: string): WorkspaceDashboardPage => ({ collection: 'projects', snapshotRevision: 'a'.repeat(64), items: [{ id, revision: 1, paused: false, capacity: 1, active: 0 }], nextCursor: 'next', truncated: false })
+    const loadPage = vi.fn().mockImplementationOnce(() => pendingA.promise).mockImplementationOnce(() => pendingB.promise).mockImplementationOnce(() => freshA.promise)
+    const rendered = render(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok(view)} loadPage={loadPage} t={english} />)
+    pendingA.resolve({ ok: true, value: page('first-a') }); expect(await screen.findByText('first-a')).toBeTruthy()
+    const next = screen.getByRole('button', { name: en['dashboard.pageNext'] }); next.focus(); expect(document.activeElement).toBe(next)
+    rendered.rerender(<WorkspaceDashboard sessionId={SESSION_B} load={() => ok(view)} loadPage={loadPage} t={english} />)
+    rendered.rerender(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok(view)} loadPage={loadPage} t={english} />)
+    pendingB.resolve({ ok: true, value: page('wrong-b') }); await Promise.resolve()
+    expect(screen.queryByText('wrong-b')).toBeNull()
+    freshA.resolve({ ok: true, value: page('fresh-a') }); expect(await screen.findByText('fresh-a')).toBeTruthy()
   })
 })

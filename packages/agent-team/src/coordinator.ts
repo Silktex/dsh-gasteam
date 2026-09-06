@@ -33,7 +33,8 @@ import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { CoordinatorBatchStore } from './coordinator-batches.ts'
 import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, WorkspaceBatchView, WorkspaceTaskRef } from './coordinator-batches.ts'
 import { projectWorkspaceDashboard } from './workspace-dashboard.ts'
-import type { WorkspaceDashboardView } from './workspace-dashboard.ts'
+import type { WorkspaceDashboardPageRequest, WorkspaceDashboardPage, WorkspaceDashboardView } from './workspace-dashboard.ts'
+import { WorkspacePageSnapshotStore } from './workspace-pagination.ts'
 
 function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
   return ctx.agentTeams.listIntegrations(lead).some(integration => integration.id === integrationId && integration.phase === 'failed')
@@ -160,6 +161,7 @@ export interface CoordinatorView {
 export class WorkspaceCoordinator {
   private pending: Promise<unknown> = Promise.resolve()
   private readonly controller = new AbortController()
+  private readonly workspacePages = new WorkspacePageSnapshotStore()
   private readonly shutdown: RetainedShutdown
   private projects: CoordinatorProjectView[] = []
   private execution: CoordinatorExecution | undefined
@@ -300,42 +302,26 @@ export class WorkspaceCoordinator {
   /** Read the bounded cross-project dashboard only as the durable workspace operator. */
   workspaceDashboard(caller: Agent): WorkspaceDashboardView {
     this.assertWorkspaceOperator(caller)
+    return projectWorkspaceDashboard(this.workspaceDashboardSource())
+  }
+
+  /** Serves a retained immutable projection; continuations never consult live coordinator state. */
+  workspaceDashboardPage(caller: Agent, request: WorkspaceDashboardPageRequest): WorkspaceDashboardPage {
+    this.assertWorkspaceOperator(caller)
+    return this.workspacePages.page(caller.id, request, () => this.workspaceDashboardSource())
+  }
+
+  private workspaceDashboardSource(): unknown {
     const current = this.view()
-    return projectWorkspaceDashboard({
-      projects: current.projects.map(project => ({
-        id: project.project.id, revision: project.controlRevision, paused: project.paused, capacity: project.project.capacity,
-        active: current.attempts.filter(attempt => attempt.projectId === project.project.id && attempt.phase !== 'terminal').length,
-      })),
-      attempts: current.attempts.map(attempt => {
-        const health = current.health.findLast(value => value.attemptId === attempt.attemptId && value.generation === attempt.generation)
-        return {
-          attemptId: attempt.attemptId, generation: attempt.generation, revision: attempt.revision, projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, phase: attempt.phase,
-          ...(health === undefined ? {} : { progress: { classification: health.classification, certainty: health.certainty, observedAt: health.observedAt } }),
-        }
-      }),
-      workflows: current.workflows.map(workflow => ({ executionId: workflow.executionId, projectId: workflow.projectId, teamId: workflow.teamId,
-        steps: workflow.steps.map(step => ({ stepId: step.stepId, revision: step.revision, phase: step.phase, ...(step.taskId === undefined ? {} : { taskId: step.taskId }) })),
-      })),
+    return {
+      projects: current.projects.map(project => ({ id: project.project.id, revision: project.controlRevision, paused: project.paused, capacity: project.project.capacity, active: current.attempts.filter(attempt => attempt.projectId === project.project.id && attempt.phase !== 'terminal').length })),
+      attempts: current.attempts.map(attempt => { const health = current.health.findLast(value => value.attemptId === attempt.attemptId && value.generation === attempt.generation); return { attemptId: attempt.attemptId, generation: attempt.generation, revision: attempt.revision, projectId: attempt.projectId, teamId: attempt.teamId, taskId: attempt.taskId, phase: attempt.phase, ...(health === undefined ? {} : { progress: { classification: health.classification, certainty: health.certainty, observedAt: health.observedAt } }) } }),
+      workflows: current.workflows.map(workflow => ({ executionId: workflow.executionId, projectId: workflow.projectId, teamId: workflow.teamId, steps: workflow.steps.map(step => ({ stepId: step.stepId, revision: step.revision, phase: step.phase, ...(step.taskId === undefined ? {} : { taskId: step.taskId }) })) })),
       batches: current.batches.map(batch => ({ id: batch.id, phase: batch.phase, required: batch.required, completedRequired: batch.completedRequired, completionEpoch: batch.completionEpoch })),
-      queue: current.dispatchStatus.map(request => ({ projectId: request.projectId, teamId: request.teamId, taskId: request.taskId, revision: request.revision, state: request.state,
-        blockers: request.blockers.map(blocker => ({ code: blocker.code })),
-      })),
-      // Integrations are the merge/verification queue; dispatch remains a
-      // separate scheduling view. Read each currently registered project Lead.
-      integrations: current.projects.flatMap(project => project.teams.flatMap(team => {
-        const lead = this.ctx.agents.get(SessionId(team.teamId))
-        if (lead === undefined) return []
-        return this.ctx.agentTeams.listIntegrations(lead).map(integration => ({
-          integrationId: integration.id, projectId: project.project.id, teamId: team.teamId, phase: integration.phase,
-          sourceCommit: integration.sourceCommit,
-          ...(integration.failureKind === undefined ? {} : { failureKind: integration.failureKind }),
-          ...(integration.error === undefined ? {} : { diagnostic: integration.error }),
-        }))
-      })),
-      escalations: current.escalations.map(escalation => ({ id: escalation.id, revision: escalation.revision, projectId: escalation.work.projectId, teamId: escalation.work.teamId, taskId: escalation.work.taskId,
-        attemptId: escalation.attemptId, generation: escalation.generation, severity: escalation.severity, condition: escalation.condition, diagnostics: escalation.diagnostics,
-      })),
-    })
+      queue: current.dispatchStatus.map(request => ({ projectId: request.projectId, teamId: request.teamId, taskId: request.taskId, revision: request.revision, state: request.state, blockers: request.blockers.map(blocker => ({ code: blocker.code })) })),
+      integrations: current.projects.flatMap(project => project.teams.flatMap(team => { const lead = this.ctx.agents.get(SessionId(team.teamId)); return lead === undefined ? [] : this.ctx.agentTeams.listIntegrations(lead).map(integration => ({ integrationId: integration.id, projectId: project.project.id, teamId: team.teamId, phase: integration.phase, sourceCommit: integration.sourceCommit, ...(integration.failureKind === undefined ? {} : { failureKind: integration.failureKind }), ...(integration.error === undefined ? {} : { diagnostic: integration.error }) })) })),
+      escalations: current.escalations.map(escalation => ({ id: escalation.id, revision: escalation.revision, projectId: escalation.work.projectId, teamId: escalation.work.teamId, taskId: escalation.work.taskId, attemptId: escalation.attemptId, generation: escalation.generation, severity: escalation.severity, condition: escalation.condition, diagnostics: escalation.diagnostics })),
+    }
   }
 
   subscribeWorkspaceBatch(caller: Agent, batchId: string, subscriptionId: string): Promise<WorkspaceBatchView> {
@@ -532,6 +518,7 @@ export class WorkspaceCoordinator {
     this.controller.abort(new Error('Coordinator is closing'))
     return this.shutdown.close(async () => {
       await this.pending
+      await this.workspacePages.close()
       await this.workflows?.close()
       await this.workflowStore?.close()
       await this.execution?.close()

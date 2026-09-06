@@ -58,6 +58,23 @@ export const workspaceDashboardViewSchema = z.object({
   escalations: z.array(escalationSchema).max(256), escalationsTruncated: z.boolean(),
 }).strict()
 export type WorkspaceDashboardView = z.output<typeof workspaceDashboardViewSchema>
+export const workspaceDashboardCollectionSchema = z.enum(['projects', 'attempts', 'workflows', 'batches', 'queue', 'integrations', 'escalations'])
+export type WorkspaceDashboardCollection = z.output<typeof workspaceDashboardCollectionSchema>
+export const workspaceDashboardPageRequestSchema = z.object({
+  collection: workspaceDashboardCollectionSchema,
+  pageSize: z.number().int().min(1).max(256).optional(),
+  cursor: z.string().min(1).max(8_192).optional(),
+}).strict()
+export type WorkspaceDashboardPageRequest = z.output<typeof workspaceDashboardPageRequestSchema>
+const pageItemSchema = z.union([
+  projectSchema, attemptSchema, workspaceDashboardWorkflowSchema,
+  batchSchema, queueSchema.extend({ blockers: z.array(queueBlockerSchema).max(64), blockersTruncated: z.boolean() }).strict(), integrationSchema, escalationSchema,
+])
+export const workspaceDashboardPageSchema = z.object({
+  collection: workspaceDashboardCollectionSchema, snapshotRevision: z.string().regex(/^[0-9a-f]{64}$/),
+  items: z.array(pageItemSchema).max(256), nextCursor: z.string().min(1).max(8_192).optional(), truncated: z.boolean(),
+}).strict()
+export type WorkspaceDashboardPage = z.output<typeof workspaceDashboardPageSchema>
 
 function bound<T>(values: readonly T[], limit: number): { readonly values: readonly T[]; readonly truncated: boolean } {
   return { values: values.slice(0, limit), truncated: values.length > limit }
@@ -67,9 +84,9 @@ function bound<T>(values: readonly T[], limit: number): { readonly values: reado
  * Convert a host-supplied minimal snapshot into a safe, bounded browser projection.
  * Uncertain health is intentionally preserved instead of inferred as activity.
  */
-export function projectWorkspaceDashboard(input: unknown, configured: WorkspaceDashboardLimits = {}): WorkspaceDashboardView {
+export function projectWorkspaceDashboard(input: unknown, configured: WorkspaceDashboardLimits = {}, wire = true): WorkspaceDashboardView {
   const source = workspaceDashboardInputSchema.parse(input)
-  const configuredLimits = limitsSchema.parse(configured)
+  const configuredLimits = wire ? limitsSchema.parse(configured) : configured
   const limits = {
     projects: configuredLimits.projects ?? defaults.projects,
     attempts: configuredLimits.attempts ?? defaults.attempts,
@@ -88,7 +105,7 @@ export function projectWorkspaceDashboard(input: unknown, configured: WorkspaceD
   const queue = bound(source.queue, limits.queue)
   const integrations = bound(source.integrations, limits.integrations)
   const escalations = bound(source.escalations, limits.escalations)
-  return workspaceDashboardViewSchema.parse({
+  const result = {
     projects: projects.values, projectsTruncated: projects.truncated,
     attempts: attempts.values, attemptsTruncated: attempts.truncated,
     workflows: workflows.values.map(workflow => {
@@ -102,5 +119,14 @@ export function projectWorkspaceDashboard(input: unknown, configured: WorkspaceD
     }), queueTruncated: queue.truncated,
     integrations: integrations.values, integrationsTruncated: integrations.truncated,
     escalations: escalations.values, escalationsTruncated: escalations.truncated,
-  })
+  }
+  return (wire ? workspaceDashboardViewSchema.parse(result) : result) as WorkspaceDashboardView
+}
+
+/** A larger but still browser-safe capture used only by the host's retained page snapshots. */
+export function projectWorkspaceDashboardSnapshot(input: unknown): WorkspaceDashboardView {
+  return projectWorkspaceDashboard(input, {
+    projects: 1_000_000, attempts: 1_000_000, workflows: 1_000_000, workflowSteps: 64,
+    batches: 1_000_000, queue: 1_000_000, queueBlockers: 64, integrations: 1_000_000, escalations: 1_000_000,
+  }, false)
 }

@@ -12,3 +12,5 @@
 .notice { background: var(--dsh-muted, #f3f4f6); }
 .error { background: #fee2e2; color: #991b1b; }
 .truncated { font-size: 12px; color: var(--dsh-muted-fg, #6b7280); }
+.pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pageRows { display: grid; gap: 6px; }

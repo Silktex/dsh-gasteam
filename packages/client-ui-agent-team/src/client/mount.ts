@@ -5,6 +5,7 @@ import type {
   TeamView,
   OperatorEscalation,
   WorkspaceDashboardView,
+  WorkspaceDashboardPage,
 } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/remote'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
@@ -71,9 +72,12 @@ function registerUi(ctx: ClientContext): void {
       return await ctx.remote.agentTeams.acknowledgeHealth(leadSessionId(sessionId), { projectId, escalationId, expectedRevision })
     },
   }
-  const dashboard: Pick<WorkspaceDashboardProps, 'load'> = {
+  const dashboard: Pick<WorkspaceDashboardProps, 'load' | 'loadPage'> = {
     async load(sessionId): Promise<TeamActionResult<WorkspaceDashboardView>> {
       return await ctx.remote.agentTeams.workspaceDashboard(leadSessionId(sessionId), {})
+    },
+    async loadPage(sessionId, request): Promise<TeamActionResult<WorkspaceDashboardPage>> {
+      return await ctx.remote.agentTeams.workspaceDashboardPage(leadSessionId(sessionId), request)
     },
   }
 
