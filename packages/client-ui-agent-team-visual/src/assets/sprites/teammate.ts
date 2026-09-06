@@ -315,7 +315,6 @@ export const teammateWork: SpriteSheet =
       ".........XmmwwwwXXXwwwwwwwwwwXXXwwwwmmX.........",
       ".........XmmwwwcXXXcwwwwwwwwcXXXcwwwmmX.........",
       ".........XmmmmmmcccmmmmmmmmmmcccmmmmmmX.........",
-      ".........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmX.........",
       ".........XmmmmmmmmmmmmmmmmmmmmmmmmmmmmXXXXXXXX..",
       ".........XmmmmmmmmpppXXXXXXpppmmmmmmmmhsssssssX.",
       ".........XmmmmmmmmpppXXXXXXpppmmmmmmmmssssssssX.",
