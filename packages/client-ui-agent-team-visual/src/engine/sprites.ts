@@ -43,7 +43,7 @@ const NAME_PATTERN = /^[a-z]+\.[a-z]+$/
 export function validateSheet(sheet: SpriteSheet): readonly string[] {
   const violations: string[] = []
   if (!NAME_PATTERN.test(sheet.name)) {
-    violations.push(`name '${sheet.name}' must match /^[a-z]+\.[a-z]+$/`)
+    violations.push(`name '${sheet.name}' must match /^[a-z]+\\.[a-z]+$/`)
   }
   if (sheet.frames.length < 2) {
     violations.push(`frames.length ${sheet.frames.length} must be >= 2`)
