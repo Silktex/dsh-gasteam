@@ -195,28 +195,33 @@ export class ExternalRuntimeSupervisor {
       // Attach error/close before any asynchronous identity or journal work. A
       // fast ENOENT/exit cannot be lost in the launch-to-identity window.
       const lifecycle = observeChild(child)
-      if (child.pid === undefined) { await lifecycle.catch(() => {}); throw new Error('External runtime did not return a process id') }
+      const spool = captureSpool(child, request, stdout, stderr)
+      if (child.pid === undefined) {
+        await lifecycle.catch(() => {})
+        await spool.drained().catch(() => {})
+        throw new Error('External runtime did not return a process id')
+      }
       inheritedLock = true
       let identity: ProcessBirthIdentity
       try { identity = await processBirthIdentity(child.pid) } catch (error) {
         await writeUncertain(request.directory, `process started but birth identity could not be read: ${error instanceof Error ? error.message : String(error)}`)
-        void retainLockThroughDrain(lifecycle, child.pid, lock)
+        void retainLockThroughDrain(lifecycle, child.pid, lock, spool)
         throw new Error('External runtime launch identity is uncertain; preserve capacity', { cause: error })
       }
       try { await writeIdentity(request.directory, { attemptId: request.attemptId, generation: request.generation, supervisor, process: identity, containment: { kind: 'pid-namespace', innerInitPid: 1 } }) } catch (error) {
         // The lock remains owned while the target remains alive. Do not return a
         // handle that could prompt a replacement; the caller must reconcile it.
         await writeUncertain(request.directory, `process started but identity receipt failed: ${error instanceof Error ? error.message : String(error)}`)
-        void retainLockThroughDrain(lifecycle, child.pid, lock)
+        void retainLockThroughDrain(lifecycle, child.pid, lock, spool)
         throw new Error('External runtime launch identity is uncertain; preserve capacity', { cause: error })
       }
       if (child.stdin === null) {
         await writeUncertain(request.directory, 'process started but stdin pipe is unavailable')
-        void retainLockThroughDrain(lifecycle, child.pid, lock)
+        void retainLockThroughDrain(lifecycle, child.pid, lock, spool)
         throw new Error('External runtime launch identity is uncertain; preserve capacity')
       }
       child.stdin.end(request.stdin)
-      return supervise(child, supervisor, identity, request, lock, stdout, stderr, lifecycle)
+      return supervise(child, supervisor, identity, request, lock, stdout, stderr, lifecycle, spool)
     } catch (error) {
       // Once the namespace wrapper inherited the descriptor, the helper must
       // preserve the fence until that wrapper has actually closed. Closing here would
@@ -227,8 +232,9 @@ export class ExternalRuntimeSupervisor {
   }
 }
 
-async function retainLockThroughDrain(lifecycle: Promise<unknown>, _pid: number, lock: Awaited<ReturnType<typeof open>>): Promise<void> {
+async function retainLockThroughDrain(lifecycle: Promise<unknown>, _pid: number, lock: Awaited<ReturnType<typeof open>>, spool?: SpoolCapture): Promise<void> {
   await lifecycle.catch(() => {})
+  await spool?.drained().catch(() => {})
   await lock.close()
 }
 
@@ -239,13 +245,19 @@ function observeChild(child: ChildProcess): Promise<{ code: number | null; signa
   })
 }
 
-function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>): SupervisedProcess {
+interface SpoolCapture {
+  drained(): Promise<void>
+  overflowed(): boolean
+  cancelOnOverflow(cancel: () => void): void
+}
+
+/** Attach bounded pipe capture synchronously after spawn, before any `/proc` or durable I/O. */
+function captureSpool(child: ChildProcess, request: ExternalSupervisorRequest, stdout: string, stderr: string): SpoolCapture {
   let pending = Promise.resolve()
   let bytes = 0
   let queuedBytes = 0
   let overflowed = false
-  let cancellation: Promise<StopProof> | undefined
-  let exit: { code: number | null; signal: string | null } | undefined
+  let cancel: (() => void) | undefined
   const append = (filename: string, chunk: Buffer) => {
     if (overflowed) return
     // Reserve synchronously before queueing I/O. This limits closures to the
@@ -261,6 +273,7 @@ function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identi
         }
       } finally { queuedBytes -= written.byteLength }
     })
+    void pending.catch(() => {})
     if (chunk.byteLength > remaining) {
       overflowed = true
       // Stop accepting stream chunks now; the kernel pipes are deliberately
@@ -271,14 +284,25 @@ function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identi
       child.stderr?.destroy()
       const marker = Buffer.from('\n[external runtime spool limit reached; cancellation requested]\n').subarray(0, 1_024)
       pending = pending.then(async () => { await appendFile(filename, marker, { mode: 0o600 }) })
-      void requestCancellation()
+      void pending.catch(() => {})
+      cancel?.()
     }
   }
   child.stdout?.on('data', (chunk: Buffer) => append(stdout, Buffer.from(chunk)))
   child.stderr?.on('data', (chunk: Buffer) => append(stderr, Buffer.from(chunk)))
+  return {
+    drained: async () => await pending,
+    overflowed: () => overflowed,
+    cancelOnOverflow: value => { cancel = value; if (overflowed) cancel() },
+  }
+}
+
+function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identity: ProcessBirthIdentity, request: ExternalSupervisorRequest, lock: Awaited<ReturnType<typeof open>>, stdout: string, stderr: string, lifecycle: Promise<{ code: number | null; signal: string | null }>, spoolCapture: SpoolCapture): SupervisedProcess {
+  let cancellation: Promise<StopProof> | undefined
+  let exit: { code: number | null; signal: string | null } | undefined
   const closed = lifecycle.then(async result => {
     exit = result
-    await pending
+    await spoolCapture.drained()
     // `close` arrives only after the wrapper's stdio closes. Namespace teardown
     // is certified separately by the read-only observer after helper exit.
     const spool = await spoolProof(stdout, stderr)
@@ -290,14 +314,15 @@ function supervise(child: ChildProcess, supervisor: ProcessBirthIdentity, identi
   }, async error => { await lock.close(); throw error })
   async function requestCancellation(): Promise<StopProof> { return cancellation ??= cancelNamespacedProcess(child, identity, lifecycle, request.terminateGraceMs, async proof => {
     if (proof.exit !== undefined) {
-      await pending
+      await spoolCapture.drained()
       proof.spool = await spoolProof(stdout, stderr)
     }
     await writeStopProof(request.directory, proof)
   }) }
+  spoolCapture.cancelOnOverflow(() => { void requestCancellation().catch(() => {}) })
   return {
     identity,
-    finished: closed.then(async result => ({ code: result.code, signal: result.signal, overflowed, ...(cancellation === undefined ? {} : { stopProof: await cancellation }) })),
+    finished: closed.then(async result => ({ code: result.code, signal: result.signal, overflowed: spoolCapture.overflowed(), ...(cancellation === undefined ? {} : { stopProof: await cancellation }) })),
     status: async () => await inspectProcessIdentity(identity),
     cancel: requestCancellation,
   }

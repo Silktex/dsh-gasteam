@@ -78,6 +78,16 @@ it('requires strict PID namespace containment before creating a target', async (
   expect(await readSupervisorIdentity(root)).toBeUndefined()
 })
 
+it('captures a fast launch failure before asynchronous identity persistence completes', async () => {
+  const root = await directory()
+  const missing = await request(root, 'unused')
+  const supervised = await new ExternalRuntimeSupervisor().launch({ ...missing, command: join(root, 'missing-executable'), args: [] })
+  const terminal = await supervised.finished
+  expect(terminal).toMatchObject({ signal: null, overflowed: false })
+  expect(terminal.code).not.toBe(0)
+  expect(await readFile(join(root, 'stderr.log'), 'utf8')).toMatch(/no such file/i)
+})
+
 it('fsyncs the parent directory after a successful hard-link claim', async () => {
   const root = await directory()
   const source = join(root, 'source')

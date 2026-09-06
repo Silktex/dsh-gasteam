@@ -1,5 +1,5 @@
-import { afterEach, expect, it } from 'vitest'
-import { chmod, copyFile, readFile, realpath, rm, unlink } from 'node:fs/promises'
+import { afterEach, expect, it, vi } from 'vitest'
+import { chmod, copyFile, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -151,7 +151,14 @@ it('persists a recoverable external CLI launch failure and performs one replacem
   const task = await coordinator.acceptTask(lead, 'project', { subject: 'codex-report', description: 'Classify an admitted CLI that disappears before launch', nonCodeCriteria: 'Return a report' })
   await coordinator.close()
   const executable = join(repo.root, 'codex-after-admission.mjs')
-  await copyFile(resolve('packages/agent-team/tests/fixtures/external-runtime-fixture.mjs'), executable)
+  await writeFile(executable, [
+    '#!/usr/bin/env node',
+    "import { unlinkSync } from 'node:fs'",
+    "import { fileURLToPath } from 'node:url'",
+    "if (process.argv.includes('--version')) { console.log('codex-cli 0.153.4'); process.exit(0) }",
+    "if (process.argv[2] === 'login' && process.argv[3] === 'status') { unlinkSync(fileURLToPath(import.meta.url)); process.exit(0) }",
+    "process.exit(70)",
+  ].join('\n'))
   await chmod(executable, 0o755)
   const policy = execution(repo.root, repo.repository)
   policy.externalCodex.executable = executable
@@ -159,7 +166,6 @@ it('persists a recoverable external CLI launch failure and performs one replacem
   const running = await WorkspaceCoordinator.open(ctx, { ...config, workspaceOperatorId: lead.id, execution: configured })
   let closed = false
   cleanup.push(async () => { if (!closed) await running.close() })
-  await unlink(executable)
   await waitFor(async () => {
     await running.reconcile()
     return running.view().attempts.some(item => item.taskId === task.id && item.phase === 'terminal')
@@ -169,6 +175,9 @@ it('persists a recoverable external CLI launch failure and performs one replacem
   expect(ctx.agents.get(SessionId(failed.runtimeId))).toBeUndefined()
   const runtimeJournal = join(config.directory, 'external-runtime.jsonl')
   expect((await readFile(runtimeJournal, 'utf8')).split('"type":"external/intent"')).toHaveLength(2)
+  const retryAt = failed.provisioning!.notBefore
+  const now = vi.spyOn(Date, 'now').mockReturnValue(retryAt - 1)
+  cleanup.push(async () => { now.mockRestore() })
   await running.close()
   closed = true
 
@@ -180,6 +189,7 @@ it('persists a recoverable external CLI launch failure and performs one replacem
   expect(restored.view().dispatchStatus.find(item => item.taskId === task.id)).toMatchObject({ state: 'waiting', blockers: expect.arrayContaining([expect.objectContaining({ code: 'pacing' })]) })
   expect((await readFile(runtimeJournal, 'utf8')).split('"type":"external/intent"')).toHaveLength(2)
   expect(ctx.agents.get(SessionId(failed.runtimeId))).toBeUndefined()
+  now.mockReturnValue(retryAt)
   await waitFor(async () => {
     await restored.reconcile()
     return restored.view().attempts.some(item => item.taskId === task.id && item.generation === failed.generation + 1 && item.phase === 'terminal' && item.result === 'fixture external report')
