@@ -5,6 +5,7 @@ import { deskSlotFor } from '../scenes/layout.ts'
 import type { VisualAgentState, VisualSceneModel } from '../client/reconcile.ts'
 import { findPath, type NavGrid, type Point } from './pathfinding.ts'
 import type { SpriteSheet } from './sprites.ts'
+import { archetypeFor, type Archetype } from './archetypes.ts'
 
 /** Lifecycle phase of one painted agent actor. */
 export type ActorPhase = 'arriving' | 'walking' | 'settled' | 'leaving'
@@ -20,13 +21,31 @@ export interface Actor {
   readonly path: readonly Point[]
   readonly pathIndex: number
   readonly phaseStartedAt: number
+  readonly archetype: Archetype
+  /** Wall-clock time the actor entered state 'done'; null otherwise. */
+  readonly doneSince: number | null
 }
 
-/** Sprite sheets available per actor archetype (blocked/error/done land in M3). */
+/** Sprite sheets available per actor archetype (idle/work/walk subset). */
 export interface ActorSheets {
   readonly idle: SpriteSheet
   readonly work: SpriteSheet
   readonly walk: SpriteSheet
+}
+
+/**
+ * Full sheet library across all archetypes (M3). Only the teammate carries
+ * dedicated blocked/error/done sheets; reviewer/coordinator convey those
+ * states via badges instead.
+ */
+export interface SheetLibrary {
+  readonly teammate: ActorSheets & {
+    readonly blocked: SpriteSheet
+    readonly error: SpriteSheet
+    readonly done: SpriteSheet
+  }
+  readonly reviewer: ActorSheets
+  readonly coordinator: ActorSheets
 }
 
 /** Scene entry point where actors appear and exit (normalized coords). */
@@ -37,6 +56,9 @@ export const WALK_SPEED = 0.35
 
 /** Pause at the entry point before an actor starts walking to its desk. */
 export const ARRIVAL_PAUSE_MS = 400
+
+/** How long a settled done actor celebrates before walking out (ms). */
+export const DONE_LINGER_MS = 3000
 
 /** Waypoint reach threshold (normalized units). */
 const REACH_EPSILON = 1e-6
@@ -69,6 +91,8 @@ export function createActor(
     id, state, phase: 'arriving',
     x: ENTRY_POINT.x, y: ENTRY_POINT.y,
     desk, path: [], pathIndex: 0, phaseStartedAt: now,
+    archetype: archetypeFor(id),
+    doneSince: state === 'done' ? now : null,
   }
 }
 
@@ -93,7 +117,13 @@ export function reconcileActors(
       return createActor(agent.id, agent.state, deskSlotFor(agent.id, index), grid, now)
     }
     // Surviving actor (any phase): keep phase/desk/position, update state.
-    return existing.state === agent.state ? existing : { ...existing, state: agent.state }
+    // doneSince is stamped when the state becomes 'done' and cleared on exit.
+    if (existing.state === agent.state) return existing
+    return {
+      ...existing,
+      state: agent.state,
+      doneSince: agent.state === 'done' ? now : null,
+    }
   })
   const modelIds = new Set(model.agents.map(agent => agent.id))
   const leaving: Actor[] = actors
@@ -152,8 +182,9 @@ function advance(actor: Actor, travel: number, now: number): Actor | null {
  * arriving → walking after ARRIVAL_PAUSE_MS (path computed here via findPath);
  * walking/leaving advance along their path at WALK_SPEED (walking settles at
  * {desk.x, desk.y + 0.10} — in front of the desk — at path end; leaving
- * actors are removed); settled actors stay pinned. dtMs <= 0 returns the
- * input unchanged.
+ * actors are removed); settled actors stay pinned, except settled done actors
+ * whose linger exceeded DONE_LINGER_MS walk out to ENTRY_POINT. dtMs <= 0
+ * returns the input unchanged.
  */
 export function stepActors(
   actors: readonly Actor[],
@@ -185,9 +216,23 @@ export function stepActors(
       }
       case 'settled': {
         const pinned = settledPosition(actor.desk)
-        next.push(actor.x === pinned.x && actor.y === pinned.y
+        const settled = actor.x === pinned.x && actor.y === pinned.y
           ? actor
-          : { ...actor, x: pinned.x, y: pinned.y })
+          : { ...actor, x: pinned.x, y: pinned.y }
+        // Done linger: celebrate DONE_LINGER_MS, then walk out to the entry.
+        if (settled.state === 'done'
+          && settled.doneSince !== null
+          && now - settled.doneSince > DONE_LINGER_MS) {
+          next.push({
+            ...settled,
+            phase: 'leaving' as const,
+            path: findPath(grid, { x: settled.x, y: settled.y }, ENTRY_POINT),
+            pathIndex: 0,
+            phaseStartedAt: now,
+          })
+          break
+        }
+        next.push(settled)
         break
       }
     }
@@ -196,11 +241,21 @@ export function stepActors(
 }
 
 /**
- * Pick the sheet for an actor: walk while arriving/walking/leaving; settled
- * working → work, every other settled state → idle (M2 maps blocked/error/done
- * to idle; dedicated sheets land in M3).
+ * Pick the sheet for an actor from the SheetLibrary (M3: BREAKING — was
+ * ActorSheets in M2): walk while arriving/walking/leaving; settled working →
+ * work, settled idle → idle; settled blocked/error/done → the teammate's
+ * dedicated sheet, or idle for reviewer/coordinator (the BADGE conveys the
+ * state there).
  */
-export function sheetForActor(actor: Actor, sheets: ActorSheets): SpriteSheet {
+export function sheetForActor(actor: Actor, library: SheetLibrary): SpriteSheet {
+  const sheets = library[actor.archetype]
   if (actor.phase !== 'settled') return sheets.walk
-  return actor.state === 'working' ? sheets.work : sheets.idle
+  switch (actor.state) {
+    case 'working': return sheets.work
+    case 'idle': return sheets.idle
+    case 'blocked':
+    case 'error':
+    case 'done':
+      return actor.archetype === 'teammate' ? library.teammate[actor.state] : sheets.idle
+  }
 }
