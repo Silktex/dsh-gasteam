@@ -12,6 +12,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:distribution": "node scripts/build-dsh-team-distribution.mjs",
     "typecheck": "tsc -b tsconfig.host.json tsconfig.client.json",
     "test": "vitest run",
     "check:docs": "node scripts/check-docs.mjs",
@@ -21,6 +22,7 @@
     "demo:dashboard": "node scripts/dashboard-demo.mjs",
     "test:smoke": "node scripts/smoke.mjs",
     "test:release": "node scripts/standalone-release-validation.mjs",
+    "test:distribution": "node scripts/test-dsh-team-distribution.mjs",
     "test:acceptance": "vitest run --config vitest.acceptance.config.ts"
   },
   "devDependencies": {

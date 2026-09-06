@@ -1,0 +1,38 @@
+# One-package Agent Teams bundle for the stock DSH web profile.
+
+- id: tool-subagent-control
+  disabled: true
+
+- id: tool-subagent-list-agents
+  disabled: true
+
+- id: tool-subagent
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: one-shot
+
+- id: tool-subagent-fork
+  config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: one-shot
+
+- insert:
+    - id: dsh-team-compat
+      name: dsh-team/compat
+
+    - id: agent-team
+      name: dsh-team/core
+      config:
+        maxMembers: 8
+        maxTasks: 256
+        maxPendingMessagesPerMember: 64
+        maxMessageBytes: 65536
+        disposalTimeoutMs: 5000
+
+    - id: tool-agent-team
+      name: dsh-team/tools
+      config:
+        freshProvider: spawn
+        forkProvider: fork
