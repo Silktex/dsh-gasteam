@@ -81,8 +81,8 @@ async function setup(
 }
 
 /** Native completion notices wake the Lead; keep them out of the worker response script. */
-async function setupWorkers(script: ConstructorParameters<typeof MockAdapter>[0], config: ConstructorParameters<typeof TeamService>[1]) {
-  const fixture = await setup(script, config)
+async function setupWorkers(script: ConstructorParameters<typeof MockAdapter>[0], config: ConstructorParameters<typeof TeamService>[1], cwd?: string) {
+  const fixture = await setup(script, config, cwd)
   const stream = fixture.adapter.stream.bind(fixture.adapter)
   vi.spyOn(fixture.adapter, 'stream').mockImplementation(async function* (options) {
     if (options.sessionId === fixture.lead.id) yield* textResponse('Lead noted completion')
@@ -505,6 +505,62 @@ describe('Team identity and provisioning', () => {
       expect(terminal).toMatchObject({ phase: 'terminal', stopReason: 'operator cancellation' })
       expect(ctx.agents.get(SessionId(record.runtimeId))).toBeUndefined()
       await expect(runtime.start(lead, token(record))).rejects.toThrow(/stale|terminal/i)
+    } finally { await assignments.close() }
+  })
+
+  it('checkpoints a retained dirty predecessor worktree into one fenced DSH handoff', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setupWorkers(['hang', 'hang'], { worktreeProvider: 'git' }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Handoff work', description: 'Preserve the prior dirty checkout' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-handoff-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    try {
+      const initial = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'handoff-worker', runtimeId: 'handoff-original', provider: 'spawn', expectedGeneration: 0, handoffLimit: 1,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [{ kind: 'report', ref: 'checkpoint-evidence' }], nextAction: 'Keep the unfinished output.' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+      const active = await runtime.start(lead, token(initial))
+      const originalCheckpoint = structuredClone(active.checkpoint)
+      const old = ctx.agentTeams.listMembers(lead).find(member => member.id === active.runtimeId)!
+      await writeFile(join(old.worktree!.cwd, 'unfinished.txt'), 'dirty preserved output\n')
+      const replacement = await runtime.handoff(lead, token(active))
+      expect(replacement).toMatchObject({ phase: 'reserved', generation: 2, handoff: { previousAttemptId: active.attemptId }, checkpoint: { artifacts: expect.arrayContaining([{ kind: 'report', ref: 'checkpoint-evidence' }, { kind: 'file', ref: old.worktree!.cwd }]) } })
+      expect(await readFile(join(old.worktree!.cwd, 'unfinished.txt'), 'utf8')).toBe('dirty preserved output\n')
+      const replayed = await runtime.resumeHandoff(lead, assignments.list().find(record => record.attemptId === active.attemptId)!)
+      expect(replayed.attemptId).toBe(replacement.attemptId)
+      expect(assignments.list()).toHaveLength(2)
+      expect(assignments.list().find(record => record.attemptId === active.attemptId)?.checkpoint).toEqual(originalCheckpoint)
+      const started = await runtime.start(lead, token(replacement))
+      const child = await ctx.sessionPersistence.inspect(SessionId(started.runtimeId))
+      const prompt = child.events.filter(event => event.type === 'user/message').flatMap(event => event.type === 'user/message' ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []).join('\n')
+      expect(prompt).toContain(old.worktree!.cwd)
+      await expect(runtime.handoff(lead, token(active))).rejects.toThrow(/stale|terminal/i)
+    } finally { await assignments.close() }
+  })
+
+  it('carries a live repair lineage through a DSH handoff without opening another repair round', async () => {
+    const fixture = await gitFixture((root) => { roots.push(root) })
+    const { ctx, lead } = await setupWorkers(['hang'], { worktreeProvider: 'git' }, fixture.repository)
+    await ctx.plugin(GitWorktrees, fixture.config)
+    const task = await ctx.agentTeams.createTask(lead, { subject: 'Repair handoff', description: 'Keep the repair lineage while replacing its worker' })
+    const assignmentDirectory = mkdtempSync(join(tmpdir(), 'gasteam-runtime-repair-handoff-'))
+    roots.push(assignmentDirectory)
+    const assignments = await AssignmentStore.open(assignmentDirectory, { globalCapacity: 1, projectCapacities: { project: 1 } })
+    try {
+      const token = (value: AttemptRecord) => ({ attemptId: value.attemptId, generation: value.generation, expectedRevision: value.revision })
+      const original = await assignments.activate(token(await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'original-worker', runtimeId: 'original-runtime', provider: 'spawn', expectedGeneration: 0, repairLimit: 2, handoffLimit: 1,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'implement', artifacts: [], nextAction: 'Prepare the candidate.' } })))
+      const reported = await assignments.report(token(original), 'candidate ready')
+      const terminal = await assignments.retire(token(reported), { runtimeId: reported.runtimeId, kind: 'stopped', receipt: 'candidate-ready' })
+      const repair = { previousAttemptId: terminal.attemptId, submissionId: 'repair-submission', integrationId: 'repair-integration', sourceCommit: 'a'.repeat(40), candidateCwd: fixture.repository, diagnostic: 'verification failure', round: 1 }
+      const repairAttempt = await assignments.reserve({ projectId: 'project', teamId: lead.id, taskId: task.id, workerId: 'repair-worker', runtimeId: 'repair-runtime', provider: 'spawn', expectedGeneration: terminal.generation, repairLimit: 2, handoffLimit: 1, repair,
+        checkpoint: { task: { subject: task.subject, description: task.description }, step: 'repair', artifacts: [], nextAction: 'Repair the retained candidate.' } })
+      const runtime = new DshAssignmentRuntime(ctx, assignments)
+      const active = await runtime.start(lead, token(repairAttempt))
+      const replacement = await runtime.handoff(lead, token(active))
+      expect(replacement).toMatchObject({ handoff: { previousAttemptId: active.attemptId, round: 1 }, repair })
     } finally { await assignments.close() }
   })
 

@@ -41,6 +41,75 @@ it('bounds recoverable coordinator interruptions while preserving generation and
   await expect(store.reserve({ ...request, repairLimit: 2, expectedGeneration: 2, runtimeId: 'session-c' })).rejects.toThrow(/retry budget/i)
 })
 
+it('requires a durable stopped handoff intent before one fenced replacement can reserve', async () => {
+  const { store, directory } = await fixture()
+  const active = await store.activate(token(await store.reserve({ ...request, provider: 'spawn', handoffLimit: 1 })))
+  const handoff = { id: 'handoff-one', round: 1, workerId: 'handoff-worker', runtimeId: 'handoff-runtime',
+    checkpoint: { ...active.checkpoint, artifacts: [...active.checkpoint.artifacts, { kind: 'file' as const, ref: '/retained/dirty-worktree' }], nextAction: 'Inspect retained dirty worktree.' } }
+  const intended = await store.handoffIntent(token(active), handoff)
+  await expect(store.reserve({ ...request, workerId: handoff.workerId, runtimeId: handoff.runtimeId, expectedGeneration: 1, handoffLimit: 1,
+    checkpoint: handoff.checkpoint, handoff: { previousAttemptId: active.attemptId, intentId: handoff.id, round: 1 } })).rejects.toThrow(/owned|stopped/i)
+  const stopping = await store.stop(token(intended), 'Operator-authorized checkpointed handoff')
+  const terminal = await store.retire(token(stopping), stopped(stopping))
+  const replacement = await store.reserve({ ...request, provider: 'spawn', workerId: handoff.workerId, runtimeId: handoff.runtimeId, expectedGeneration: 1, handoffLimit: 1,
+    checkpoint: handoff.checkpoint, handoff: { previousAttemptId: active.attemptId, intentId: handoff.id, round: 1 } })
+  expect(replacement).toMatchObject({ generation: 2, checkpoint: handoff.checkpoint, handoff: { intentId: handoff.id } })
+  const replacementActive = await store.activate(token(replacement))
+  await expect(store.handoffIntent(token(replacementActive), { ...handoff, id: 'forged-old-round', round: 1,
+    workerId: 'forged-worker', runtimeId: 'forged-runtime' })).rejects.toThrow(/round.*lineage/i)
+  await expect(store.handoffIntent(token(replacementActive), { ...handoff, id: 'handoff-two', round: 2,
+    workerId: 'handoff-worker-two', runtimeId: 'handoff-runtime-two' })).rejects.toThrow(/budget/i)
+  await expect(store.reserve({ ...request, workerId: 'extra', runtimeId: 'extra', expectedGeneration: 2, handoffLimit: 1,
+    checkpoint: handoff.checkpoint, handoff: { previousAttemptId: terminal.attemptId, intentId: handoff.id, round: 1 } })).rejects.toThrow(/owned|handoff/i)
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const reopened = await AssignmentStore.open(directory, limits); stores.push(reopened)
+  expect(reopened.list()).toHaveLength(2)
+  await expect(reopened.handoffIntent(token(active), handoff)).rejects.toThrow(/terminal|stale/i)
+})
+
+it('reopens a handoff intent before stop and a stopped intent before its one replacement', async () => {
+  const { store, directory } = await fixture()
+  const active = await store.activate(token(await store.reserve({ ...request, provider: 'spawn', handoffLimit: 1 })))
+  const handoff = { id: 'reopen-handoff', round: 1, workerId: 'reopen-worker', runtimeId: 'reopen-runtime', checkpoint: active.checkpoint }
+  await store.handoffIntent(token(active), handoff)
+  await store.close(); stores.splice(stores.indexOf(store), 1)
+  const afterIntent = await AssignmentStore.open(directory, limits); stores.push(afterIntent)
+  const intended = afterIntent.list()[0]!
+  const stopping = await afterIntent.stop(token(intended), 'checkpointed handoff')
+  await afterIntent.retire(token(stopping), stopped(stopping))
+  await afterIntent.close(); stores.splice(stores.indexOf(afterIntent), 1)
+  const afterStop = await AssignmentStore.open(directory, limits); stores.push(afterStop)
+  const predecessor = afterStop.list()[0]!
+  const replacement = await afterStop.reserve({ ...request, provider: 'spawn', expectedGeneration: predecessor.generation,
+    workerId: handoff.workerId, runtimeId: handoff.runtimeId, handoffLimit: 1, checkpoint: handoff.checkpoint,
+    handoff: { previousAttemptId: predecessor.attemptId, intentId: handoff.id, round: 1 } })
+  expect(replacement).toMatchObject({ generation: 2, handoff: { intentId: handoff.id } })
+})
+
+it('preserves an existing repair lineage through handoff without spending or resetting repair rounds', async () => {
+  const { store } = await fixture()
+  const original = await store.activate(token(await store.reserve({ ...request, provider: 'spawn', repairLimit: 2, handoffLimit: 1 })))
+  const reported = await store.report(token(original), 'candidate ready')
+  const terminal = await store.retire(token(reported), stopped(reported))
+  const repair = { previousAttemptId: terminal.attemptId, submissionId: 'submission-1', integrationId: 'integration-1',
+    sourceCommit: 'a'.repeat(40), candidateCwd: '/retained/candidate', diagnostic: 'verification failed', round: 1 }
+  const repairing = await store.activate(token(await store.reserve({ ...request, provider: 'spawn', repairLimit: 2, handoffLimit: 1,
+    expectedGeneration: terminal.generation, workerId: 'repair-worker', runtimeId: 'repair-runtime', checkpoint: terminal.checkpoint, repair })))
+  const intent = { id: 'repair-handoff', round: 1, workerId: 'repair-handoff-worker', runtimeId: 'repair-handoff-runtime', checkpoint: repairing.checkpoint }
+  const intended = await store.handoffIntent(token(repairing), intent)
+  const stoppedRepair = await store.stop(token(intended), 'checkpointed repair handoff')
+  const retiredRepair = await store.retire(token(stoppedRepair), stopped(stoppedRepair))
+  const handedOff = await store.reserve({ ...request, provider: 'spawn', repairLimit: 2, handoffLimit: 1, expectedGeneration: retiredRepair.generation,
+    workerId: intent.workerId, runtimeId: intent.runtimeId, checkpoint: intent.checkpoint, repair,
+    handoff: { previousAttemptId: retiredRepair.attemptId, intentId: intent.id, round: 1 } })
+  expect(handedOff.repair).toEqual(repair)
+  const rerun = await store.retire(token(await store.report(token(await store.activate(token(handedOff))), 'candidate retry ready')), stopped(handedOff))
+  const secondRepair = { ...repair, previousAttemptId: rerun.attemptId, submissionId: 'submission-2', integrationId: 'integration-2',
+    sourceCommit: 'b'.repeat(40), candidateCwd: '/retained/candidate-two', round: 2 }
+  await expect(store.reserve({ ...request, provider: 'spawn', repairLimit: 2, handoffLimit: 1, expectedGeneration: rerun.generation,
+    workerId: 'second-repair-worker', runtimeId: 'second-repair-runtime', checkpoint: rerun.checkpoint, repair: secondRepair })).resolves.toMatchObject({ repair: secondRepair })
+})
+
 it('retains a durable never-started provisioning lineage, deadline, and exact replacement budget', async () => {
   const { store, directory } = await fixture()
   const policy = { maxAttempts: 1, initialDelayMs: 50, multiplier: 2, maxDelayMs: 100 }

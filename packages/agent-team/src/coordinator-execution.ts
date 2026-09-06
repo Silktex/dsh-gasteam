@@ -43,6 +43,8 @@ import type { WorkflowCodeStatus, WorkflowCodeTaskCreateIntent, WorkflowIntegrat
 export const executionConfigSchema = z.object({
   modelProvider: z.string().trim().min(1), model: z.string().trim().min(1),
   maxRepairAttempts: z.number().int().min(0).max(10).optional(),
+  /** Explicit operator-authorized DSH replacement budget, pinned per lineage. */
+  maxHandoffs: z.number().int().min(0).max(10).optional(),
   /** Recovery deliveries after the initial worker generation. */
   retryPolicy: assignmentRetryPolicySchema.optional(),
   dispatchIntervalMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
@@ -464,6 +466,15 @@ export class CoordinatorExecution {
       catch (error) { await this.block(submission, error) }
     }
     this.assignments.configure({ globalCapacity: this.config.maxConcurrent, projectCapacities: Object.fromEntries(this.projects().map(project => [project.id, project.capacity])) })
+    // The operator action is durable before the predecessor is stopped.  On a
+    // restart, finish only that recorded binding; never infer a new handoff.
+    for (const record of this.assignments.list()) {
+      if (record.handoffIntent === undefined || this.queue.list().some(request => sameWork(request, record) && request.cancelReason !== undefined)) continue
+      const project = views.find(view => view.project.id === record.projectId)
+      if (!project || project.paused) continue
+      try { await this.runtime.resumeHandoff(await this.leadFor(project.project, record.teamId), record) }
+      catch (error) { await this.block(record, error) }
+    }
     for (const record of this.assignments.list()) {
       if (record.phase === 'terminal' || this.queue.list().some(request => sameWork(request, record) && request.cancelReason !== undefined)) continue
       const project = views.find(view => view.project.id === record.projectId)
@@ -552,6 +563,7 @@ export class CoordinatorExecution {
         record = await this.assignments.reserve({ projectId: work.projectId, teamId: work.teamId, taskId: work.taskId,
           workerId: randomUUID(), runtimeId: randomUUID(), provider: this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? 'external' : 'spawn', expectedGeneration: previous?.generation ?? 0,
           repairLimit: previous ? previous.repairLimit! : this.config.maxRepairAttempts ?? 3, ...(repair ? { repair } : {}),
+          handoffLimit: previous ? previous.handoffLimit : this.config.maxHandoffs ?? 1,
           retryPolicy: previous?.retryPolicy ?? this.config.retryPolicy,
           ...(this.external?.ownsTask(view.project.id, task.nonCodeCriteria !== undefined) ? { externalPolicy: this.external.reservationPolicy() } : {}),
           checkpoint: { task: { subject: task.subject, description: task.description,
@@ -940,6 +952,20 @@ export class CoordinatorExecution {
       try { await this.cancelAttempt(lead, record, reason) }
       catch (error) { await this.block(work, error); throw error }
     }
+  }
+
+  async handoff(lead: Agent, work: DispatchWork, expectedRevision: number, attempt: { attemptId: string; generation: number; expectedRevision: number }): Promise<void> {
+    if (this.shutdownRequested) throw new Error('Coordinator execution is closed')
+    const request = this.queue.list().find(item => sameWork(item, work))
+    if (!request || request.revision !== expectedRevision || request.cancelReason !== undefined) throw new Error('Stale or cancelled dispatch request')
+    const current = this.assignments.list().findLast(record => sameWork(record, work))
+    if (!current || current.attemptId !== attempt.attemptId || current.generation !== attempt.generation || current.revision !== attempt.expectedRevision) throw new Error('Stale handoff attempt')
+    if (current.provider === 'external' || current.phase !== 'active') throw new Error('Handoff requires an active DSH attempt')
+    const allowedNudges = this.config?.health?.recovery?.maxNudges
+    if (allowedNudges === undefined || (current.healthRecovery?.count ?? 0) < allowedNudges) throw new Error('Handoff requires exhausted authorized health nudges')
+    if ((this.assignments.list().filter(record => sameWork(record, work) && record.handoff !== undefined).length) >= (current.handoffLimit ?? 1)) throw new Error('Handoff budget is exhausted')
+    const replacement = await this.runtime.handoff(lead, token(current))
+    await this.startAttempt(lead, replacement)
   }
 
   async reprioritize(work: DispatchWork, expectedRevision: number, priority: number): Promise<void> {

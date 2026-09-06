@@ -120,6 +120,47 @@ export class DshAssignmentRuntime {
     })
   }
 
+  /** Persist a replacement binding before stopping the exact predecessor. */
+  async handoff(lead: Agent, token: AttemptToken): Promise<AttemptRecord> {
+    return this.resumeHandoff(lead, this.resolve(lead, token))
+  }
+
+  /**
+   * Finish an already authorized handoff after a process restart.  The intent
+   * is immutable, so replay can only drain the named predecessor and reserve
+   * the named replacement; it cannot create another worker or spend budget.
+   */
+  resumeHandoff(lead: Agent, predecessor: AttemptRecord): Promise<AttemptRecord> {
+    return this.serialize(async () => {
+      let record = this.resolve(lead, tokenOf(predecessor))
+      if (!['spawn', 'fork'].includes(record.provider)) throw new Error('Handoff requires a DSH assignment')
+      if (!record.handoffIntent) {
+        if (record.phase !== 'active') throw new Error('Handoff requires an active DSH assignment')
+        const member = this.ctx.agentTeams.listMembers(lead).find(item => item.id === record.runtimeId && item.name === record.attemptId)
+        if (!member?.worktree?.cwd) throw new Error('Handoff requires the predecessor worktree receipt')
+        const checkpoint = { ...record.checkpoint, artifacts: [...record.checkpoint.artifacts,
+          ...(record.checkpoint.artifacts.some(item => item.kind === 'file' && item.ref === member.worktree!.cwd) ? [] : [{ kind: 'file' as const, ref: member.worktree.cwd }])],
+          nextAction: `${record.checkpoint.nextAction}\nHandoff: inspect and preserve the predecessor worktree at ${member.worktree.cwd} before continuing.` }
+        const intent = { id: randomUUID(), round: this.assignments.list().filter(item => item.projectId === record.projectId && item.teamId === record.teamId && item.taskId === record.taskId && item.handoff !== undefined).length + 1,
+          workerId: randomUUID(), runtimeId: randomUUID(), checkpoint }
+        record = await this.assignments.handoffIntent(tokenOf(record), intent)
+      }
+      const intent = record.handoffIntent
+      if (intent === undefined) throw new Error('Handoff intent was not persisted')
+      const existing = this.assignments.list().find(item => item.handoff?.previousAttemptId === record.attemptId && item.handoff.intentId === intent.id)
+      if (existing) return existing
+      if (record.phase === 'active') record = await this.assignments.stop(tokenOf(record), 'Operator-authorized checkpointed handoff')
+      const terminal = record.phase === 'terminal' ? record : await this.retireAfterDrain(lead, record)
+      if (terminal.stopEvidence?.kind !== 'stopped') throw new Error('Handoff requires a positive predecessor stop receipt')
+      return this.assignments.reserve({ projectId: terminal.projectId, teamId: terminal.teamId, taskId: terminal.taskId,
+        workerId: intent.workerId, runtimeId: intent.runtimeId, provider: terminal.provider, expectedGeneration: terminal.generation,
+        repairLimit: terminal.repairLimit, handoffLimit: terminal.handoffLimit, retryPolicy: terminal.retryPolicy,
+        ...(terminal.repair === undefined ? {} : { repair: terminal.repair }),
+        ...(terminal.externalPolicy === undefined ? {} : { externalPolicy: terminal.externalPolicy }), checkpoint: intent.checkpoint,
+        handoff: { previousAttemptId: terminal.attemptId, intentId: intent.id, round: intent.round } })
+    })
+  }
+
   private async retireAfterDrain(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
     const member = this.ctx.agentTeams.listMembers(lead).find(member => member.id === record.runtimeId)
     if (member?.name !== record.attemptId) throw new Error('Runtime ownership is uncertain; preserve the assignment for reconciliation')

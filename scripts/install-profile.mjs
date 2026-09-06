@@ -7,6 +7,7 @@ const args = process.argv.slice(2)
 if (args[0] === '--') args.shift()
 const { values } = parseArgs({ args, options: { profile: { type: 'string', default: 'web' } } })
 const root = resolve(import.meta.dirname, '..')
+if (process.env.DSH_HOME !== undefined && process.env.DSH_HOME.trim() === '') throw new Error('DSH_HOME was explicitly empty; refuse profile installation instead of falling back to the user profile')
 const packages = ['agent-team', 'tool-agent-team', 'agent-team-profile']
 if (values.profile === 'web') packages.push('client-ui-agent-team', 'agent-team-web-profile')
 for (const name of packages) await access(resolve(root, `packages/${name}/lib/index.js`))

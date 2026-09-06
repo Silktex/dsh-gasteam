@@ -492,6 +492,12 @@ export class WorkspaceCoordinator {
       if (!this.execution) throw new Error('Coordinator execution is unavailable')
       await this.execution.cancel(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision, control.reason)
     })
+    else if (control.action === 'handoff') await this.run(async () => {
+      this.authorize(caller, control.projectId)
+      if (!this.execution) throw new Error('Coordinator execution is unavailable')
+      await this.execution.handoff(caller, { projectId: control.projectId, teamId: caller.id, taskId: control.taskId }, control.expectedRevision,
+        { attemptId: control.attemptId, generation: control.generation, expectedRevision: control.expectedAttemptRevision })
+    })
     else await this.reprioritize(caller, control.projectId, control.taskId, control.expectedRevision, control.priority)
     return this.scheduling(caller, { projectId: control.projectId })
   }

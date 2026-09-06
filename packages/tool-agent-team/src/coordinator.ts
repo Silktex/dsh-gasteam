@@ -189,6 +189,11 @@ export function apply(ctx: Context): void {
       parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, priority: { type: 'integer', required: true } }, output,
       async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'priority', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, priority: args.priority })) },
     })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_dispatch_handoff', description: 'After authorized health nudges are exhausted, checkpoint, stop, and replace one exact active DSH attempt. The old worktree remains retained for the replacement.',
+      parameters: { project_id: { type: 'string', required: true }, task_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true }, attempt_id: { type: 'string', required: true }, generation: { type: 'integer', required: true }, expected_attempt_revision: { type: 'integer', required: true } }, output,
+      async execute(args, exec) { return value(await ctx.workspaceCoordinator.controlScheduling(caller(exec.agent), { action: 'handoff', projectId: args.project_id, taskId: args.task_id, expectedRevision: args.expected_revision, attemptId: args.attempt_id, generation: args.generation, expectedAttemptRevision: args.expected_attempt_revision })) },
+    })))
   }
   const dispose = (agent: Agent) => { for (const remove of installed.get(agent) ?? []) remove(); installed.delete(agent) }
   for (const agent of ctx.agents.list()) install(agent)

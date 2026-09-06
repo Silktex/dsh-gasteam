@@ -7,6 +7,7 @@ export const schedulingControlSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('pause'), projectId: id, expectedRevision: revision, paused: z.boolean() }).strict(),
   z.object({ action: z.literal('cancel'), projectId: id, taskId: id, expectedRevision: revision.min(1), reason: z.string().trim().min(1).max(16_384) }).strict(),
   z.object({ action: z.literal('priority'), projectId: id, taskId: id, expectedRevision: revision.min(1), priority: z.number().int().min(-1_000_000).max(1_000_000) }).strict(),
+  z.object({ action: z.literal('handoff'), projectId: id, taskId: id, expectedRevision: revision.min(1), attemptId: id, generation: revision.min(1), expectedAttemptRevision: revision.min(1) }).strict(),
 ])
 /** Browser-safe model input for a coordinator-owned cross-project batch. */
 export const workspaceBatchTaskSchema = z.object({

@@ -931,12 +931,17 @@ it('exposes scoped model controls and strict Remote scheduling contracts with pr
   expect((await call('team_dispatch_status', { project_id: 'project' }, outsider)).isError).toBe(true)
   expect((await call('team_report_status', { project_id: 'project' }, outsider)).isError).toBe(true)
   expect(() => schedulingControlSchema.parse({ action: 'priority', projectId: 'project', taskId: task.id, expectedRevision: 2, priority: 0, injected: true })).toThrow()
+  expect(schedulingControlSchema.parse({ action: 'handoff', projectId: 'project', taskId: task.id, expectedRevision: 2,
+    attemptId: 'attempt-1', generation: 1, expectedAttemptRevision: 1 })).toMatchObject({ action: 'handoff', attemptId: 'attempt-1' })
+  expect((await call('team_dispatch_handoff', { project_id: 'project', task_id: task.id, expected_revision: 2,
+    attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 })).isError).toBe(true)
   expect((await call('team_dispatch_cancel', { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' })).isError).not.toBe(true)
   expect(ctx.agentTeams.remoteScheduling(lead, { projectId: 'project' }).requests[0]!.cancelReason).toBe('Tool cancellation')
   expect(transcript).toEqual(expect.arrayContaining([
     expect.objectContaining({ tool: 'team_dispatch_status', input: { project_id: 'project' }, result: { error: false, payload: expect.objectContaining({ projectId: 'project', requests: expect.arrayContaining([expect.objectContaining({ taskId: task.id, revision: 1 })]) }) } }),
     expect.objectContaining({ tool: 'team_dispatch_priority', input: { project_id: 'project', task_id: task.id, expected_revision: 1, priority: 50 }, result: { error: false, payload: expect.anything() } }),
     expect.objectContaining({ tool: 'team_dispatch_pause', input: { project_id: 'project', expected_revision: 0, paused: true }, result: { error: false, payload: expect.anything() } }),
+    expect.objectContaining({ tool: 'team_dispatch_handoff', input: { project_id: 'project', task_id: task.id, expected_revision: 2, attempt_id: 'attempt-1', generation: 1, expected_attempt_revision: 1 }, result: { error: true, payload: expect.anything() } }),
     expect.objectContaining({ tool: 'team_dispatch_cancel', input: { project_id: 'project', task_id: task.id, expected_revision: 2, reason: 'Tool cancellation' }, result: { error: false, payload: expect.anything() } }),
   ]))
   await plugin.dispose()

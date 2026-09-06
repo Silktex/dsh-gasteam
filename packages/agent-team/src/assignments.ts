@@ -33,6 +33,9 @@ const checkpointSchema = z.object({
 const legacyRequestSchema = z.object({
   projectId: id, teamId: id, taskId: id, workerId: id, runtimeId: id, provider: id,
   repairLimit: z.number().int().min(0).max(10).optional(),
+  /** Operator-authorized DSH replacement budget, distinct from all retry budgets. */
+  handoffLimit: z.number().int().min(0).max(10).optional(),
+  handoff: z.object({ previousAttemptId: id, intentId: id, round: positive }).strict().optional(),
   repair: z.object({ previousAttemptId: id, submissionId: id, integrationId: id,
     sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
     candidateCwd: text, diagnostic: text, round: positive,
@@ -53,6 +56,7 @@ const externalUsageSchema = z.object({ provider: z.literal('external'), attemptI
 }).strict().refine(value => value.inputTokens !== undefined || value.cachedInputTokens !== undefined || value.outputTokens !== undefined || value.reasoningOutputTokens !== undefined, 'External usage needs a reported token count')
 const interruptionRequestSchema = z.object({ reason: z.literal('coordinator-shutdown'), receipt: text }).strict()
 const interruptionSchema = interruptionRequestSchema.extend({ count: positive }).strict()
+const handoffIntentSchema = z.object({ id, round: positive, workerId: id, runtimeId: id, checkpoint: checkpointSchema }).strict()
 const envelope = { version: z.literal(1), sequence: positive }
 const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('assignment/reserved'), request: legacyRequestSchema }).strict(),
@@ -66,6 +70,7 @@ const eventSchema = z.discriminatedUnion('type', [
   z.object({ ...envelope, type: z.literal('attempt/stopping'), token: tokenSchema, reason: text }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/retired'), token: tokenSchema, evidence: stopSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/interrupted'), token: tokenSchema, evidence: stopSchema, interruption: interruptionRequestSchema }).strict(),
+  z.object({ ...envelope, type: z.literal('attempt/handoff-intent'), token: tokenSchema, handoff: handoffIntentSchema }).strict(),
   z.object({ ...envelope, type: z.literal('attempt/provision-failed'), token: tokenSchema, evidence: stopSchema, diagnostic: text, notBefore: z.number().int().nonnegative(), retryable: z.boolean() }).strict(),
 ])
 type Event = z.output<typeof eventSchema>
@@ -97,6 +102,8 @@ export interface AttemptRecord extends Omit<ReserveAssignmentRequest, 'expectedG
   readonly externalUsage?: z.output<typeof externalUsageSchema>
   /** A provision failure has a separate, pinned replacement budget. */
   readonly provisioning?: { count: number; notBefore: number; diagnostic: string; retryable: boolean }
+  /** Immutable pre-stop replacement binding; the new assignment cites it. */
+  readonly handoffIntent?: z.output<typeof handoffIntentSchema>
 }
 const limitsSchema = z.object({
   globalCapacity: positive, projectCapacities: z.record(id, positive),
@@ -116,6 +123,8 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if ((prior?.generation ?? 0) !== request.expectedGeneration) throw new Error('Stale assignment generation')
     if (prior !== undefined && prior.phase !== 'terminal') throw new Error('Task is already owned')
     if (prior && request.repairLimit !== prior.repairLimit) throw new Error('Repair policy is immutable for accepted work')
+    const handoffLimit = request.handoffLimit ?? (prior?.handoffLimit ?? 1)
+    if (prior && handoffLimit !== prior.handoffLimit) throw new Error('Handoff policy is immutable for an assignment lineage')
     const retryPolicy = request.retryPolicy ?? (prior?.retryPolicy ?? legacyAssignmentRetryPolicy)
     if (prior && JSON.stringify(retryPolicy) !== JSON.stringify(prior.retryPolicy)) throw new Error('Retry policy is immutable for an assignment lineage')
     if (prior?.interruption && prior.interruption.count >= (request.repairLimit ?? 0)) throw new Error('Coordinator interruption retry budget is exhausted')
@@ -125,18 +134,28 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
     if (prior?.provisioning && (!prior.provisioning.retryable || prior.provisioning.count > prior.retryPolicy.maxAttempts)) {
       throw new Error(prior.provisioning.retryable ? 'Provisioning retry budget is exhausted' : 'Provisioning failure is not retryable')
     }
-    if (request.repair) {
+    if (request.handoff && prior?.repair) {
+      // A handoff carries an already-authorized repair forward unchanged. It
+      // neither creates a repair nor spends another repair round.
+      if (!request.repair || JSON.stringify(request.repair) !== JSON.stringify(prior.repair)) throw new Error('Handoff must preserve the existing repair lineage')
+    } else if (request.repair) {
       if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.stopReason || !prior.result
         || request.repair.previousAttemptId !== prior.attemptId
         || request.repair.round !== (prior.repair?.round ?? 0) + 1
         || request.repair.round > (request.repairLimit ?? 0)) throw new Error('Invalid or exhausted repair attempt')
     } else if (prior?.repair) throw new Error('Replacement cannot erase repair history')
+    if (request.handoff) {
+      if (!prior || prior.stopEvidence?.kind !== 'stopped' || prior.handoffIntent?.id !== request.handoff.intentId
+        || prior.handoffIntent.round !== request.handoff.round || request.handoff.previousAttemptId !== prior.attemptId
+        || request.handoff.round > handoffLimit || request.workerId !== prior.handoffIntent.workerId || request.runtimeId !== prior.handoffIntent.runtimeId
+        || JSON.stringify(request.checkpoint) !== JSON.stringify(prior.handoffIntent.checkpoint)) throw new Error('Invalid or exhausted handoff replacement')
+    } else if (prior?.handoffIntent) throw new Error('Replacement must consume its durable handoff intent')
     if (records.some(record => record.phase !== 'terminal' && record.workerId === request.workerId)) throw new Error('Worker is already assigned')
     // A runtime identity is an immutable attempt reference; it is never reused after termination.
     if (records.some(record => record.runtimeId === request.runtimeId)) throw new Error('Runtime identity is already assigned')
-    const { expectedGeneration, retryPolicy: _requestedPolicy, ...identity } = request
+    const { expectedGeneration, retryPolicy: _requestedPolicy, handoffLimit: _requestedHandoffLimit, ...identity } = request
     const record = {
-      ...identity, retryPolicy, attemptId: `attempt-${event.sequence}`, assignmentId: `assignment-${event.sequence}`,
+      ...identity, retryPolicy, handoffLimit, attemptId: `attempt-${event.sequence}`, assignmentId: `assignment-${event.sequence}`,
       generation: expectedGeneration + 1, revision: 1, phase: 'reserved',
     } as AttemptRecord
     return [...records, record]
@@ -212,6 +231,14 @@ function reduce(records: AttemptRecord[], raw: unknown): AttemptRecord[] {
       if (event.evidence.kind === 'never-started' && current.phase !== 'reserved') throw new Error('Never-started interruption requires a reserved attempt')
       next = { ...next, phase: 'terminal', stopEvidence: event.evidence,
         interruption: { ...event.interruption, count: records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId && record.taskId === current.taskId && record.interruption !== undefined).length + 1 } }
+      break
+    case 'attempt/handoff-intent':
+      if (current.phase !== 'active' || !['spawn', 'fork'].includes(current.provider) || current.handoffIntent !== undefined) throw new Error('Handoff requires one active DSH attempt')
+      const expectedRound = records.filter(record => record.projectId === current.projectId && record.teamId === current.teamId
+        && record.taskId === current.taskId && record.handoff !== undefined).length + 1
+      if (event.handoff.round !== expectedRound) throw new Error('Handoff round does not match its durable lineage')
+      if (event.handoff.round > (current.handoffLimit ?? 1)) throw new Error('Handoff budget is exhausted')
+      next = { ...next, handoffIntent: event.handoff }
       break
     case 'attempt/provision-failed':
       if (current.phase !== 'reserved' || event.evidence.runtimeId !== current.runtimeId) throw new Error('Provisioning failure requires a reserved attempt with matching runtime evidence')
@@ -309,6 +336,9 @@ export class AssignmentStore {
   }
   interrupt(token: AttemptToken, evidence: RuntimeStopEvidence): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/interrupted', token, evidence, interruption: { reason: 'coordinator-shutdown', receipt: evidence.receipt } })
+  }
+  handoffIntent(token: AttemptToken, handoff: z.input<typeof handoffIntentSchema>): Promise<AttemptRecord> {
+    return this.mutate({ type: 'attempt/handoff-intent', token, handoff: handoffIntentSchema.parse(handoff) })
   }
   provisionFailed(token: AttemptToken, evidence: RuntimeStopEvidence, diagnostic: string, notBefore: number, retryable: boolean): Promise<AttemptRecord> {
     return this.mutate({ type: 'attempt/provision-failed', token, evidence, diagnostic, notBefore, retryable })
