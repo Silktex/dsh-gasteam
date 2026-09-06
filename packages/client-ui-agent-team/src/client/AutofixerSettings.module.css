@@ -1,0 +1,239 @@
+.root {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--dsh-border, #d1d5db);
+  border-radius: 8px;
+  background: var(--dsh-bg-subtle, #fafafa);
+  color: var(--dsh-fg, #1f2937);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.titleArea {
+  display: grid;
+  gap: 2px;
+}
+
+.titleArea h3 {
+  margin: 0;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsh-muted-fg, #6b7280);
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.badgeDisabled {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.presetButton {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--dsh-border, #d1d5db);
+  background: #fff;
+  cursor: pointer;
+}
+
+.presetButton:hover {
+  background: var(--dsh-muted, #f3f4f6);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.fieldGroup {
+  display: grid;
+  gap: 4px;
+}
+
+.fieldGroup label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsh-fg, #1f2937);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldGroup select,
+.fieldGroup input[type="text"],
+.fieldGroup input[type="number"] {
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1px solid var(--dsh-border, #d1d5db);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--dsh-fg, #1f2937);
+}
+
+.fieldGroup input[type="text"]:focus,
+.fieldGroup select:focus {
+  outline: 2px solid var(--dsh-accent, #2563eb);
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toggleRow input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.gatesGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--dsh-border, #e5e7eb);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.gateOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.promptSection {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--dsh-border, #e5e7eb);
+  padding-top: 10px;
+}
+
+.tabBar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border-bottom: 1px solid var(--dsh-border, #e5e7eb);
+  padding-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.tabButton {
+  background: transparent;
+  border: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--dsh-muted-fg, #6b7280);
+}
+
+.tabButton[aria-selected="true"] {
+  background: var(--dsh-accent, #2563eb);
+  color: #fff;
+}
+
+.copyButton {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--dsh-border, #d1d5db);
+  background: #fff;
+  cursor: pointer;
+}
+
+.copyButton:hover {
+  background: var(--dsh-muted, #f3f4f6);
+}
+
+.codeBox {
+  margin: 0;
+  padding: 10px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-x: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.actionRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.saveButton {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 4px;
+  border: none;
+  background: var(--dsh-accent, #2563eb);
+  color: #fff;
+  cursor: pointer;
+}
+
+.saveButton:hover {
+  opacity: 0.9;
+}
+
+.saveButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.notice {
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 12px;
+}
+
+.inlineNotice {
+  font-size: 12px;
+  color: #166534;
+  font-weight: 500;
+}

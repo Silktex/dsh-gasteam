@@ -4,6 +4,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { OperatorEscalation, SchedulingControl, SchedulingView, WorkspaceActivityPage, WorkspaceActivityRequest, WorkspaceDashboardCollection, WorkspaceDashboardPage, WorkspaceDashboardPageRequest, WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TeamKey } from './locales.ts'
+import { AutofixerSettings } from './AutofixerSettings.tsx'
+import type { AutofixerConfig } from './autofixer-settings.ts'
 import css from './WorkspaceDashboard.module.css'
 
 export interface WorkspaceDashboardProps {
@@ -15,6 +17,8 @@ export interface WorkspaceDashboardProps {
   readonly controlScheduling?: (sessionId: SessionId, request: SchedulingControl) => Promise<RemoteResult<SchedulingView>>
   readonly loadHealth?: (sessionId: SessionId, projectId: string) => Promise<RemoteResult<OperatorEscalation[]>>
   readonly acknowledgeHealth?: (sessionId: SessionId, projectId: string, escalationId: string, expectedRevision: number) => Promise<RemoteResult<OperatorEscalation>>
+  readonly initialAutofixerConfig?: Partial<AutofixerConfig>
+  readonly onSaveAutofixerConfig?: (config: AutofixerConfig) => void | Promise<void>
   readonly t: (key: TeamKey) => string
 }
 
@@ -46,7 +50,7 @@ function Usage({ usage, t }: { readonly usage: WorkspaceDashboardView['attempts'
  * Presents only the browser-safe workspace projection. Its `load` capability is
  * supplied later by an operator-authorized Remote binding.
  */
-export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, loadScheduling, controlScheduling, loadHealth, acknowledgeHealth, t }: WorkspaceDashboardProps) {
+export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, loadScheduling, controlScheduling, loadHealth, acknowledgeHealth, initialAutofixerConfig, onSaveAutofixerConfig, t }: WorkspaceDashboardProps) {
   const [view, setView] = useState<WorkspaceDashboardView | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -322,6 +326,14 @@ export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, lo
       <DashboardSection title={t('dashboard.escalations')} truncated={view.escalationsTruncated} t={t}>
         {visibleEscalations.map(escalation => <article key={escalation.id} className={css.card}><strong>{t(`health.severity.${escalation.severity}`)} · {t(`health.condition.${escalation.condition}`)}</strong><span>{escalation.projectId}/{escalation.taskId} · {escalation.attemptId} · {t('dashboard.revision')} {escalation.revision}</span><p>{escalation.diagnostics}</p></article>)}
       </DashboardSection>
+      <AutofixerSettings
+        projects={view.projects}
+        selectedProjectId={projectId}
+        onSelectProject={setProjectId}
+        initialConfig={initialAutofixerConfig}
+        onSave={onSaveAutofixerConfig}
+        t={t}
+      />
     </>}
   </section>
 }

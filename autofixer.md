@@ -104,6 +104,27 @@ For any interactive or CLI-based coding agent, invoke with the prompt:
 Read autofixer.md. Inspect today's work, check runtime/test logs for errors, and synthesize the Plan of Fix report.
 ```
 
+#### E. Interactive Web UI Settings & Prompt Helper (`WorkspaceDashboard`)
+The GasTeam Web UI provides an interactive **Autofixer & CI/CD Setup** panel within the `WorkspaceDashboard`. Operators can configure and preview autofixing policies directly from the browser:
+1. **Target Scope**: Toggle between the GasTeam root workspace (`Silktex/dsh-gasteam`) or any registered project ID (e.g. `api`, `web`).
+2. **Schedule Modes & Presets**:
+   - `Nightly Review` (`0 21 * * *`): Generates daily Plan of Fix reports with P0/P1 remediation.
+   - `Continuous CI/CD` (`0 * * * *`): Hourly or trigger-driven verification with 5-minute downtime budget.
+   - `Instant P0 Fix`: Dispatches immediate autonomous repairs for P0 Blockers while batching P1/P2 fixes.
+   - `Custom Cron`: Operator-defined cron expressions.
+3. **Severity Routing Policy**:
+   - **P0 (Blocker)**: Instant dispatch with anti-clobber worktree isolation and clean rollback guard (reverts if >2 attempts fail).
+   - **P1 (Regression)**: Remediation scheduled for the next CI/CD cycle.
+   - **P2 (Warning / Docs)**: Report synthesis only (`reports/nightly-fix-plan-YYYY-MM-DD.md`) without autonomous commits.
+4. **Production Downtime Tolerance**:
+   - Configurable limits: `0 min` (Zero-downtime / Blue-Green only), `5 min`, `15 min`, `30 min`, or `60 min`.
+   - **Threshold Exceeded Policy**: Automatically quarantines candidate worktrees and alerts the operator inbox via `health.jsonl` if projected remediation exceeds the tolerance.
+5. **Multi-Agent Anti-Clobber Worktree Isolation**:
+   - Enforces isolated Git worktrees and `TMPDIR=/var/tmp` for all autonomous repairs.
+6. **Dynamic Prompt Helper**:
+   - Generates tailored prompts for external coding agents (DSH, Claude Code, Cursor, Copilot, Codex).
+   - Generates matching Linux crontab lines, systemd timer/service units, and CI/CD pipeline steps with one-click clipboard copying.
+
 ---
 
 ## 3. Autonomous Execution Runbook
@@ -349,3 +370,12 @@ The following enhancements are integrated into the GasTeam architecture to make 
 ### 5. Automated Review & Fix Plan Orchestrator (`scripts/autofixer.mjs`, `pnpm autofix`)
 - **Implementation**: Fully automated 5-phase execution runner.
 - **Execution**: Runs doctor diagnostics, documentation validation, host/client typechecking, package building, unit tests, and smoke test, categorizing defects and outputting `reports/nightly-fix-plan-YYYY-MM-DD.md`.
+
+### 6. Interactive Web UI Settings & Prompt Helper (`packages/client-ui-agent-team/src/client/AutofixerSettings.tsx`)
+- **Implementation**: Interactive browser configuration and prompt generation panel mounted within the `WorkspaceDashboard`.
+- **Capabilities**:
+  - Configures target scope for GasTeam root or any registered running project.
+  - Controls schedule cadence (Nightly, Continuous CI/CD, Instant P0 Blocker fixes).
+  - Enforces production downtime tolerance (0m, 5m, 15m, 30m, 60m) with candidate worktree quarantine and operator escalation.
+  - Dynamically synthesizes ready-to-use agent prompts, crontab commands, systemd unit templates, and CI/CD steps with one-click clipboard copying.
+
