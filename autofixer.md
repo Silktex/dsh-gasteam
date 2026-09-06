@@ -30,6 +30,9 @@ The agent must respect the following environment invariants and project boundari
     pnpm install --frozen-lockfile
     ```
   - Worktrees share the canonical `.git` object database while maintaining independent indices, checkouts, and local dependencies.
+  - **Convergence & Merge Sequence**:
+    - While other agents work on separate tracks (e.g. Dark Factory on `master`), the Autofixer work remains isolated in `/home/dsh/projects/gasteam-autofixer` on branch `feat/autofixer`.
+    - Merging `feat/autofixer` into `master` is registered as the final integration task in `docs/worklist.md` and `handoff.md` to be executed once active track work freezes and passes qualification.
 
 - **Authentication & Access Model**:
   - **Headless Mode (`pnpm dsh --profile headless`)**: Runs with full process-local host authority. No browser login, cookie, or API token is required. This is the recommended mode for scheduled cron runners.
