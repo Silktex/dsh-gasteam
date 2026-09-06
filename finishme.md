@@ -307,16 +307,16 @@ Update this section at each completed slice and before yielding. Checkboxes abov
 Continuation fields:
 
 - Active goal identifier/objective: existing active thread goal `/home/dsh/projects/gasteam/finishme.md`; no token budget.
-- Current milestone and acceptance slice: all M0–M11 requirements and the final acceptance matrix have evidence. Final corrective publication verification completes this execution.
-- Last completed slice: fast external output and birth-identity capture, deterministic missing-executable/retry acceptance, standalone packed release, and exact published CI.
-- Red evidence: final CI19cf882 exposed lost fast-launch stderr; CI80d6001 exposed birth-identity capture after child reaping. Deterministic regressions and corrections are recorded in completion evidence.
-- Green evidence and exact commands: 6c30f5b passed exact CI34006045928: frozen install, docs, build, types, regular host/client tests, 21 process acceptance scenarios, installed CLI smoke, independent packed release and legacy upgrade/restore. Receipt /var/tmp/gasteam-ci-6c30f5b.json.
-- Changed files and commit: implementation published through 6c30f5b27184362ea64208aacb0fe942f929d83f with successful exact CI. This documentation checkpoint records completion. Unrelated docs/README.md, darkfactory.md, docs/worklist.md and pending.md remain untouched.
+- Current milestone and acceptance slice: complete. All M0–M11 requirements and the final acceptance matrix have evidence, and the final corrective publication passed exact-commit CI.
+- Last completed slice: overflow/close receipt and input-pipe fault correction, exact corrective CI, and current-HEAD documentation CI.
+- Red evidence: CI19cf882 exposed lost fast-launch stderr; CI80d6001 exposed birth-identity capture after child reaping; CI9f3c5fe exposed the exited-child cancellation receipt race. Deterministic regressions and corrections are recorded in completion evidence.
+- Green evidence and exact commands: corrective commit a67e716 passed exact CI34006610442, and current-HEAD documentation commit 07f9d7a passed exact CI34008410193. Both ran frozen install, docs, build, types, regular host/client tests, process acceptance, installed CLI smoke, and independent packed release/legacy upgrade validation.
+- Changed files and commit: implementation and corrective publication are complete through a67e71651aabe7b930dcbc5503aa0c7e553e118e; the succeeding documentation checkpoint is 07f9d7a8881b8beeebded45d97daca9515818283. Unrelated docs/README.md, darkfactory.md and docs/worklist.md remain untouched.
 - Open decisions/constraints: uncertain ownership retains capacity; retention does not prove external ownership, and interrupted cleanup is not retried automatically. Batch worktrees/journals are retained. Unsupported external operations remain explicit. See completion evidence for bounded-history and post-promotion verification limits.
 - External blockers: none. Deleted local work has been reconstructed and validated. Real authenticated external task and restart/cancel evidence are retained.
-- Next concrete action: verify CI for the final overflow/close corrective checkpoint, then close the completed goal. Subsequent feature or production deployment work requires a new request.
-- Release actions still required: none for the implemented release after final corrective CI. Production installation/restart and future public registry publication were not requested. Disposable validation does not claim user-service migration; the profile incident and narrow correction remain documented.
-- Previous goal-turn classification: progress — all implementation and release acceptance passed exact CI; final documentation publication verification is the last step.
+- Next concrete action: none for this goal. Subsequent feature or production deployment work requires a new request.
+- Release actions still required: none for the implemented release. Corrective commit `a67e71651aabe7b930dcbc5503aa0c7e553e118e` passed exact CI34006610442, and current-HEAD documentation commit `07f9d7a8881b8beeebded45d97daca9515818283` passed exact CI34008410193. Production installation/restart and future public registry publication were not requested. Disposable validation does not claim user-service migration; the profile incident and narrow correction remain documented.
+- Previous goal-turn classification: complete — all implementation, release acceptance, corrective publication, and current-HEAD documentation checks passed exact CI.
 
 ## Research references
 
