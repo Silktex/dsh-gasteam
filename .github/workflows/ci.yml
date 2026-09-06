@@ -31,3 +31,4 @@ jobs:
       - run: pnpm test:acceptance
       - run: pnpm test:smoke
       - run: GASTEAM_RELEASE_ROOT=/var/tmp pnpm test:release
+      - run: DSH_TEAM_TEST_ROOT=/var/tmp pnpm test:distribution
