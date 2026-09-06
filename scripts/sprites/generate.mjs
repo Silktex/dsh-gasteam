@@ -25,9 +25,19 @@
  * lead walk (64x64, fps 6): same leg/bob scheme as the teammate walk, plus a
  *   tail sway — the parchment tail tip shifts 1px right/left on the two bob
  *   frames.
+ * teammate state sheets (48x48, fps 6, M3): DERIVED from teammateIdle frame 0
+ *   via deterministic transforms — blocked adds a swinging bronze pocket-watch
+ *   (pendulum left/center/right/center) and a tapping toe; error raises both
+ *   arms (waving) and flashes an oxide alarm above the head (frames 0,2 on);
+ *   done raises both arms, jumps 1px on frames 1,3, and scatters h/b/r
+ *   confetti (positions differ per frame, >= 5 pixels per frame).
+ * reviewer/coordinator (48x48, fps 6, M3): NEW base bodies authored below;
+ *   their walk sheets derive from their idle frame 0 with the same leg/bob
+ *   scheme as the teammate walk plus a satchel/tail sway on the bob frames.
  *
- * Big heads (~40% height), 1px ink outlines, warm top-left lamplight highlight
- * pixels. Re-running this script leaves the generated files byte-identical.
+ * Big heads (~40-45% height), 1px ink outlines, warm top-left lamplight
+ * highlight pixels. Re-running this script leaves the generated files
+ * byte-identical.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -985,6 +995,834 @@ const TEAMMATE_WORK = [
 ]
 
 // ---------------------------------------------------------------------------
+// M3 archetype base bodies (authored here, like lead/teammate):
+// reviewer (48x48, fps 6): badger-INSPIRED clerk — darkwood ears/eye-stripes
+//   over a steel face with a surface badger mask, tint clerk vest with a
+//   surface belly patch, bronze satchel on a cross-chest strap, steel trousers,
+//   darkwood boots. Idle: belly breathing + one blink frame + mouth frame.
+//   Work: writing on a parchment ledger with a steel pen (pen writes/lifts at
+//   alternating x positions).
+// coordinator (48x48, fps 6): dog-INSPIRED helper — copper fur, darkwood
+//   floppy ears, brass cap with a brim, surface muzzle and chest patch, copper
+//   legs, darkwood boots, wagging tail. Idle: chest breathing + one blink
+//   frame + tail-tip frame. Work: stamping a form with a brass stamp
+//   (raised high / pressed / raised low / pressed with elbows out).
+// Big heads (~45% height), 1px ink outlines, warm top-left highlight pixels.
+// ---------------------------------------------------------------------------
+
+const REVIEWER_IDLE = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttttttttttttttttzztwwwX.........',
+    '.........XwtttttttttttttttttzztttttwwwX.........',
+    '.........XwtttttttttttttzztttttttttwwwX.........',
+    '.........XwttttttttPzzPPPPPPPPPPPttwwwX.........',
+    '.........XwtttttzzPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '......XzzzXXttttttPPPPPPPPPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttttttttttttttttzztwwwX.........',
+    '.........XwtttttttttttttttttzztttttwwwX.........',
+    '.........XwtttttttttttttzztttttttttwwwX.........',
+    '.........XwttttttttPzzPPPPPPPPPPPttwwwX.........',
+    '.........XwtttttzzPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '......XzzzXXtttttPPPPPPPPPPPPPPPPPtttX..........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttttttttttttttttzztwwwX.........',
+    '.........XwtttttttttttttttttzztttttwwwX.........',
+    '.........XwtttttttttttttzztttttttttwwwX.........',
+    '.........XwttttttttPzzPPPPPPPPPPPttwwwX.........',
+    '.........XwtttttzzPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '......XzzzXXttttttPPPPPPPPPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXpPXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttttttttttttttttzztwwwX.........',
+    '.........XwtttttttttttttttttzztttttwwwX.........',
+    '.........XwtttttttttttttzztttttttttwwwX.........',
+    '.........XwttttttttPzzPPPPPPPPPPPttwwwX.........',
+    '.........XwtttttzzPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPttwwwX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '.........XwpppttttPPPPPPPPPPPPPPPtppppX.........',
+    '......XzzzXXttttttPPPPPPPPPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+const REVIEWER_WORK = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttttttwwwwwwttttzztwwwX.........',
+    '.........XwtttttttttwwttttttzztttttwwwX.........',
+    '........XXXXXXXXXXXswwXXXXPPPPPPPttwwwX.........',
+    '........XhpppppppppspppppXPPPPPPPttwwwX.........',
+    '........XpppwwwwpppspppppXPPPPPPPttwwwX.........',
+    '........XppppppppppspppppXPPPPPPPttwwwX.........',
+    '........XppwwwwwpppXpppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XXXXXXXXXXXXXXXXXXPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwtttttttttttwwwwwwwwtttwwwX.........',
+    '.........XwwtttttttttttswwttttttzztwwwX.........',
+    '.........XwtttttttttttstttttzztttttwwwX.........',
+    '........XXXXXXXXXXXXXsXXXXPPPPPPPttwwwX.........',
+    '........XhppppppppppXppppXPPPPPPPttwwwX.........',
+    '........XpppwwwwpppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppwwwwwpppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XXXXXXXXXXXXXXXXXXPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwttttttttttttttttttttttwwwX.........',
+    '.........XwwttttttwwwwwwttttttttzztwwwX.........',
+    '.........XwtttttwwttttttttttzztttttwwwX.........',
+    '........XXXXXXXswwXXXXXXXXPPPPPPPttwwwX.........',
+    '........XhpppppspppppppppXPPPPPPPttwwwX.........',
+    '........XpppwwwspppppppppXPPPPPPPttwwwX.........',
+    '........XppppppspppppppppXPPPPPPPttwwwX.........',
+    '........XppwwwwXpppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XXXXXXXXXXXXXXXXXXPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '...........XX......................XX...........',
+    '..........XhwX....................XwwX..........',
+    '.........XwwwwX..................XwwwwX.........',
+    '.........XwwwwXXXXXXXXXXXXXXXXXXXXwwwwX.........',
+    '.........XwhsssssssssssssssssssssssssswX........',
+    '.........XssssssssssssssssssssssssssssssX.......',
+    '.........XsssssPPPPPPPssssPPPPPPPssssssX........',
+    '.........XsssPPPPPPPPPPssPPPPPPPPPPssssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPwwwPPPssssX........',
+    '.........XsPPPwXwPPPPPPPPPPPPPPwXwPPPssX........',
+    '.........XsPPPwwwPPPPPPPPPPPPPPwwwPPPssX........',
+    '.........XssPPPwPPPPPPPPPPPPPPPPwPPPsssX........',
+    '.........XssPPPPPPPPPPXXPPPPPPPPPPssssX.........',
+    '.........XssPPPPPPPPPXXXXPPPPPPPPPssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '.........XsssPPPPPPPPXppXPPPPPPPPsssssX.........',
+    '..........XsssPPPPPPPXXPPPPPPPPPPPssssX.........',
+    '..........XssssPPPPPPPPPPPPPPPPPPPsssX..........',
+    '...........XXsssssPPPPPPPPPPPPPPPPsssXX.........',
+    '............XssssssPPPPPPPPPPPPPPPsssX..........',
+    '.............XssssssPPPPPPPPPPPPPPssXX..........',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhwwtttttttwwwwwwwwtttttttwwwX.........',
+    '.........XwwtttttttswwttttttttttzztwwwX.........',
+    '.........XwtttttttstttttttttzztttttwwwX.........',
+    '........XXXXXXXXXsXXXXXXXXPPPPPPPttwwwX.........',
+    '........XhppppppXppppppppXPPPPPPPttwwwX.........',
+    '........XpppwwwwpppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppwwwwwpppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XppppppppppppppppXPPPPPPPttwwwX.........',
+    '........XXXXXXXXXXXXXXXXXXPPPPPPPtttX...........',
+    '.....XzzzzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzbzzX.XwwwwwwwwzzzzwwwwwwwwX.............',
+    '.....XzzzzzzX.XXsssssssXXsssssssXX..............',
+    '.....XzzzzzzX..XsssssssXXsssssssX...............',
+    '......XXXXX....XsssssssXXsssssssX...............',
+    '...............XsssssssXXsssssssX...............',
+    '..............XXsssssssXXsssssssXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+const COORDINATOR_IDLE = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhccttttttttttttttttttttttcccX.........',
+    '.........XccttttttttttttPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XcttttttttPPPPPPPPPPPPttttccX..........',
+    '.........XctttttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '..........XXttttttPPPPPPPPPPPPPPttttX...........',
+    '.............XccccccccbbbbccccccccX..XcX........',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhccttttttttttttttttttttttcccX.........',
+    '.........XccttttttttttttPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XcttttttttPPPPPPPPPPPPttttccX..........',
+    '.........XctttttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '..........XXtttttPPPPPPPPPPPPPPPPtttX...........',
+    '.............XccccccccbbbbccccccccX..XcX........',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhccttttttttttttttttttttttcccX.........',
+    '.........XccttttttttttttPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XcttttttttPPPPPPPPPPPPttttccX..........',
+    '.........XctttttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '..........XXttttttPPPPPPPPPPPPPPttttX...........',
+    '.............XccccccccbbbbccccccccX..XcX........',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhttttttttttttttttttXXXX...........',
+    '.........XhccttttttttttttttttttttttcccX.........',
+    '.........XccttttttttttttPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XcttttttttPPPPPPPPPPPPttttccX..........',
+    '.........XctttttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtttccX..........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '.........XcpppttttPPPPPPPPPPPPPPtcppppX.........',
+    '..........XXttttttPPPPPPPPPPPPPPttttX...........',
+    '.............XccccccccbbbbccccccccX..XcX........',
+    '.............XccccccccbbbbccccccccX...XchX......',
+    '..............XXcccccccXXcccccccXX....XccX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+const COORDINATOR_WORK = [
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XcccccppPPppPPPPPPPccccccX..........',
+    '.............XcccccPwwPPccPPPPPccccX............',
+    '..........XXXXhtccttwwttcctttttttXXXX...........',
+    '.........XhcctttttXbbbbXtttttttttttcccX.........',
+    '.........XccttttttXbbbbXPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPtccX...........',
+    '.........XhpppppppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppwwwwppppXPPPPPPtccX...........',
+    '.........XppXrXpppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppppppppppXPPPPPPtccX...........',
+    '.........XpppwwwwwppppppppXPPPPPPtccX...........',
+    '.........XppppppppppppppppXPPPPPPttX............',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPttX............',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhtttppttpptttttttttXXXX...........',
+    '.........XhcctttccttwwttcctttttttttcccX.........',
+    '.........XccttttccttwwttcctttttttttccX..........',
+    '.........XctttttttXbbbbXPPPPtttttttccX..........',
+    '.........XctttttttXbbbbXPPPPPPtttttccX..........',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPtccX...........',
+    '.........XhpppppppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppwwwwppppXPPPPPPtccX...........',
+    '.........XppXrXpppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppppppppppXPPPPPPtccX...........',
+    '.........XpppwwwwwppppppppXPPPPPPtccX...........',
+    '.........XppppppppppppppppXPPPPPPttX............',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPttX............',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccppPPppPPPPPPPPcccccXX.........',
+    '............XccccccPwwPPccPPPPPccccccX..........',
+    '.............XcccccPwwPPccPPPPPccccX............',
+    '..........XXXXhtttXbbbbXtttttttttXXXX...........',
+    '.........XhcctttttXbbbbXtttttttttttcccX.........',
+    '.........XccttttttttttttPPtttttttttccX..........',
+    '.........XctttttttttttPPPPPPtttttttccX..........',
+    '.........XctttttttttPPPPPPPPPPtttttccX..........',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPtccX...........',
+    '.........XhpppppppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppwwwwppppXPPPPPPtccX...........',
+    '.........XppXrXpppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppppppppppXPPPPPPtccX...........',
+    '.........XpppwwwwwppppppppXPPPPPPtccX...........',
+    '.........XppppppppppppppppXPPPPPPttX............',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPttX............',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+  [
+    '................................................',
+    '................................................',
+    '................................................',
+    '................................................',
+    '..................XbbbbbbbbbbX..................',
+    '................XhbbbbbbbbbbbbX.................',
+    '...............XbbbbbbbbbbbbbbbX................',
+    '.............XbbbbbbbbbbbbbbbbbbbX..............',
+    '.........XwwXXXXXXXXXXXXXXXXXXXXXXXXwwX.........',
+    '........XwwhcccccccccccccccccccccccccwwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwcccccccccccccccccccccccccccwwX.......',
+    '........XwwccccXcccccccccccccXccccccccwwX.......',
+    '........XwwXcccccccccccPPPPccccccccccXwwX.......',
+    '........XXccccccccccPPPPPPPPPPccccccccXX........',
+    '........XccccccccccPPPPXXPPPPcccccccccccX.......',
+    '........XcccccccccPPPPPXXXXPPPPPccccccccX.......',
+    '.........XccccccccPPPPPPXppXPPPPccccccccX.......',
+    '.........XccccccccPPPPPPPXppXPPPccccccccX.......',
+    '.........XccccccccPPPPPPPPXPPPPPcccccccXX.......',
+    '..........XcccccccPPPPPPPPPPPPPPccccccX.........',
+    '...........XXcccccPPPPPPPPPPPPPPcccccXX.........',
+    '............XccccccPPPPPPPPPPPPccccccX..........',
+    '.............XcccccPPPPPPPPPPPPccccX............',
+    '..........XXXXhccppttttppccttttttXXXX...........',
+    '.........XhcctttccttwwttcctttttttttcccX.........',
+    '.........XccttttttttwwttPPtttttttttccX..........',
+    '.........XctttttttXbbbbXPPPPtttttttccX..........',
+    '.........XctttttttXbbbbXPPPPPPtttttccX..........',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPtccX...........',
+    '.........XhpppppppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppwwwwppppXPPPPPPtccX...........',
+    '.........XppXrXpppppppppppXPPPPPPtccX...........',
+    '.........XppXXXpppppppppppXPPPPPPtccX...........',
+    '.........XpppwwwwwppppppppXPPPPPPtccX...........',
+    '.........XppppppppppppppppXPPPPPPttX............',
+    '.........XXXXXXXXXXXXXXXXXXPPPPPPttX............',
+    '.............XccccccccbbbbccccccccX...XcX.......',
+    '..............XXcccccccXXcccccccXX....XchX......',
+    '...............XcccccccXXcccccccX....XcccX......',
+    '...............XcccccccXXcccccccX...XXXX........',
+    '...............XcccccccXXcccccccX...............',
+    '..............XXcccccccXXcccccccXX..............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '.............XwwwwwwwwwXXwwwwwwwwwX.............',
+    '..............XXXXXXXXX..XXXXXXXXX..............',
+  ],
+]
+
+// ---------------------------------------------------------------------------
 // Walk sheets (M2): derived from idle frame 0 via deterministic pixel
 // transforms — the walk art keeps the idle head/torso and re-poses the legs.
 // ---------------------------------------------------------------------------
@@ -1099,6 +1937,152 @@ const TEAMMATE_WALK = buildTeammateWalk(TEAMMATE_IDLE[0])
 const LEAD_WALK = buildLeadWalk(LEAD_IDLE[0])
 
 // ---------------------------------------------------------------------------
+// M3 derivations: reviewer/coordinator walks (same 48px leg/bob scheme) and
+// the teammate blocked/error/done state sheets — all deterministic transforms
+// of the archetype's idle frame 0 plus small stamped additions.
+// ---------------------------------------------------------------------------
+
+/**
+ * Overlay a small pixel map onto a copy of `frame` at (top, left); '.' cells
+ * in the patch leave the base pixel untouched.
+ */
+function stamp(frame, top, left, rows) {
+  const out = frame.slice()
+  rows.forEach((patch, dy) => {
+    const cells = out[top + dy].split('')
+    for (let dx = 0; dx < patch.length; dx += 1) {
+      if (patch[dx] !== '.') cells[left + dx] = patch[dx]
+    }
+    out[top + dy] = cells.join('')
+  })
+  return out
+}
+
+/**
+ * Generic 48px walk builder for archetypes whose legs/boots share the
+ * teammate's geometry (rows 39-47, legs at cols 14-23/24-33): left leg
+ * forward / legs together / right leg forward / together, with the two bob
+ * frames distinguished by a 1px sway of the given decorative span (post-bob
+ * coordinates) — reviewer sways its satchel bottom, coordinator its tail.
+ */
+function buildWalk48(base, sway) {
+  const leftForward = withRows(base, 39, [
+    shiftSpan(base[39], 14, 10, -1), // left leg top
+    shiftSpan(base[40], 15, 9, -1),  // left leg
+    shiftSpan(base[41], 15, 9, -1),
+    shiftSpan(base[42], 15, 9, -1),
+    shiftSpan(base[43], 14, 10, -1), // left leg bottom
+    shiftSpan(base[44], 13, 11, -1), // left boot
+    shiftSpan(base[45], 13, 11, -1),
+    shiftSpan(base[46], 13, 11, -1),
+    shiftSpan(base[47], 14, 9, -1),  // left sole
+  ])
+  const rightForward = withRows(base, 39, [
+    shiftSpan(base[39], 24, 10, 1),  // right leg top
+    shiftSpan(base[40], 24, 9, 1),   // right leg
+    shiftSpan(base[41], 24, 9, 1),
+    shiftSpan(base[42], 24, 9, 1),
+    shiftSpan(base[43], 24, 10, 1),  // right leg bottom
+    shiftSpan(base[44], 24, 11, 1),  // right boot
+    shiftSpan(base[45], 24, 11, 1),
+    shiftSpan(base[46], 24, 11, 1),
+    shiftSpan(base[47], 25, 9, 1),   // right sole
+  ])
+  const bobbed = bob(base, 48)
+  const swayRight = withRows(bobbed, sway.row, [shiftSpan(bobbed[sway.row], sway.start, sway.len, 1)])
+  const swayLeft = withRows(bobbed, sway.row, [shiftSpan(bobbed[sway.row], sway.start, sway.len, -1)])
+  return [leftForward, swayRight, rightForward, swayLeft]
+}
+
+const REVIEWER_WALK = buildWalk48(REVIEWER_IDLE[0], { row: 42, start: 6, len: 5 }) // satchel bottom sways
+const COORDINATOR_WALK = buildWalk48(COORDINATOR_IDLE[0], { row: 41, start: 37, len: 5 }) // tail sways
+
+/** Raised-arm stamp maps shared by teammateError and teammateDone. */
+const ARM_UP_L = ['XppX', 'XmmX', 'XmmX', 'XmmX', 'XmmX', 'XXXX'] // anchored (20,5)
+const ARM_UP_R = ['XppX', 'XmmX', 'XmmX', 'XmmX', 'XmmX', 'XXXX'] // anchored (20,39)
+const ARM_OUT_L = ['XppX.', 'XmmX.', 'XmmX.', 'XmmX.', 'XmmX.', '.XmXX', '..XXX'] // anchored (19,4)
+const ARM_OUT_R = ['.XppX', '.XmmX', '.XmmX', '.XmmX', '.XmmX', 'XXmX.', 'XXX..'] // anchored (19,39)
+
+/** Base for the raised-arm state sheets: resting paws fold into the torso. */
+function raisedArmsBase(base) {
+  let out = base
+  for (const row of [33, 34, 35]) {
+    out = stamp(out, row, 10, ['tttt'])
+    out = stamp(out, row, 34, ['tttt'])
+  }
+  return out
+}
+
+/**
+ * teammateBlocked (48x48, 4f @6fps): waiting pose (idle body) + a bronze
+ * pocket-watch swinging on a chain below the right paw — pendulum
+ * left/center/right/center — while the left toe taps (ground/up/ground/mid).
+ */
+function buildTeammateBlocked(base) {
+  const WATCH = ['.XXX.', 'XzzzX', 'XzhzX', 'XzzzX', '.XXX.']
+  const frame = (watchLeft, chainTop, chainBottom, toe) => {
+    let out = stamp(base, 37, chainTop, ['z'])
+    out = stamp(out, 38, chainBottom, ['z'])
+    out = stamp(out, 39, watchLeft, WATCH)
+    return toe === null ? out : stamp(out, toe[0], toe[1], [toe[2]])
+  }
+  return [
+    frame(30, 36, 35, [47, 13, 'X']), // watch left, toe taps the ground
+    frame(34, 36, 36, [44, 12, 'r']), // watch center, toe flicks up
+    frame(38, 36, 37, [47, 13, 'X']), // watch right, toe taps the ground
+    frame(34, 36, 36, [46, 12, 'r']), // watch center, toe mid-tap
+  ]
+}
+
+/**
+ * teammateError (48x48, 4f @6fps): both arms raised and waving (up on even
+ * frames, angled out on odd frames; frame 3 adds a paw flick so frames 1/3
+ * stay distinct) + an oxide alarm flashing above the head (frames 0,2 on —
+ * frame 2 pulses a highlight pixel — 1,3 off).
+ */
+function buildTeammateError(base) {
+  const ALARM = ['..XX..', '.XrrX.', 'XrrrrX'] // anchored (1,21)
+  const ALARM_HI = ['..XX..', '.XrhX.', 'XrrrrX']
+  const body = raisedArmsBase(base)
+  const frames = []
+  for (let index = 0; index < 4; index += 1) {
+    let out = index % 2 === 0
+      ? stamp(stamp(body, 20, 5, ARM_UP_L), 20, 39, ARM_UP_R)
+      : stamp(stamp(body, 19, 4, ARM_OUT_L), 19, 39, ARM_OUT_R)
+    if (index === 0) out = stamp(out, 1, 21, ALARM)
+    if (index === 2) out = stamp(out, 1, 21, ALARM_HI)
+    if (index === 3) out = stamp(stamp(out, 18, 5, ['p']), 18, 42, ['p'])
+    frames.push(out)
+  }
+  return frames
+}
+
+/**
+ * teammateDone (48x48, 4f @6fps): celebration — both arms up, the body jumps
+ * 1px on frames 1,3, and h/b/r confetti pixels hang in the air (6 per frame,
+ * positions differ per frame).
+ */
+function buildTeammateDone(base) {
+  const CONFETTI = [
+    [[0, 10, 'h'], [1, 15, 'b'], [0, 30, 'r'], [2, 35, 'h'], [1, 25, 'b'], [3, 6, 'r']],
+    [[0, 12, 'r'], [2, 17, 'h'], [1, 32, 'b'], [3, 36, 'r'], [0, 26, 'h'], [2, 8, 'b']],
+    [[1, 9, 'b'], [0, 18, 'r'], [2, 28, 'h'], [1, 34, 'r'], [3, 24, 'b'], [0, 38, 'h']],
+    [[2, 11, 'r'], [0, 14, 'h'], [1, 29, 'b'], [3, 33, 'h'], [2, 22, 'r'], [1, 5, 'b']],
+  ]
+  const jump = frame => [...frame.slice(1), '.'.repeat(48)]
+  const body = stamp(stamp(raisedArmsBase(base), 20, 5, ARM_UP_L), 20, 39, ARM_UP_R)
+  return CONFETTI.map((pixels, index) => {
+    let out = index % 2 === 1 ? jump(body) : body
+    for (const [row, col, char] of pixels) out = stamp(out, row, col, [char])
+    return out
+  })
+}
+
+const TEAMMATE_BLOCKED = buildTeammateBlocked(TEAMMATE_IDLE[0])
+const TEAMMATE_ERROR = buildTeammateError(TEAMMATE_IDLE[0])
+const TEAMMATE_DONE = buildTeammateDone(TEAMMATE_IDLE[0])
+
+// ---------------------------------------------------------------------------
 // Sheet assembly, validation, and deterministic emission.
 // ---------------------------------------------------------------------------
 
@@ -1118,6 +2102,25 @@ const SHEETS = [
       ['teammateIdle', { name: 'teammate.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_IDLE }],
       ['teammateWork', { name: 'teammate.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WORK }],
       ['teammateWalk', { name: 'teammate.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_WALK }],
+      ['teammateBlocked', { name: 'teammate.blocked', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_BLOCKED }],
+      ['teammateError', { name: 'teammate.error', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_ERROR }],
+      ['teammateDone', { name: 'teammate.done', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: TEAMMATE_DONE }],
+    ],
+  },
+  {
+    file: 'reviewer.ts',
+    exports: [
+      ['reviewerIdle', { name: 'reviewer.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_IDLE }],
+      ['reviewerWork', { name: 'reviewer.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_WORK }],
+      ['reviewerWalk', { name: 'reviewer.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: REVIEWER_WALK }],
+    ],
+  },
+  {
+    file: 'coordinator.ts',
+    exports: [
+      ['coordinatorIdle', { name: 'coordinator.idle', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_IDLE }],
+      ['coordinatorWork', { name: 'coordinator.work', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_WORK }],
+      ['coordinatorWalk', { name: 'coordinator.walk', frameWidth: 48, frameHeight: 48, fps: 6, legend: LEGEND, frames: COORDINATOR_WALK }],
     ],
   },
 ]
@@ -1154,4 +2157,4 @@ for (const { file, exports } of SHEETS) {
   writeFileSync(join(outDir, file), emit(exports))
   console.log(`wrote ${file} (${exports.map(([name]) => name).join(', ')})`)
 }
-console.log('generate: 6 sheets written')
+console.log('generate: 15 sheets written')
