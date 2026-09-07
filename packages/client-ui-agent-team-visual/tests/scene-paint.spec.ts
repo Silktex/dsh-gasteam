@@ -13,10 +13,18 @@ interface RecordedRect {
   readonly style: string
 }
 
+interface RecordedText {
+  readonly text: string
+  readonly x: number
+  readonly y: number
+  readonly style: string
+}
+
 interface Stub {
   readonly ctx: CanvasRenderingContext2D
   readonly rects: RecordedRect[]
   readonly texts: string[]
+  readonly textCalls: RecordedText[]
   readonly arcs: number
   readonly strokes: number
 }
@@ -25,6 +33,7 @@ interface Stub {
 function stubContext(): Stub {
   const rects: RecordedRect[] = []
   const texts: string[] = []
+  const textCalls: RecordedText[] = []
   let arcs = 0
   let strokes = 0
   const ctx = {
@@ -38,18 +47,22 @@ function stubContext(): Stub {
     fillRect(x: number, y: number, w: number, h: number): void {
       rects.push({ x, y, w, h, style: this.fillStyle })
     },
-    fillText(text: string): void { texts.push(text) },
+    fillText(text: string, x: number, y: number): void {
+      texts.push(text)
+      textCalls.push({ text, x, y, style: this.fillStyle })
+    },
     save(): void {},
     restore(): void {},
     beginPath(): void {},
     arc(): void { arcs += 1 },
+    ellipse(): void {},
     fill(): void {},
     moveTo(): void {},
     lineTo(): void {},
     stroke(): void { strokes += 1 },
   } as unknown as CanvasRenderingContext2D
   return {
-    ctx, rects, texts,
+    ctx, rects, texts, textCalls,
     get arcs() { return arcs },
     get strokes() { return strokes },
   }
@@ -76,6 +89,56 @@ describe('paintScene', () => {
     expect(stub.strokes).toBeGreaterThan(0) // floor grid lines
     expect(stub.arcs).toBeGreaterThanOrEqual(2 * (8 + 2)) // two gears: 8 teeth + ring + hub each
     expect(stub.texts).toEqual(['Project alpha'])
+  })
+
+  it('pins the plaque to the fixed top band (y = 12, height 72)', () => {
+    const stub = stubContext()
+    paintScene(stub.ctx, 640, 480, 'Project alpha')
+    const plaque = stub.textCalls.find(call => call.text === 'Project alpha')
+    expect(plaque).toBeDefined()
+    // Text is vertically centered in the 72px band starting at y = 12.
+    expect((plaque as RecordedText).y).toBeCloseTo(12 + 36, 5)
+    expect((plaque as RecordedText).x).toBeCloseTo(320, 5)
+  })
+
+  it('switches the background and scene fills to the dark theme', () => {
+    const stub = stubContext()
+    paintScene(stub.ctx, 100, 100, 'p', undefined, 0, { theme: 'dark' })
+    expect(stub.rects[0]).toEqual({ x: 0, y: 0, w: 100, h: 100, style: palette.nightBg })
+    // Dark desks use surfaceDark tops.
+    paintScene(stub.ctx, 100, 100, 'p', [agentAt(0.1, 0.4)], 0, { theme: 'dark' })
+    const deskTops = stub.rects.filter(rect => rect.style === palette.surfaceDark && rect.w === 110 && rect.h === 8)
+    expect(deskTops).toHaveLength(1)
+  })
+
+  it('renders the wanted-board with one poster per taskId', () => {
+    const stub = stubContext()
+    paintScene(stub.ctx, 640, 480, 'p', undefined, 0, { tasks: ['task-1', 'task-2'] })
+    expect(stub.texts).toContain('WANTED')
+    expect(stub.texts).toContain('task-1')
+    expect(stub.texts).toContain('task-2')
+  })
+
+  it('truncates wanted-board taskIds to 14 characters', () => {
+    const stub = stubContext()
+    const longId = 'task-abcdefghijklmno' // 20 chars
+    paintScene(stub.ctx, 640, 480, 'p', undefined, 0, { tasks: [longId] })
+    expect(stub.texts).toContain(longId.slice(0, 14))
+    expect(stub.texts).not.toContain(longId)
+  })
+
+  it('caps the wanted-board at 8 posters and renders a dash for an empty list', () => {
+    const full = stubContext()
+    const tasks = ['t1', 't2', 't3', 't4', 't5', 't6', 't7', 't8', 't9', 't10']
+    paintScene(full.ctx, 640, 480, 'p', undefined, 0, { tasks })
+    expect(full.texts).toContain('t8')
+    expect(full.texts).not.toContain('t9')
+    expect(full.texts).not.toContain('t10')
+
+    const empty = stubContext()
+    paintScene(empty.ctx, 640, 480, 'p', undefined, 0, { tasks: [] })
+    expect(empty.texts).toContain('WANTED')
+    expect(empty.texts).toContain('—')
   })
 
   it('works without agents or timeMs (M0 compatibility)', () => {

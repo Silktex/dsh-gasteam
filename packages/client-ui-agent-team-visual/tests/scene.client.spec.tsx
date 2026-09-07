@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { makeTranslate } from '../../../tests/support/translate.ts'
@@ -119,6 +119,48 @@ describe('VisualAgentsAction', () => {
     fireEvent.click(screen.getByRole('button', { name: zh.refresh }))
     expect(await screen.findByText(zh['dashboard.stale'])).toBeTruthy()
     expect(screen.getByRole('combobox')).toHaveProperty('value', '')
+  })
+
+  it('mirrors the reconciled roster as a visually-hidden aria-live list', async () => {
+    render(<VisualAgentsAction {...props(actions())} />)
+    fireEvent.click(screen.getByRole('button', { name: zh.trigger }))
+    await screen.findByRole('combobox')
+    const roster = await screen.findByRole('list', { name: zh['a11y.roster'] })
+    expect(roster.getAttribute('aria-live')).toBe('polite')
+    const items = within(roster).getAllByRole('listitem')
+    expect(items).toHaveLength(1)
+    // attempt-1 is phase active → working; label is projectId/taskId.
+    expect(items[0].textContent).toBe(`project-a/task-1 — ${zh['state.working']}`)
+  })
+
+  it('updates the roster mirror only on refresh (state labels follow the latest reconcile)', async () => {
+    let current = dashboard
+    const load = vi.fn(() => Promise.resolve({ ok: true as const, value: current }))
+    render(<VisualAgentsAction {...props(actions({ load }))} />)
+    fireEvent.click(screen.getByRole('button', { name: zh.trigger }))
+    const roster = await screen.findByRole('list', { name: zh['a11y.roster'] })
+    expect(within(roster).getAllByRole('listitem')[0].textContent)
+      .toBe(`project-a/task-1 — ${zh['state.working']}`)
+    // Next reconcile: attempt-1 is terminal → done.
+    current = {
+      ...dashboard,
+      attempts: [{ ...dashboard.attempts[0], phase: 'terminal' }],
+    }
+    fireEvent.click(screen.getByRole('button', { name: zh.refresh }))
+    await within(roster).findByText(`project-a/task-1 — ${zh['state.done']}`)
+    expect(within(roster).getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  it('detects the scene theme without matchMedia (jsdom) and still paints', async () => {
+    const { container } = render(<VisualAgentsAction {...props(actions())} />)
+    fireEvent.click(screen.getByRole('button', { name: zh.trigger }))
+    await screen.findByRole('dialog', { name: zh.title })
+    fireEvent.click(screen.getByRole('switch', { name: zh['toggle.off'], checked: false }))
+    expect(container.querySelector('canvas')).not.toBeNull()
+    // jsdom has no window.matchMedia → theme detection falls back to light;
+    // the theme-aware paint path must be a safe no-op without a 2D context.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)) })
+    expect(screen.getByRole('dialog', { name: zh.title })).toBeTruthy()
   })
 
   it('shows a Remote carrier failure unchanged', async () => {
