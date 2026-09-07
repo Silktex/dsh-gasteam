@@ -5,6 +5,8 @@ import { palette } from './assets/palette.ts'
 import { drawSprite, pickFrame, type SpriteSheet } from '../engine/sprites.ts'
 import { startLoop } from '../engine/loop.ts'
 import type { DeskSlot } from '../scenes/layout.ts'
+import { paintAmbient } from '../scenes/ambient.ts'
+import { resolveSceneTheme, type SceneTheme, type SceneThemeColors } from '../scenes/theme.ts'
 import css from './VisualAgentsAction.module.css'
 
 /** One actor-driven agent placement in the scene (normalized 0..1 coords). */
@@ -23,96 +25,127 @@ function spriteScale(sheet: SpriteSheet): number {
   return sheet.frameHeight >= 64 ? 1.5 : 2
 }
 
-/** Paint one simple desk: darkWood top with bronze legs, centered on the slot. */
+/** Paint one simple desk: themed top with themed legs, centered on the slot. */
 function paintDesk(
   ctx2d: CanvasRenderingContext2D,
   centerX: number,
   topY: number,
+  colors: SceneThemeColors,
 ): void {
   const deskWidth = 110
   const topHeight = 8
   const left = Math.round(centerX - deskWidth / 2)
   const top = Math.round(topY)
-  ctx2d.fillStyle = palette.darkWood
+  ctx2d.fillStyle = colors.deskTop
   ctx2d.fillRect(left, top, deskWidth, topHeight)
-  ctx2d.fillStyle = palette.bronze
+  ctx2d.fillStyle = colors.deskLeg
   ctx2d.fillRect(left + 6, top + topHeight, 8, 26)
   ctx2d.fillRect(left + deskWidth - 14, top + topHeight, 8, 26)
 }
 
-/** Paint one static gear silhouette: toothed ring with a parchment hub. */
-function paintGear(
-  ctx2d: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  radius: number,
-  color: string,
-): void {
-  ctx2d.save()
-  ctx2d.fillStyle = color
-  const teeth = 8
-  for (let index = 0; index < teeth; index += 1) {
-    const angle = (index / teeth) * Math.PI * 2
-    ctx2d.beginPath()
-    ctx2d.arc(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius, radius * 0.3, 0, Math.PI * 2)
-    ctx2d.fill()
-  }
-  ctx2d.beginPath()
-  ctx2d.arc(cx, cy, radius, 0, Math.PI * 2)
-  ctx2d.fill()
-  ctx2d.fillStyle = palette.parchment
-  ctx2d.beginPath()
-  ctx2d.arc(cx, cy, radius * 0.42, 0, Math.PI * 2)
-  ctx2d.fill()
-  ctx2d.restore()
-}
+/** Plaque top band: fixed y and height so it stays readable at any canvas height. */
+const PLAQUE_TOP_Y = 12
+const PLAQUE_HEIGHT = 72
 
-/** Paint the brass porthole-framed engraved plaque with rivets and centered copy. */
+/** Paint the brass porthole-framed engraved plaque pinned to the TOP band (M4). */
 function paintPlaque(
   ctx2d: CanvasRenderingContext2D,
   width: number,
-  height: number,
   plaqueText: string,
+  colors: SceneThemeColors,
 ): void {
   const plaqueWidth = Math.min(width * 0.62, 460)
-  const plaqueHeight = 72
   const x = (width - plaqueWidth) / 2
-  const y = (height - plaqueHeight) / 2
-  ctx2d.fillStyle = palette.brass
-  ctx2d.fillRect(x - 10, y - 10, plaqueWidth + 20, plaqueHeight + 20)
+  const y = PLAQUE_TOP_Y
+  ctx2d.fillStyle = colors.plaqueFrame
+  ctx2d.fillRect(x - 10, y - 10, plaqueWidth + 20, PLAQUE_HEIGHT + 20)
+  ctx2d.fillStyle = colors.plaqueFill
+  ctx2d.fillRect(x, y, plaqueWidth, PLAQUE_HEIGHT)
   ctx2d.fillStyle = palette.bronze
-  ctx2d.fillRect(x - 5, y - 5, plaqueWidth + 10, plaqueHeight + 10)
-  ctx2d.fillStyle = palette.surface
-  ctx2d.fillRect(x, y, plaqueWidth, plaqueHeight)
-  ctx2d.fillStyle = palette.darkWood
   for (const [rivetX, rivetY] of [
     [x - 10, y - 10],
     [x + plaqueWidth + 10, y - 10],
-    [x - 10, y + plaqueHeight + 10],
-    [x + plaqueWidth + 10, y + plaqueHeight + 10],
+    [x - 10, y + PLAQUE_HEIGHT + 10],
+    [x + plaqueWidth + 10, y + PLAQUE_HEIGHT + 10],
   ] as const) {
     ctx2d.beginPath()
     ctx2d.arc(rivetX, rivetY, 3, 0, Math.PI * 2)
     ctx2d.fill()
   }
-  ctx2d.fillStyle = palette.ink
+  ctx2d.fillStyle = colors.plaqueText
   ctx2d.font = '16px serif'
   ctx2d.textAlign = 'center'
   ctx2d.textBaseline = 'middle'
-  ctx2d.fillText(plaqueText, width / 2, height / 2, plaqueWidth - 16)
+  ctx2d.fillText(plaqueText, width / 2, PLAQUE_TOP_Y + PLAQUE_HEIGHT / 2, plaqueWidth - 16)
+}
+
+/** Maximum posters on the wanted-board (M4). */
+const BOARD_MAX_TASKS = 8
+/** TaskId poster truncation length (9px monospace fits the board). */
+const BOARD_TASK_CHARS = 14
+
+/**
+ * Paint the right-wall wanted-board (M4): bronze-framed board with a WANTED
+ * header and one parchment poster per taskId (max 8, truncated to 14 chars);
+ * an empty task list renders a single '—' poster.
+ */
+function paintWantedBoard(
+  ctx2d: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  tasks: readonly string[],
+  colors: SceneThemeColors,
+): void {
+  const boardWidth = Math.min(width * 0.2, 180)
+  const boardX = width * 0.88 - boardWidth / 2
+  const boardY = height * 0.3
+  const headerHeight = 22
+  const rowHeight = 18
+  const shown = tasks.slice(0, BOARD_MAX_TASKS)
+  const posters = shown.length === 0
+    ? ['—']
+    : shown.map(taskId => taskId.length > BOARD_TASK_CHARS ? taskId.slice(0, BOARD_TASK_CHARS) : taskId)
+  const boardHeight = headerHeight + posters.length * rowHeight + 8
+  ctx2d.fillStyle = palette.bronze
+  ctx2d.fillRect(boardX - 4, boardY - 4, boardWidth + 8, boardHeight + 8)
+  ctx2d.fillStyle = colors.boardFill
+  ctx2d.fillRect(boardX, boardY, boardWidth, boardHeight)
+  ctx2d.fillStyle = colors.boardText
+  ctx2d.font = 'bold 12px serif'
+  ctx2d.textAlign = 'center'
+  ctx2d.textBaseline = 'middle'
+  ctx2d.fillText('WANTED', boardX + boardWidth / 2, boardY + headerHeight / 2 + 2)
+  ctx2d.font = '9px monospace'
+  const posterWidth = boardWidth - 16
+  posters.forEach((posterText, index) => {
+    const posterY = boardY + headerHeight + index * rowHeight + 2
+    ctx2d.fillStyle = palette.parchment
+    ctx2d.fillRect(boardX + 8, posterY, posterWidth, rowHeight - 4)
+    ctx2d.fillStyle = palette.ink
+    ctx2d.fillText(posterText, boardX + boardWidth / 2, posterY + (rowHeight - 4) / 2)
+  })
+}
+
+/** Optional paint knobs (M4): theme selection and wanted-board task list. */
+export interface ScenePaintOptions {
+  readonly theme?: SceneTheme
+  readonly tasks?: readonly string[]
 }
 
 /**
- * Paint the factory-floor scene: background, gears, plaque, then each agent's
- * desk (at agent.desk) and animated sprite, bottom-centered at
- * (agent.x * width, agent.y * height) — the actor FSM places settled actors
- * 0.10 in front of the desk line, so no extra offset is applied here.
+ * Paint the factory-floor scene: themed background and grid, ambient
+ * decoration (gears/lamps/smoke/zeppelin), the top-band plaque, the optional
+ * right-wall wanted-board, then each agent's desk (at agent.desk) and
+ * animated sprite, bottom-centered at (agent.x * width, agent.y * height) —
+ * the actor FSM places settled actors 0.10 in front of the desk line, so no
+ * extra offset is applied here.
  * @param ctx2d - Canvas 2D context already scaled for the device pixel ratio.
  * @param width - CSS-pixel scene width.
  * @param height - CSS-pixel scene height.
  * @param plaqueText - engraved plaque copy (selected project id or the no-project notice).
  * @param agents - actor-driven agents to paint (M2); optional for M0 compatibility.
  * @param timeMs - wall-clock milliseconds driving `pickFrame` animation.
+ * @param options - M4 paint options; theme defaults to 'light', tasks omit the board.
  */
 export function paintScene(
   ctx2d: CanvasRenderingContext2D,
@@ -121,12 +154,15 @@ export function paintScene(
   plaqueText: string,
   agents?: readonly SceneAgent[],
   timeMs?: number,
+  options?: ScenePaintOptions,
 ): void {
-  ctx2d.fillStyle = palette.parchment
+  const colors = resolveSceneTheme(options?.theme ?? 'light')
+  const now = timeMs ?? 0
+  ctx2d.fillStyle = colors.background
   ctx2d.fillRect(0, 0, width, height)
 
   ctx2d.save()
-  ctx2d.strokeStyle = palette.muted
+  ctx2d.strokeStyle = colors.grid
   ctx2d.globalAlpha = 0.3
   ctx2d.lineWidth = 1
   const grid = 32
@@ -144,14 +180,16 @@ export function paintScene(
   }
   ctx2d.restore()
 
-  paintGear(ctx2d, width * 0.12, height * 0.8, Math.max(18, height * 0.07), palette.brass)
-  paintGear(ctx2d, width * 0.88, height * 0.2, Math.max(14, height * 0.055), palette.copper)
+  paintAmbient(ctx2d, width, height, now, colors)
 
-  paintPlaque(ctx2d, width, height, plaqueText)
+  paintPlaque(ctx2d, width, plaqueText, colors)
 
-  const now = timeMs ?? 0
+  if (options?.tasks !== undefined) {
+    paintWantedBoard(ctx2d, width, height, options.tasks, colors)
+  }
+
   for (const agent of agents ?? []) {
-    paintDesk(ctx2d, agent.desk.x * width, agent.desk.y * height)
+    paintDesk(ctx2d, agent.desk.x * width, agent.desk.y * height, colors)
     const scale = spriteScale(agent.sheet)
     const spriteWidth = agent.sheet.frameWidth * scale
     const spriteHeight = agent.sheet.frameHeight * scale
@@ -188,6 +226,10 @@ export interface SceneCanvasProps {
   getAgents: () => readonly SceneAgent[]
   /** Called inside the RAF loop BEFORE painting (actor stepping hook). */
   onFrame?: (timeMs: number, dtMs: number) => void
+  /** Scene theme (M4); defaults to 'light' inside paintScene. */
+  theme?: SceneTheme
+  /** TaskIds for the right-wall wanted-board (M4); omitted → no board. */
+  tasks?: readonly string[]
 }
 
 /**
@@ -196,7 +238,7 @@ export interface SceneCanvasProps {
  * then repaints with timeMs = now(). The loop stops on unmount; a missing 2D
  * context (jsdom) skips painting but keeps the loop alive.
  */
-export function SceneCanvas({ plaqueText, getAgents, onFrame }: SceneCanvasProps) {
+export function SceneCanvas({ plaqueText, getAgents, onFrame, theme, tasks }: SceneCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   useEffect(() => {
     const canvas = canvasRef.current
@@ -211,7 +253,18 @@ export function SceneCanvas({ plaqueText, getAgents, onFrame }: SceneCanvasProps
       const ctx2d = canvas.getContext('2d')
       if (ctx2d === null) return
       ctx2d.setTransform(ratio, 0, 0, ratio, 0, 0)
-      paintScene(ctx2d, cssWidth, cssHeight, plaqueText, getAgents(), timeMs)
+      // Optional diagnostics hook used by the scratch perf harness
+      // (window.__gasviewPaintProbe receives each paintScene duration in ms).
+      const probe = (window as unknown as {
+        __gasviewPaintProbe?: (durationMs: number) => void
+      }).__gasviewPaintProbe
+      if (probe === undefined) {
+        paintScene(ctx2d, cssWidth, cssHeight, plaqueText, getAgents(), timeMs, { theme, tasks })
+      } else {
+        const paintStart = performance.now()
+        paintScene(ctx2d, cssWidth, cssHeight, plaqueText, getAgents(), timeMs, { theme, tasks })
+        probe(performance.now() - paintStart)
+      }
     }
     const handle = startLoop(repaint)
     const onResize = (): void => { repaint(Date.now(), 0) }
@@ -220,6 +273,6 @@ export function SceneCanvas({ plaqueText, getAgents, onFrame }: SceneCanvasProps
       handle.stop()
       window.removeEventListener('resize', onResize)
     }
-  }, [plaqueText, getAgents, onFrame])
+  }, [plaqueText, getAgents, onFrame, theme, tasks])
   return <canvas ref={canvasRef} className={css.canvas} data-team-visual-scene />
 }
