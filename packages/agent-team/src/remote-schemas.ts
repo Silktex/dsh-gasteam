@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { CreateTeamTaskRequest, UpdateTeamTaskRequest, TeamTaskMutationResult, TeamView } from './types.ts'
+import type { CreateTeamTaskRequest, UpdateTeamTaskRequest, TeamTaskMutationResult, TeamTaskFactoryBinding, TeamView } from './types.ts'
 import type { RemoteAcceptReportRequest, ReviewReportsRequest, ReviewableReport } from './reports.ts'
 import type { CreateWorkflowRequest, WorkflowRuntimeView } from './workflow-runtime.ts'
 import type { AcknowledgeHealthRequest, HealthInboxRequest, OperatorEscalation } from './health.ts'
@@ -16,6 +16,22 @@ function wireSchema<T>(schema: z.ZodType<Wire<T>>): z.ZodType<T> {
 }
 
 export const sessionIdSchema = wireSchema<SessionId>(z.intersection(z.string(), z.unknown()))
+
+const factoryBindingId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/)
+const factoryArtifactName = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/)
+const factoryBindingDigest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+/** Host-only identity schema also used to preserve the read-only wire projection. */
+export const factoryTaskBindingSchema: z.ZodType<TeamTaskFactoryBinding> = z.object({
+  admissionId: factoryBindingId, specDigest: factoryBindingDigest, policyDigest: factoryBindingDigest, workflowDigest: factoryBindingDigest,
+  sourceRevision: factoryBindingDigest, projectId: factoryBindingId, executionId: factoryBindingId, stepId: factoryBindingId,
+  plannedInputs: z.array(z.object({ name: factoryArtifactName, producerStepId: factoryBindingId, artifactName: factoryArtifactName }).strict()).max(128),
+}).strict().superRefine((value, context) => {
+  const names = new Set<string>()
+  for (const input of value.plannedInputs) {
+    if (names.has(input.name) || input.producerStepId === value.stepId) context.addIssue({ code: 'custom', message: 'Factory planned inputs require unique names and another producer step' })
+    names.add(input.name)
+  }
+})
 
 export const createTaskSchema = wireSchema<CreateTeamTaskRequest>(z.object({
   'subject': z.string().readonly(),
@@ -57,14 +73,26 @@ export const workflowViewSchema = wireSchema<WorkflowRuntimeView>(z.object({
 export const nullableWorkflowViewSchema = wireSchema<WorkflowRuntimeView | undefined>(z.union([workflowViewSchema, z.undefined()]))
 export const healthInboxRequestSchema = wireSchema<HealthInboxRequest>(z.object({ projectId: z.string().readonly() }).strict())
 export const acknowledgeHealthRequestSchema = wireSchema<AcknowledgeHealthRequest>(z.object({ projectId: z.string().readonly(), escalationId: z.string().readonly(), expectedRevision: z.number().int().positive().readonly() }).strict())
-export const operatorEscalationSchema = wireSchema<OperatorEscalation>(z.object({
+const attemptOperatorEscalationWireSchema = z.object({
   id: z.string().readonly(), attemptId: z.string().readonly(), generation: z.number().int().positive().readonly(), condition: z.union([z.literal('stale'), z.literal('failed')]).readonly(),
   severity: z.union([z.literal('warning'), z.literal('critical')]).readonly(), source: z.literal('health').readonly(), diagnostics: z.string().readonly(),
   work: z.object({ projectId: z.string().readonly(), teamId: z.string().readonly(), taskId: z.string().readonly(), state: z.union([z.literal('active'), z.literal('dependency-wait'), z.literal('operator-wait'), z.literal('failed'), z.literal('unavailable')]).readonly() }).strict().readonly(),
   revision: z.number().int().positive().readonly(), cooldownUntil: z.number().readonly(),
   acknowledgement: z.object({ actor: z.string().readonly(), at: z.number().readonly() }).strict().readonly().optional(),
   resolution: z.object({ reason: z.union([z.literal('condition-cleared'), z.literal('accepted-terminal'), z.literal('handoff-replaced')]).readonly(), source: z.union([z.literal('health-observation'), z.literal('accepted-report'), z.literal('accepted-submission'), z.literal('accepted-integration'), z.literal('operator-handoff')]).readonly(), at: z.number().readonly(), replacementAttemptId: z.string().readonly().optional() }).strict().readonly().optional(),
-}).strict().readonly())
+}).strict().readonly()
+const factoryReferenceWireSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/).readonly()
+const factoryEvidenceWireSchema = z.array(factoryReferenceWireSchema).min(1).max(64).readonly()
+const factoryEscalationWireSchema = z.object({
+  schemaVersion: z.literal(1).readonly(), id: factoryReferenceWireSchema, projectId: factoryReferenceWireSchema, policyRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).readonly(),
+  source: z.literal('darkfactory').readonly(), stage: z.enum(['ingress', 'trust', 'admission', 'verification', 'release', 'economics', 'operations']).readonly(),
+  reason: factoryReferenceWireSchema, effectId: factoryReferenceWireSchema, evidenceRefs: factoryEvidenceWireSchema,
+  severity: z.enum(['warning', 'critical']).readonly(), diagnostics: z.string().min(1).max(16_384).readonly(),
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).readonly(), raisedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).readonly(), cooldownUntil: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).readonly(),
+  acknowledgement: z.object({ actor: z.string().min(1).max(512).readonly(), at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).readonly() }).strict().readonly().optional(),
+  resolution: z.object({ reason: z.literal('operator-resolved').readonly(), source: z.literal('factory-reconciliation').readonly(), actor: z.string().min(1).max(512).readonly(), evidenceRefs: factoryEvidenceWireSchema, at: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).readonly() }).strict().readonly().optional(),
+}).strict().readonly()
+export const operatorEscalationSchema = wireSchema<OperatorEscalation>(z.union([attemptOperatorEscalationWireSchema, factoryEscalationWireSchema]))
 export const operatorEscalationsSchema = wireSchema<OperatorEscalation[]>(z.array(operatorEscalationSchema))
 
 export const taskResultSchema = wireSchema<TeamTaskMutationResult>(z.union([z.object({
@@ -80,6 +108,7 @@ export const taskResultSchema = wireSchema<TeamTaskMutationResult>(z.union([z.ob
     executionId: z.string().readonly(), stepId: z.string().readonly(),
     inputs: z.array(z.object({ name: z.string().readonly(), artifact: z.object({ kind: z.union([z.literal('commit'), z.literal('file'), z.literal('report')]).readonly(), ref: z.string().readonly() }).strict().readonly() }).strict().readonly()).readonly(),
   }).strict().readonly().optional(),
+  'factoryBinding': factoryTaskBindingSchema.readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),
@@ -141,6 +170,7 @@ export const teamViewSchema = wireSchema<TeamView>(z.object({
     executionId: z.string().readonly(), stepId: z.string().readonly(),
     inputs: z.array(z.object({ name: z.string().readonly(), artifact: z.object({ kind: z.union([z.literal('commit'), z.literal('file'), z.literal('report')]).readonly(), ref: z.string().readonly() }).strict().readonly() }).strict().readonly()).readonly(),
   }).strict().readonly().optional(),
+  'factoryBinding': factoryTaskBindingSchema.readonly().optional(),
   'status': z.union([z.literal("pending"), z.literal("in_progress"), z.literal("completed"), z.literal("deleted")]).readonly(),
   'blockedBy': z.array(z.intersection(z.string(), z.unknown())).readonly(),
   'writeScopes': z.array(z.string()).readonly(),

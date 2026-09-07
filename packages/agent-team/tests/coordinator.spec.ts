@@ -2,7 +2,8 @@ import type { WorkspacePageSnapshotStore } from '../src/workspace-pagination.ts'
 import { afterEach, expect, it, vi } from 'vitest'
 import { rm, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
+import { createHmac, randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -33,6 +34,14 @@ import { HealthRecoveryStore } from '../src/health-recovery.ts'
 import * as CoordinatorPlugin from '../src/coordinator.ts'
 import { gitFixture } from './git-fixture.ts'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import { policy as darkFactoryPolicyFixture } from './darkfactory/config-fixture.ts'
+import { DarkFactoryAdmissionStore } from '../src/darkfactory/admission-store.ts'
+import { pinExecutableSpec } from '../src/darkfactory/contracts/spec.ts'
+import { digestJson } from '../src/darkfactory/json.ts'
+import { darkFactoryTemplate } from '../src/workflow-templates.ts'
+import { pinWorkflowDefinition } from '../src/workflows.ts'
+import { WorkflowRuntime, FactoryMaterializationConflictError } from '../src/workflow-runtime.ts'
+import { examples as darkFactoryContractFixtures } from './darkfactory/fixtures.ts'
 
 const cleanup: (() => Promise<unknown>)[] = []
 afterEach(async () => {
@@ -78,6 +87,144 @@ it('exposes routed DSH lifecycle capabilities through the host view', async () =
   const running = await WorkspaceCoordinator.open(ctx, { ...config, execution: { modelProvider: 'mock', model: 'mock', maxConcurrent: 1 } })
   cleanup.push(() => running.close())
   expect(running.view().runtimeCapabilities).toMatchObject({ dsh: { start: { supported: true }, status: { supported: true }, cancel: { supported: true }, resume: { supported: false }, message: { supported: false }, usage: { supported: false }, artifacts: { supported: true } } })
+})
+
+it('replays an existing coordinator with Dark Factory disabled without creating factory state', async () => {
+  const { coordinator, lead, request, ctx, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.acceptTask(lead, request.id, { subject: 'Legacy work', description: 'Preserve existing acceptance semantics' })
+  const before = coordinator.view()
+  await coordinator.close()
+  const files = (await readdir(config.directory)).sort()
+  const replayed = await WorkspaceCoordinator.open(ctx, { ...config, darkFactory: { enabled: false } })
+  cleanup.push(() => replayed.close())
+  expect(replayed.view()).toEqual(before)
+  expect((await readdir(config.directory)).sort()).toEqual(files)
+  expect(files.some(file => file.startsWith('darkfactory'))).toBe(false)
+})
+
+it('rejects invalid Dark Factory policy before any store is created and redacts supplied values', async () => {
+  const repo = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const directory = join(repo.root, 'invalid-coordinator')
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await expect(WorkspaceCoordinator.open(ctx, { directory, darkFactory: { enabled: false, secret: 'MUST_NOT_LEAK' } } as never))
+    .rejects.toThrow(/^Invalid Dark Factory configuration: policy schema or reference validation failed$/)
+  await expect(readdir(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('validates the Cordis configuration boundary and refuses unimplemented enabled operation', async () => {
+  const repo = await gitFixture(root => cleanup.push(() => rm(root, { recursive: true, force: true })))
+  const directory = join(repo.root, 'enabled-coordinator')
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  const disabled = CoordinatorPlugin.Config({ directory })
+  expect(disabled.darkFactory).toEqual({ schemaVersion: 1, enabled: false })
+  expect(() => CoordinatorPlugin.Config({ directory, darkFactory: { enabled: false, unexpected: true } })).toThrow()
+  const enabled = CoordinatorPlugin.Config({ directory, darkFactory: { ...darkFactoryPolicyFixture(), mode: 'build' } })
+  await expect(WorkspaceCoordinator.open(ctx, enabled)).rejects.toThrow(/RUNTIME_UNIMPLEMENTED/)
+  await expect(readdir(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('runs observe ingress through the real coordinator and existing operator inbox without admitting tasks', async () => {
+  const { coordinator, lead, request, ctx, config } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  vi.stubEnv('DF_TEST_SECRET', 'fixture-ingress-secret')
+  cleanup.push(async () => { vi.unstubAllEnvs() })
+  const raw = darkFactoryPolicyFixture()
+  const enabled = { ...config, darkFactory: { ...raw, enabled: true as const, mode: 'observe' as const,
+    ingestion: { ...raw.ingestion, transport: { kind: 'listener' as const, host: '127.0.0.1' as const, port: 0 } } } }
+  const running = await WorkspaceCoordinator.open(ctx, enabled)
+  cleanup.push(() => running.close())
+  const post = async (owner: WorkspaceCoordinator, body: string, delivery: string) => {
+    const port = owner.darkFactoryStatus()!.port
+    const response = await fetch(`http://127.0.0.1:${port}/darkfactory/v1/ingress/github/route`, { method: 'POST', body, headers: {
+      'content-type': 'application/json', 'x-github-event': 'issues', 'x-github-delivery': delivery,
+      'x-hub-signature-256': `sha256=${createHmac('sha256', 'fixture-ingress-secret').update(body).digest('hex')}`,
+    } })
+    return { status: response.status, body: await response.json() }
+  }
+  const body = JSON.stringify({ action: 'opened', repository: { id: 'repository', full_name: 'example/service' }, sender: { id: 'sender' }, installation: { id: 10 },
+    issue: { id: 42, number: 1, title: 'Observed issue', body: 'Untrusted narrative', user: { id: 'sender' }, labels: [{ name: 'automate' }], state: 'open', updated_at: '2026-09-06T11:00:00Z' } })
+  const received = await post(running, body, 'delivery-1')
+  expect(received.status).toBe(202)
+  expect(received.body.receipt.decision).toBe('received')
+  expect(running.view().attempts).toEqual([])
+  expect(running.view().projects[0]!.teams[0]!.tasks).toEqual([])
+  expect((await post(running, '{', 'invalid-delivery')).status).toBe(202)
+  const inbox = running.healthInbox(lead, request.id)
+  expect(inbox).toHaveLength(1)
+  expect(inbox[0]).toMatchObject({ source: 'darkfactory', projectId: request.id, stage: 'ingress', reason: 'PAYLOAD_INVALID' })
+  expect(inbox[0]).not.toHaveProperty('attemptId')
+  const acknowledged = await running.acknowledgeHealth(lead, request.id, inbox[0]!.id, inbox[0]!.revision)
+  expect(acknowledged.acknowledgement?.actor).toBe(lead.id)
+  await running.close()
+  const replayed = await WorkspaceCoordinator.open(ctx, enabled)
+  cleanup.push(() => replayed.close())
+  const duplicate = await post(replayed, body, 'new-delivery-id')
+  expect(duplicate.status).toBe(200)
+  expect(duplicate.body.receipt).toEqual(received.body.receipt)
+  expect(replayed.healthInbox(lead, request.id)).toEqual([acknowledged])
+  expect(replayed.view().attempts).toEqual([])
+  await replayed.close()
+  const disabled = await WorkspaceCoordinator.open(ctx, config)
+  cleanup.push(() => disabled.close())
+  expect(disabled.darkFactoryStatus()).toBeUndefined()
+  expect(disabled.healthInbox(lead, request.id)).toEqual([acknowledged])
+})
+
+it('reconciles an opted-in GitHub issue through the coordinator after HTTP custody, without creating work', async () => {
+  const { coordinator, lead, request, ctx, config } = await fixture()
+  await runGit(request.repository, ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], new AbortController().signal, 5000)
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  vi.stubEnv('DF_TEST_SECRET', 'fixture-ingress-secret')
+  vi.stubEnv('DF_API_SECRET', 'fixture-provider-secret')
+  cleanup.push(async () => { vi.unstubAllEnvs() })
+  let providerCalls = 0
+  const provider = createServer((incoming, response) => {
+    providerCalls++
+    if (incoming.headers.authorization !== 'Bearer fixture-provider-secret') { response.writeHead(401); response.end(); return }
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(incoming.url?.startsWith('/installation/repositories')
+      ? { total_count: 1, repositories: [{ id: 42, full_name: 'owner/repo' }] }
+      : { id: 100, number: 1, title: 'Current provider title', body: 'Repair observable failure. secret=fixture-provider-secret', user: { id: 12 }, labels: [{ id: 3, name: 'automate' }], state: 'open', updated_at: new Date().toISOString() }))
+  })
+  await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve))
+  cleanup.push(() => new Promise<void>((resolve, reject) => provider.close(error => error ? reject(error) : resolve())))
+  const address = provider.address()
+  if (!address || typeof address === 'string') throw new Error('fixture listener')
+  const raw = darkFactoryPolicyFixture()
+  const enabled = { ...config, darkFactory: { ...raw, enabled: true as const, mode: 'observe' as const,
+    ingestion: { ...raw.ingestion, transport: { kind: 'listener' as const, host: '127.0.0.1' as const, port: 0 },
+      routes: [{ ...raw.ingestion.routes[0]!, source: 'github' as const, repositoryIds: ['42'], senderIds: ['12'],
+        bindings: { installationIds: ['10'], authorIds: ['12'], automationRules: [{ ruleId: 'rule', automationLabel: 'automate' }] },
+        reconciliation: { apiBaseUrl: `http://127.0.0.1:${address.port}`, fixtureLoopback: true,
+          installationId: '10', repositoryId: '42', repositoryName: 'owner/repo', credentialKind: 'installation-token' as const, credentialRef: { kind: 'env' as const, name: 'DF_API_SECRET' } },
+      }],
+    },
+  } }
+  const running = await WorkspaceCoordinator.open(ctx, enabled)
+  cleanup.push(() => running.close())
+  const body = JSON.stringify({ action: 'opened', repository: { id: 42, full_name: 'owner/repo' }, sender: { id: 12 }, installation: { id: 10 },
+    issue: { id: 100, number: 1, title: 'Old webhook title', body: 'Untrusted webhook context', user: { id: 12 }, labels: [{ name: 'automate' }], state: 'open', updated_at: '2026-09-06T11:00:00Z' } })
+  const response = await fetch(`http://127.0.0.1:${running.darkFactoryStatus()!.port}/darkfactory/v1/ingress/github/route`, { method: 'POST', body,
+    headers: { 'content-type': 'application/json', 'x-github-event': 'issues', 'x-github-delivery': 'reconcile-delivery', 'x-hub-signature-256': `sha256=${createHmac('sha256', 'fixture-ingress-secret').update(body).digest('hex')}` } })
+  expect(response.status).toBe(202)
+  let events: { type: string; request: { item?: { title: string; state: string }; outcome?: string } }[] = []
+  await vi.waitFor(async () => {
+    const journal = await readFile(join(config.directory, 'darkfactory', 'project', 'ingestion.jsonl'), 'utf8')
+    events = journal.trim().split('\n').map(line => JSON.parse(line))
+    expect(events.some(event => event.type === 'reconciliation-finished' && event.request.outcome === 'resolved')).toBe(true)
+    expect(journal).not.toContain('fixture-provider-secret')
+    expect(journal).not.toContain('Untrusted webhook context')
+  }, { timeout: 5000 })
+  expect(events.find(event => event.type === 'transition')?.request.item).toMatchObject({ title: 'Current provider title', state: 'trusted' })
+  expect(providerCalls).toBe(2)
+  expect(running.view().attempts).toEqual([])
+  expect(running.view().projects[0]!.teams[0]!.tasks).toEqual([])
+  expect(running.healthInbox(lead, request.id)).toEqual([])
 })
 
 it('returns ordered exact repair source lineage when replacement was already submitted before workflow reconciliation', async () => {
@@ -805,6 +952,93 @@ it('rejects model-facing attempts to forge or mutate a host-only workflow bindin
   const task = await ctx.agentTeams.createTask(lead, { subject: 'Ordinary', description: 'No workflow authority' })
   await expect(ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: task.revision, action: 'edit', subject: 'Still ordinary', workflowBinding: binding } as never)).rejects.toThrow(/host-only/i)
   expect(ctx.agentTeams.getTask(lead, task.id).workflowBinding).toBeUndefined()
+})
+
+it('replays factory materialization after the first real Team append with all five tasks held against dispatch', async () => {
+  const { root, ctx, lead, coordinator, request, config, git } = await fixture()
+  await coordinator.register(lead, request)
+  await coordinator.close()
+  ctx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const running = await WorkspaceCoordinator.open(ctx, { ...config, execution })
+  cleanup.push(() => running.close())
+  const owners = running as unknown as { workflows: WorkflowRuntime; execution: CoordinatorExecution }
+  const admissionOptions = { projectId: 'project', registeredLeadId: lead.id, workflowTemplates: [darkFactoryTemplate] }
+  const admissions = await DarkFactoryAdmissionStore.open(config.directory, admissionOptions)
+  cleanup.push(() => admissions.close())
+  const workflow = { template: darkFactoryTemplate, parameters: { subject: 'held durable factory plan' } }
+  const { specDigest, ...fixtureSpec } = darkFactoryContractFixtures.ExecutableSpecV1
+  const spec = pinExecutableSpec({ ...fixtureSpec, projectId: 'project', baseCommit: (await git('rev-parse', 'HEAD')).stdout.trim(),
+    provenance: fixtureSpec.provenance.map(artifact => ({ ...artifact, projectId: 'project' })),
+    acceptanceScenarios: fixtureSpec.acceptanceScenarios.map(scenario => ({ ...scenario, reproduction: { ...scenario.reproduction, projectId: 'project' } })),
+    workflowDigest: digestJson(pinWorkflowDefinition(darkFactoryTemplate, workflow.parameters)),
+  })
+  const { record } = await admissions.begin({ projectId: 'project', expectedRevision: 0, intent: {
+    registeredLeadId: lead.id, spec, workflow,
+    compilerOutcome: { schemaVersion: 1, id: 'factory-compiler-outcome', projectId: 'project', policyRevision: spec.policyRevision, source: spec.source, outcome: 'COMPILED', reasons: ['Fixture registered evidence'], spec },
+    compilerCursor: { schemaVersion: 1, contextDigest: digestJson('fixture-host-context'), malformedAttempts: 0, phase: 'finished' },
+    policyRefs: { policyRecordId: 'fixture-policy-record', decisionReceiptId: 'fixture-admission-decision' },
+  } })
+  const originalCreate = owners.execution.createPinnedWorkflowTask.bind(owners.execution)
+  const interruption = vi.spyOn(owners.execution, 'createPinnedWorkflowTask').mockImplementationOnce(async intent => {
+    await originalCreate(intent)
+    throw new Error('fixture interruption after actual factory Team append')
+  })
+  await expect(owners.workflows.materializeFactoryAdmission(record, request)).rejects.toThrow(/after actual factory Team append/)
+  const first = ctx.agentTeams.listTasks(lead)
+  expect(first).toHaveLength(1)
+  expect(first[0]).toMatchObject({ id: record.intent.plannedSteps[0]!.taskId, status: 'pending', ready: false,
+    factoryBinding: { admissionId: record.id, specDigest: spec.specDigest, stepId: 'reproduce' } })
+  expect(admissions.snapshot().admissions[0]).toEqual(record)
+  expect(running.inspectWorkflow(lead, record.intent.workflowId).steps.every(step => step.phase === 'pending')).toBe(true)
+  interruption.mockRestore()
+  await admissions.close(); await running.close(); await ctx.fiber.dispose()
+
+  const restoredCtx = await stack(root)
+  restoredCtx.llm.registerAdapter(['mock'], new MockAdapter(['hang']))
+  const restoredLead = (await restoredCtx.agents.resume({ resumeSessionId: SessionId(lead.id), agentOptions: { provider: 'mock', model: 'mock' } })).agent
+  const restored = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution })
+  cleanup.push(() => restored.close())
+  const restoredAdmissions = await DarkFactoryAdmissionStore.open(config.directory, admissionOptions)
+  cleanup.push(() => restoredAdmissions.close())
+  const replayed = restoredAdmissions.snapshot().admissions[0]!
+  expect(replayed).toEqual(record)
+  const runtime = (restored as unknown as { workflows: WorkflowRuntime }).workflows
+  const materialized = await runtime.materializeFactoryAdmission(replayed, request)
+  expect(materialized).toEqual({ workflowId: record.intent.workflowId, workflowDigest: spec.workflowDigest, taskIds: record.receipt.taskIds })
+  const tasks = restoredCtx.agentTeams.listTasks(restoredLead)
+  expect(tasks.map(task => task.id)).toEqual(record.receipt.taskIds)
+  expect(new Set(tasks.map(task => task.id)).size).toBe(5)
+  for (const task of tasks) {
+    expect(task).toMatchObject({ status: 'pending', ready: false, factoryBinding: { admissionId: record.id } })
+    expect(task.ownerName).toBeUndefined()
+    expect(task.workflowBinding!.inputs).toEqual([])
+  }
+  expect(tasks.find(task => task.factoryBinding!.stepId === 'implement')!.factoryBinding!.plannedInputs)
+    .toEqual([{ name: 'reproduction', artifactName: 'reproduction', producerStepId: 'reproduce' }])
+  await restored.reconcile()
+  expect(restored.view().dispatchStatus).toHaveLength(5)
+  for (const status of restored.view().dispatchStatus) expect(status).toMatchObject({ state: 'waiting', blockers: expect.arrayContaining([expect.objectContaining({ code: 'factory-admission-held' })]) })
+  expect(restored.view().attempts).toEqual([])
+  expect(restored.view().readyTasks).toEqual([])
+  await restored.resumeWorkflow(restoredLead, record.intent.workflowId)
+  expect(await runtime.scan(request)).toEqual([])
+  expect(restored.inspectWorkflow(restoredLead, record.intent.workflowId).steps.every(step => step.phase === 'pending')).toBe(true)
+  expect(restored.view().attempts).toEqual([])
+  expect(await runtime.materializeFactoryAdmission(replayed, request)).toEqual(materialized)
+  expect(restoredCtx.agentTeams.listTasks(restoredLead)).toHaveLength(5)
+  const deleted = tasks[0]!
+  // Managed mutations are blocked while the coordinator owns execution. Exercise
+  // an actual offline Lead deletion, then make replay validate its tombstone.
+  await restored.close()
+  await restoredCtx.agentTeams.updateTask(restoredLead, { taskId: deleted.id, expectedRevision: deleted.revision, action: 'delete' })
+  const afterDeletion = await WorkspaceCoordinator.open(restoredCtx, { ...config, execution })
+  cleanup.push(() => afterDeletion.close())
+  const deletionRuntime = (afterDeletion as unknown as { workflows: WorkflowRuntime }).workflows
+  await expect(deletionRuntime.materializeFactoryAdmission(replayed, request)).rejects.toBeInstanceOf(FactoryMaterializationConflictError)
+  expect(afterDeletion.view().attempts).toEqual([])
+  expect(restoredCtx.agentTeams.getTask(restoredLead, deleted.id).status).toBe('deleted')
+  expect(restoredCtx.agentTeams.listTasks(restoredLead)).toHaveLength(4)
+  expect(restoredAdmissions.snapshot().admissions[0]).toEqual(record)
 })
 
 it('pins the code review gate in the Team task before the workflow can acknowledge task creation', async () => {

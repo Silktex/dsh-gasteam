@@ -22,6 +22,7 @@ import type {
   UpdateTeamTaskRequest,
 } from './types.ts'
 import { requiredText, writeScope } from './validation.ts'
+import { factoryTaskBindingSchema } from './remote-schemas.ts'
 
 /** Whether two normalized file or directory prefixes overlap on path components. */
 function scopesOverlap(left: string, right: string): boolean {
@@ -90,7 +91,7 @@ export class TeamTaskBoard {
    */
   async create(membership: TeamMembership, request: CreateTeamTaskRequest): Promise<TeamTaskView> {
     const { root } = membership
-    if ('workflowBinding' in (request as object)) throw new TeamError('Workflow binding is host-only', 'TEAM_MANAGED_TASK')
+    if ('workflowBinding' in request || 'factoryBinding' in request) throw new TeamError('Task bindings are host-only', 'TEAM_MANAGED_TASK')
     if (request.nonCodeCriteria !== undefined && membership.role !== 'lead') throw new TeamError('Non-code acceptance criteria require a Lead', 'TEAM_LEAD_ONLY')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
@@ -137,18 +138,25 @@ export class TeamTaskBoard {
     const reviewGate = request.reviewGate === undefined ? undefined : requiredText(request.reviewGate, 'integration review gate', 128)
     const pinnedReview = reviewBinding(request.reviewBinding)
     const pinnedWorkflow = workflowBinding(request.workflowBinding)
+    const parsedFactory = request.factoryBinding === undefined ? undefined : factoryTaskBindingSchema.safeParse(request.factoryBinding)
+    if (parsedFactory !== undefined && !parsedFactory.success) throw new TeamError('Factory task binding is invalid', 'TEAM_INVALID_ARGUMENT')
+    const pinnedFactory = parsedFactory?.data
+    if (pinnedFactory !== undefined && (pinnedFactory.executionId !== pinnedWorkflow.executionId || pinnedFactory.stepId !== pinnedWorkflow.stepId)) {
+      throw new TeamError('Factory and workflow task identities differ', 'TEAM_INVALID_ARGUMENT')
+    }
     if (pinnedReview !== undefined && nonCodeCriteria === undefined) throw new TeamError('Pinned candidate review requires non-code criteria', 'TEAM_INVALID_ARGUMENT')
     return this.journal.transact(root.id, async () => {
       const state = this.journal.state(root)
       const existing = state.tasks.find(task => task.id === taskId)
       if (existing) {
         if (existing.subject !== subject || existing.description !== description || existing.nonCodeCriteria !== nonCodeCriteria || existing.reviewGate !== reviewGate || !isDeepStrictEqual(existing.workflowBinding, pinnedWorkflow) || !isDeepStrictEqual(existing.reviewBinding, pinnedReview)
-          || existing.blockedBy.length !== 0 || existing.writeScopes.length !== 0) throw new TeamError('Pinned task replay has different immutable inputs', 'TEAM_INVALID_ARGUMENT')
+          || !isDeepStrictEqual(existing.factoryBinding, pinnedFactory) || existing.blockedBy.length !== 0 || existing.writeScopes.length !== 0) throw new TeamError('Pinned task replay has different immutable inputs', 'TEAM_INVALID_ARGUMENT')
         return this.taskView(root, state, existing)
       }
       const active = state.tasks.filter(task => task.status !== 'deleted').length
       if (active >= this.maxTasks) throw new TeamError(`Team task limit ${this.maxTasks} reached`, 'TEAM_TASK_LIMIT')
       const task: TeamTaskSnapshot = { id: taskId, revision: 1, subject, description,
+        ...(pinnedFactory === undefined ? {} : { factoryBinding: pinnedFactory }),
         ...(nonCodeCriteria === undefined ? {} : { nonCodeCriteria }), ...(reviewGate === undefined ? {} : { reviewGate }), workflowBinding: pinnedWorkflow, ...(pinnedReview === undefined ? {} : { reviewBinding: pinnedReview }), status: 'pending', blockedBy: [], writeScopes: [] }
       this.assertTaskGraph(state, task)
       await this.journal.appendAndFlush(root, 'team/task', { version: 1, teamId: TeamId(root.id), task })
@@ -164,6 +172,7 @@ export class TeamTaskBoard {
       if (!this.validateReportAcceptance(root, request)) throw new TeamError('No coordinator grant for this report acceptance', 'TEAM_MANAGED_TASK')
       const state = this.journal.state(root)
       const task = state.tasks.find(task => task.id === request.taskId)
+      if (task !== undefined) this.assertNotFactoryHeld(task)
       if (!task || task.nonCodeCriteria === undefined) throw new TeamError('Task does not accept a non-code report', 'TEAM_TASK_INVALID_TRANSITION')
       const result = JSON.stringify({ reportId: request.reportId })
       if (task.status === 'completed' && task.result === result) return this.taskView(root, state, task)
@@ -182,6 +191,7 @@ export class TeamTaskBoard {
       if (!this.validateAcceptance(root, request)) throw new TeamError('No coordinator grant for this acceptance', 'TEAM_MANAGED_TASK')
       const state = this.journal.state(root)
       const task = state.tasks.find(task => task.id === request.taskId)
+      if (task !== undefined) this.assertNotFactoryHeld(task)
       const job = state.integrations.find(job => job.id === request.integrationId)
       if (task?.nonCodeCriteria !== undefined) throw new TeamError('Task requires audited report acceptance', 'TEAM_TASK_INVALID_TRANSITION')
       if (!task || !job || job.phase !== 'merged' || !job.candidateCommit || !job.targetCommit) throw new TeamError('Task acceptance requires a verified merged integration', 'TEAM_INTEGRATION_CONFLICT')
@@ -237,7 +247,7 @@ export class TeamTaskBoard {
     request: UpdateTeamTaskRequest,
   ): Promise<TeamTaskView> {
     const root = membership.root
-    if ('workflowBinding' in (request as object)) throw new TeamError('Workflow binding is host-only', 'TEAM_MANAGED_TASK')
+    if ('workflowBinding' in request || 'factoryBinding' in request) throw new TeamError('Task bindings are host-only', 'TEAM_MANAGED_TASK')
     return this.journal.transact(root.id, async () => {
       this.validateMutation(caller, root, request)
       const state = this.journal.state(root)
@@ -250,6 +260,7 @@ export class TeamTaskBoard {
         )
       }
       if (current.status === 'deleted') throw new TeamError(`team task "${current.id}" is deleted`, 'TEAM_TASK_DELETED')
+      if (request.action !== 'delete') this.assertNotFactoryHeld(current)
       const lead = membership.role === 'lead'
       const owner = current.ownerId === caller.id
       const authorizeOwner = (): void => {
@@ -390,7 +401,11 @@ export class TeamTaskBoard {
 
   /** Whether all current blockers completed. */
   private taskReady(state: TeamState, task: TeamTaskSnapshot): boolean {
-    return task.blockedBy.every(id => state.tasks.find(candidate => candidate.id === id)?.status === 'completed')
+    return task.factoryBinding === undefined && task.blockedBy.every(id => state.tasks.find(candidate => candidate.id === id)?.status === 'completed')
+  }
+
+  private assertNotFactoryHeld(task: TeamTaskSnapshot): void {
+    if (task.factoryBinding !== undefined) throw new TeamError('Factory admission holds this task; host activation is unavailable', 'TEAM_MANAGED_TASK')
   }
 
   /** Remove an optional owner field under exactOptionalPropertyTypes. */
@@ -432,6 +447,7 @@ export class TeamTaskBoard {
       ...(task.nonCodeCriteria === undefined ? {} : { nonCodeCriteria: task.nonCodeCriteria }),
       ...(task.reviewGate === undefined ? {} : { reviewGate: task.reviewGate }),
       ...(task.workflowBinding === undefined ? {} : { workflowBinding: structuredClone(task.workflowBinding) }),
+      ...(task.factoryBinding === undefined ? {} : { factoryBinding: structuredClone(task.factoryBinding) }),
       ...(task.reviewBinding === undefined ? {} : { reviewBinding: structuredClone(task.reviewBinding) }),
       status: task.status,
       blockedBy: structuredClone(task.blockedBy),

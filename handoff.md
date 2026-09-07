@@ -1,77 +1,107 @@
-# GasTeam handoff
+# GasTeam Handoff Document
 
-## Completed resumed goal
+- **Timestamp**: 2026-09-06T20:18:00-04:00
+- **Primary Workspace**: `/home/dsh/projects/gasteam`
+- **Shell Environment**: `PATH=/home/linuxbrew/.linuxbrew/bin:$PATH TMPDIR=/var/tmp`
+- **Current Branch / State**: `master` (uncommitted working tree with Gate 1, Gate 2, Gate 3, Gate 4, and Autofixer changes intact)
 
-All M0–M11 milestones and the final acceptance matrix in [finishme.md](finishme.md) are complete. The user-confirmed accidental deletion was recovered, lost work reconstructed, reviewed, tested and pushed. The user authorized committing/pushing and requested task-appropriate agents for most implementation; root integrated and verified their work.
+---
 
-Implementation commit `6c30f5b27184362ea64208aacb0fe942f929d83f` passed [exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/34006045928), including frozen install, documentation checks, build/types, host/client tests, process acceptance, installed CLI smoke, and independent packed release/legacy upgrade validation. The later failed CI checkpoints and their deterministic fixes remain recorded in [completion evidence](docs/completion-evidence.md). Corrective commit `a67e71651aabe7b930dcbc5503aa0c7e553e118e` passed [exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/34006610442), closing the intermittent overflow/close receipt race and input-pipe fault. Final concurrent-observer correction `b78acfcfa394c31fa03f5f152d087ab0e1057220` passed [exact-commit CI](https://github.com/Silktex/dsh-gasteam/actions/runs/34009813442), including the entire release gate. This execution is closed; no implementation or release action remains queued.
+## 1. Executive Summary
 
-Real browser evidence is retained in `docs/evidence/dashboard`. Authenticated Codex task and restart/cancel evidence are mapped in completion evidence. Disposable dashboard/CDP ports are closed. Standalone validation uses published DSH and committed patches without a full-Harness source checkout. Production service installation/restart and public registry publication were not requested; no production migration is claimed.
+In this session, **Dark Factory Gate 4 (Fleet Economics and Model Governance)** was completely designed, grilled, implemented, and qualified per `darkfactory.md` Section 8:
+1. **DF-15: Redis Authority, Reservations & Accounting Ledger (`packages/agent-team/src/darkfactory/redis-adapter.ts`, `packages/agent-team/src/darkfactory/fleet-store.ts`)**:
+   - `InMemoryRedisAdapter` implementing genuine Redis RESP frame parsing, SHA-1 registered server-side Lua scripts, cluster hash tagging (`{df:fleet:<fleetId>}`), and EVAL/EVALSHA execution without external Redis daemon requirements.
+   - Pinned `DarkFactoryFleetStore` managing atomic reservation lifecycle states (`reserved → started → reconciling → settled / withheld`).
+   - Monotonic fencing tokens and authority epoch rollover invalidation.
+   - Stream sequence gap auto-draining buffer withholding release until gaps are filled or reconciliation deadline expires. Conflicting duplicate digests transition reservation to `withheld` and quarantine attempt.
+   - Exact 95.000% spend watermark arithmetic across all 6 hierarchies (Fleet, Project, Host $\times$ daily/monthly) for both money and tokens, activating durable `budget` pause.
+   - 100% emergency headroom ceiling accessible strictly via typed control-plane emergencies.
+   - Five independent durable pause reasons (`manual`, `safety`, `budget`, `quota`, `catalog`) where clearing one never clears another.
+   - Append-only local JSONL audit mirror in `darkfactory/<fleetId>/audit.jsonl` failing closed without substituting for authoritative ledger.
+2. **DF-16: Subscription Quotas & Emergency Reserve Pool (`packages/agent-team/src/darkfactory/quota-manager.ts`)**:
+   - Authenticated provider quota adapters with 5-minute TTL caching and monotonic snapshot watermarks.
+   - Watermark deduction prevents double subtraction of past usage and phantom capacity from in-flight local reservations.
+   - Routing waterfall order: primary subscription → ordered alternatives → metered deployments.
+   - 10% emergency reserve boundary locking pools to `RESERVED_EMERGENCY_ONLY` when remaining allowance $\le 10\%$.
+   - Emergency pool strictly restricted to typed control-plane emergencies: `canary-recovery`, `verified-p0-security`, `production-invariant-recovery`.
+3. **DF-17: LiteLLM Catalog, Role Assignment, and Pinning (`packages/agent-team/src/darkfactory/model-catalog.ts`)**:
+   - Version-pinned LiteLLM catalog ingestion (15-minute refresh, 30-minute expiry, authenticated `MODELS_UPDATED` webhook).
+   - 5-minute capability probes and versioned project benchmark scoring. Stale catalog/probes activate durable `'catalog'` pause.
+   - Four role assignment matrices: `fast-loops`, `core-coding`, `deep-reasoning`, and `long-context`.
+   - Deterministic 4-tier waterfall sorting: benchmark descending → worst-case cost ascending → measured latency ascending → stable deployment ID.
+   - Critic diversity rule (`minimumIndependentProviders: 2`): role assignment supports an `excludedProviders` filter; Critic 1 picks top waterfall model, and Critic 2 strictly excludes Critic 1's provider.
+4. **DF-18: Transparent Headroom Guardrail Metadata Normalization (`packages/agent-team/src/darkfactory/compression-normalizer.ts`)**:
+   - Headroom operates transparently upstream in the Portainer `llm-router` stack as a LiteLLM guardrail; gasteam manages zero client-side compression engines.
+   - Case-insensitive parsing and normalization of `x-headroom-compressed` and `x-headroom-tokens-saved` headers into `UsageEventV1.compression`.
+   - `headroom_retrieve` tool definition and `HeadroomRetriever` with attempt-scoped access and storage reachability checks.
+   - Invariant enforcement (`assertUncompressedEvidence`): verification evidence, cryptographic signatures, and policy assertions are strictly forbidden from being computed on compressed data.
+5. **Public API & Packaging Re-exports**:
+   - Re-exported in `packages/agent-team/src/darkfactory.ts` and verified in `packages/agent-team/tests/built-lib.spec.ts`.
 
-Preserve unrelated `docs/README.md`, `darkfactory.md`, `docs/worklist.md`, and `pending.md`. Use `TMPDIR=/var/tmp` and `PATH=/home/linuxbrew/.linuxbrew/bin:$PATH`; `/tmp` exhausted inodes during this session. Do not restore an old archive over the recovered checkout.
+---
 
-Demo setup previously modified the user's Web profile accidentally. The affected metadata was backed up and only five temporary Team links were corrected to this checkout. That narrow correction is not claimed as a byte-identical restoration of the prior profile. See the incident entry in completion evidence. No user service was restarted during release validation.
+## 2. Test & Repository Verification Status
 
-The older notes below are historical. Their stop instructions and unfinished feature claims were superseded by the resumed request and completed implementation. No further implementation is queued for this goal.
+The repository passed all verification gates:
+- **129/129 test files** passed (**1,629 tests passed**, 2 skipped, 0 failed).
+- **21/21 process acceptance tests** passed (`pnpm test:acceptance`, 49.6s).
+- **Gate 4 dedicated tests** (266 tests across 5 test files):
+  - `tests/darkfactory-fleet.spec.ts`: 55/55 passed.
+  - `tests/darkfactory-fleet-watermark-stress.spec.ts`: 23/23 passed.
+  - `packages/agent-team/tests/darkfactory/quota.spec.ts`: 82/82 passed.
+  - `packages/agent-team/tests/darkfactory/models.spec.ts`: 83/83 passed.
+  - `packages/agent-team/tests/darkfactory/compression.spec.ts`: 23/23 passed.
+- **0 TypeScript compiler errors** (`pnpm check:types`).
+- **0 Markdown documentation lint errors** (`pnpm check:docs`, 15 Markdown files).
+- **0 git formatting/whitespace errors** (`git diff --check`).
+- **System Doctor CLI** (`node scripts/doctor.mjs` / `pnpm run doctor`): PASSED in 688ms (<800ms) with 0 defects.
+- **Distribution Smoke & Release Validation**:
+  - `node scripts/test-dsh-team-distribution.mjs` PASSED.
+  - `node scripts/standalone-release-validation.mjs` PASSED.
+  - `packages/agent-team/tests/built-lib.spec.ts` PASSED.
 
-## Stop point and authority
+---
 
-The user explicitly requested: `$handoff stop work and create handoff.md in project root`. Implementation is stopped. Resume implementation only when requested in the next session. This document is the only change made after that request; no tests were rerun for this documentation-only handoff.
+## 3. Key References & Existing Artifacts
 
-The existing goal is to complete [finishme.md](finishme.md), with no token budget. It is unfinished and has not been marked complete or blocked. Do not mistake a passing incremental slice for completion of the entire goal. No external blocker has been established.
+- **Dark Factory PRD**: [darkfactory.md](file:///home/dsh/projects/gasteam/darkfactory.md) (comprehensive specifications for Gates 0–5, DF-01 through DF-20).
+- **Economics Schemas & Reference Graph**: [economics.ts](file:///home/dsh/projects/gasteam/packages/agent-team/src/darkfactory/contracts/economics.ts) and [economics-reference-graph.ts](file:///home/dsh/projects/gasteam/packages/agent-team/src/darkfactory/contracts/economics-reference-graph.ts).
+- **Release Schemas & State Transitions**: [release.ts](file:///home/dsh/projects/gasteam/packages/agent-team/src/darkfactory/contracts/release.ts).
+- **Autofixer Architecture & Runbook**: [autofixer.md](file:///home/dsh/projects/gasteam/autofixer.md) (5-phase autonomous fix protocol, error sink, doctor, UI settings).
+- **Session Prompt Draft Artifact**: [prompt_draft.md](file:///home/dsh/.gemini/antigravity-cli/brain/ddfbc7e7-b530-456b-a9f0-394ec83ace66/prompt_draft.md) (approved Gate 4 plan and completed criteria).
 
-Workspace: `/home/dsh/projects/gasteam`; shell: bash. Baseline HEAD is `9e27c64`. The substantial implementation is uncommitted, including many untracked source files, tests, and docs. Preserve the working tree. Use `git status --short` and the actual diff rather than assuming untracked files are disposable. No commit, push, publication, installation, or local service restart has been performed. The existing local service uses the linked checkout; builds regenerate its artifacts.
+---
 
-## Authoritative artifacts
+## 4. Critical Invariants & Constraints
 
-- [finishme.md](finishme.md): full requirements, milestone checklist, acceptance matrix, and continuation ledger. M0 is done; M1–M4 are in progress; M5–M11 remain pending. Read the full requirements before choosing subsequent work.
-- [docs/completion-evidence.md](docs/completion-evidence.md): chronological implementation and validation evidence, including limitations and failed intermediate checks. Its final entry describes the last completed slice: canonical integration execution ownership.
-- [docs/autonomous-architecture.md](docs/autonomous-architecture.md): architecture and durability decisions.
-- [readme.md](readme.md): current configuration and public usage.
+- **Preserve Untracked & Working Tree Files**: `/home/dsh/projects/gasteam` contains modified and untracked files representing Gate 1, Gate 2, Gate 3, Gate 4, and Autofixer deliverables. **DO NOT run `git reset --hard`, `git clean -fd`, `git checkout .`, or create Git commits/pushes** unless explicitly requested by the user.
+- **Environment**: Always prepend `PATH=/home/linuxbrew/.linuxbrew/bin:$PATH TMPDIR=/var/tmp` when executing commands (`/tmp` previously experienced inode exhaustion).
+- **Zero Paid/External Network Calls**: All test runs must use local fixtures, deterministic clocks, and local loopbacks (`127.0.0.1:0`). Zero external LLM calls or unpinned external dependencies.
+- **Client Bundle Dev Path Leak Prevention**: In `packages/client-ui-agent-team/src/client/autofixer-settings.ts`, generic placeholders (e.g. `\x27/path/to/repository\x27`) must be used for default paths in crontab/systemd generators so `scripts/test-dsh-team-distribution.mjs` assertion (`!client.includes(repository)`) passes.
+- **Canonical JSON & TypeScript Typings**:
+  - RFC 8785 canonical JSON throws on `undefined`. Strip optional undefined fields before digest computation.
+  - `tsconfig.json` enforces `exactOptionalPropertyTypes: true`. Optional properties taking `undefined` must declare `prop?: type | undefined`. Fetch `RequestInit` does not allow `body: undefined`; omit property when body is undefined.
 
-Some older prose in the continuation ledger and architecture document predates later completed slices. In particular, verified code-task acceptance and bounded same-runtime interrupted-worker continuation now exist; broader acceptance/recovery requirements remain. Use the newest evidence and source to resolve stale wording, without checking off unproved requirements.
+---
 
-## Latest validated state
+## 5. Next Focus Area: Gate 5 (Configuration, Operations, and Recovery — DF-19 & DF-20)
 
-The last implementation slice passed `pnpm typecheck`, `pnpm build`, `pnpm test` (23 files, 212 tests), `pnpm test:acceptance` (nine fresh-process scenarios), `pnpm test:smoke`, and `git diff --check`. The regular-suite log was `/tmp/gasteam-integration-ownership-tests.log`. These are preceding-slice results, not checks run while producing this handoff.
+The next session should implement and qualify **Gate 5** per `darkfactory.md` Section 9 and Section 10:
+1. **DF-19: Configuration Contract, Prometheus Metrics & Runbooks**:
+   - Coordinator configuration integration: add `darkFactory` to coordinator config with strict validation and startup preflight.
+   - Bounded operational Prometheus metrics (registered project, component, source, stage, role, reason; series capped at 10,000 per coordinator).
+   - Health inbox alerting and notification deduplication (15-minute cooldown, 3 outbound attempts, escalation).
+   - Offline journal migration, 365-day retention policies, and disaster recovery runbooks (Key rotation, Redis recovery, Quarantine review, Forced disable).
+2. **DF-20: Goal and Acceptance Verification**:
+   - Full dark factory reference graph validation across all 5 gates.
+   - End-to-end integration and smoke verification under simulated failures.
 
-For commands, prepend `export PATH=/home/linuxbrew/.linuxbrew/bin:$PATH` so pnpm/node resolve correctly. Known missing sourcemap warnings were harmless. The process scenarios use actual built plugins, Git repositories, and published DSH infrastructure with a controlled model adapter; they do not prove authenticated-model or external-CLI conformance. Consult the evidence document for the exact scenarios and remaining gaps.
+---
 
-## Immediate next implementation task
+## 6. Suggested Skills
 
-Before the stop request, the announced next task was bounded stale-target re-verification while preserving the submitted source commit and every earlier candidate checkout. Only source inspection had begun; **no retry implementation or schema changes were made**.
-
-Relevant findings and entry points:
-
-- `packages/agent-team/src/integrations.ts`: `TeamIntegrations.run` chooses the oldest unfinished job for one Team and holds canonical repository/target ownership throughout target observation, verification, promotion, and durable status. A replayed `running` job currently becomes failed with its checkout retained. A queued job advances through running and verified; promotion follows a Lead-session flush. A promotion error currently leaves the verified job available for replay.
-- `packages/agent-team/src/git-integration-provider.ts`: `verify` creates a detached worktree at `spec.cwd`, merges the pinned `sourceCommit`, runs the pinned commands, and rejects changed HEAD or dirty output. Reusing an existing candidate directory will fail and must not destroy its contents. `promote` recognizes an already-promoted candidate; a different current target raises `TEAM_INTEGRATION_STALE`. Thus re-verification needs a fresh retained candidate location and a durable, bounded transition design.
-- `packages/agent-team/src/integration-projection.ts`: inspect `integrationSchema` and `assertIntegrationTransition` before extending records. `projection.ts` imports these helpers, verifies the matching worker workspace, and checks candidate directory ownership. The integration reducer is around lines 348–360. Do not assume the transition schema lives directly in projection.ts.
-- `packages/agent-team/src/types.ts`, `remote-schemas.ts`, and client exports: inspect all snapshot/spec consumers when adding retry history or candidate metadata. Preserve stable submission/integration identity, immutable source/policy inputs, and replay compatibility.
-- `packages/agent-team/tests/team.spec.ts` and `git-integration.spec.ts`: existing integration transitions, flush failure, pinned replay, interrupted verification, and moved-target tests are starting points. Include meaningful real-Git and durable-replay coverage for new retry behavior.
-
-Decide how to persist each candidate round, bound target-movement attempts, and preserve old checkouts before editing. A crash after Git promotion but before the merged record must still recognize the existing candidate; do not accidentally trigger a replacement verification in that case. Shared execution locking does not prevent unrelated external Git writers from moving the target.
-
-## Source map for subsequent work
-
-Read the linked design/evidence rather than rebuilding the history from scratch:
-
-- Durable workspace state: `durable-journal.ts`, `file-ownership.ts`, `projects.ts`, `assignments.ts`, `dispatch-queue.ts`, `submissions.ts` under `packages/agent-team/src`.
-- Orchestration and runtime reconciliation: `coordinator.ts`, `coordinator-execution.ts`, `dsh-assignment-runtime.ts`, `runtime-drain.ts`, `turn-evidence.ts`.
-- Integration execution exclusion: `integration-ownership.ts`; its locks use canonical Git common directory plus target branch and Linux flock. Tests cover aliases/worktrees, contention without consuming queued work, and SIGKILL ownership release. Global integration backlog ordering is still absent.
-- Team task acceptance and runtime/message fences: `task-board.ts`, `index.ts`, `mailbox.ts`, `roster.ts`. Host acceptance binds the exact submission and verified integration; ordinary task mutation cannot bypass managed-task policy.
-- Scheduling interfaces: `scheduling-schemas.ts`, `remote-descriptors.ts`, `remote.ts`, and `packages/tool-agent-team/src/coordinator.ts`. Full authenticated browser transport and global operator authority are not yet proved.
-- Fresh-process harness: `tests/fixtures/restart-team.mjs`, `tests/support/process-fixture.ts`, `tests/cold-start.acceptance.ts`, `tests/assignment-restart.spec.ts`, `tests/integration-restart.spec.ts`. Acceptance is a separate Vitest command/config.
-
-Retain uncertain runtime ownership and capacity until actual stop evidence. Reports alone do not accept tasks. Do not weaken these boundaries to make retries pass. The current interrupted-worker recovery has a fixed three-round budget and 1/2/4-second delays, durable reserved message identities, and the same runtime/worktree; configurable policy, replacement/workflow handoff, and escalations remain unfinished.
-
-## Working conventions and suggested skills
-
-Follow the current session's developer instructions. No sub-agents were used for the latest slice; delegation is prohibited unless the user or applicable instructions explicitly request it. Give concise progress updates, avoid unnecessary permission requests, and update the existing continuation ledger and evidence document after future completed slices. Do not restart a service or publish merely because local tests pass.
-
-Suggested skills to invoke through the skill mechanism when applicable:
-
-- `handoff` — `.agents/skills/handoff/SKILL.md`, used for this document; use again for a later explicit handoff. It requests references to existing artifacts instead of duplicating them.
-- `openai-docs` — for later Codex/OpenAI setup or real-provider integration questions, not ordinary repository implementation.
-- `obscura` — if later dashboard/browser validation uses Obscura; unnecessary for the immediate Git integration task.
-
-No additional skill is required for the immediate stale-target implementation.
+The next agent should call the **Skill** tool for:
+- **`antigravity-guide`**: Reference manual for Antigravity CLI (`agy`), slash commands (`/goal`, `/teamwork-preview`, `/boost`, `/grilling`), and runtime controls.
+- **`agy-customizations`**: Reference guide for the Antigravity Customization System if creating or adapting custom skills, rules, hooks, or tools.
+- **`grilling`**: Interactive design interview skill to stress-test architectural plans with the user before starting Gate 5.

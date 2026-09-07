@@ -3,11 +3,22 @@ import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import z from 'zod'
+import { factoryTaskBindingSchema } from './remote-schemas.ts'
+import type { TeamTaskFactoryBinding } from './types.ts'
+import { admissionRecordSchema, admissionIntentSchema, planAdmission } from './darkfactory/admission-store.ts'
+import type { AdmissionRecord } from './darkfactory/admission-store.ts'
+import { assertAdmissionMatchesSpec } from './darkfactory/contracts/spec.ts'
+import { digestJson, canonicalJson } from './darkfactory/json.ts'
 import { DurableJournal } from './durable-journal.ts'
 import type { ReportAcceptanceRecord } from './reports.ts'
 import { ReportStore } from './reports.ts'
 import { pinWorkflowDefinition, validateWorkflowTemplate, WorkflowStore } from './workflows.ts'
 import type { ArtifactReference, CandidateReplacement, PinnedWorkflowDefinition, WorkflowExecution } from './workflows.ts'
+
+export class FactoryMaterializationConflictError extends Error {
+  readonly code = 'FACTORY_MATERIALIZATION_CONFLICT'
+  constructor() { super('Factory materialization conflicts with immutable inputs') }
+}
 
 const id = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/)
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
@@ -27,6 +38,7 @@ export interface WorkflowPublicationReceipt { readonly publisher: string; readon
 /** Persisted before the host is allowed to create the corresponding Team task. */
 export interface WorkflowTaskCreateIntent {
   readonly intentId: string
+  readonly factoryBinding?: TeamTaskFactoryBinding | undefined
   readonly projectId: string
   readonly teamId: string
   readonly executionId: string
@@ -58,6 +70,7 @@ export interface WorkflowTaskHost {
 
 export interface WorkflowCodeTaskCreateIntent {
   readonly intentId: string
+  readonly factoryBinding?: TeamTaskFactoryBinding | undefined
   readonly projectId: string
   readonly teamId: string
   readonly executionId: string
@@ -111,12 +124,14 @@ const reviewBindingSchema = z.object({ integrationId: id, sourceCommit: z.string
 const approvalSchema = reviewBindingSchema.extend({ executionId: id, stepId: id, reviewId: id }).strict()
 const workflowInputSchema = z.object({ name: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/), artifact: z.object({ kind: z.enum(['commit', 'file', 'report']), ref: text }).strict() }).strict()
 const intentSchema = z.object({
-  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, nonCodeCriteria: text, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(), review: reviewBindingSchema.optional(),
+  intentId: id, factoryBinding: factoryTaskBindingSchema.optional(), projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, nonCodeCriteria: text, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(), review: reviewBindingSchema.optional(),
 }).strict()
 const codeIntentSchema = z.object({
-  intentId: id, projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, reviewGate: id, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(),
+  intentId: id, factoryBinding: factoryTaskBindingSchema.optional(), projectId: id, teamId: id, executionId: id, stepId: id, subject: text, description: text, reviewGate: id, inputs: z.array(workflowInputSchema).max(128).default([]), candidateRound: z.number().int().nonnegative().optional(),
 }).strict()
+const factoryRuntimeAdmissionSchema = z.object({ id, intent: admissionIntentSchema }).strict()
 const creationSchema = z.object({
+  factoryAdmission: factoryRuntimeAdmissionSchema.optional(),
   executionId: id, projectId: id, teamId: id, template: z.unknown(), parameters: z.record(id, scalar), definition: z.unknown(), publicationGrant: z.object({ teamId: id, authorization: id }).strict().optional(), publicationPublisher: z.object({ identity: id, revision: positive }).strict().optional(),
 }).strict()
 const publicationIntentSchema = z.object({ idempotencyKey: id, executionId: id, stepId: id, authorization: id, publisherIdentity: id, publisherRevision: positive, evidence: z.object({ kind: id, ref: text }).strict(), release: z.object({ kind: id, ref: text }).strict() }).strict()
@@ -142,6 +157,7 @@ type Event = z.output<typeof eventSchema>
 type Payload = Event extends infer E ? E extends Event ? Omit<E, 'version' | 'sequence'> : never : never
 
 interface Creation {
+  readonly factoryAdmission?: z.output<typeof factoryRuntimeAdmissionSchema> | undefined
   readonly executionId: string
   readonly projectId: string
   readonly teamId: string
@@ -166,19 +182,24 @@ function reduce(state: State, raw: unknown): State {
     const template = validateSupportedTemplate(event.creation.template)
     const definition = validateSupportedTemplate(event.creation.definition)
     if (!isDeepStrictEqual(pinWorkflowDefinition(template, event.creation.parameters), definition)) throw new Error('Workflow runtime creation has a different pinned definition')
+    if ((definition.id === 'darkfactory') !== !!event.creation.factoryAdmission) throw new Error('Factory workflow requires a pinned admission binding')
+    if (event.creation.factoryAdmission) validateFactoryCreation(event.creation.factoryAdmission, event.creation)
     const creation: Creation = { ...event.creation, template, definition }
     return { ...state, creations: [...state.creations, creation] }
   }
   const creation = state.creations.find(value => value.executionId === event.executionId)
   if (!creation) throw new Error('Workflow runtime execution is missing')
+  if (creation.factoryAdmission && event.type !== 'workflow-runtime/task-intended' && event.type !== 'workflow-runtime/task-created') throw new Error('Factory admission is held')
   const prior = binding(state, event.executionId, event.stepId) ?? { executionId: event.executionId, projectId: creation.projectId, teamId: creation.teamId, stepId: event.stepId, sourceRound: 0, history: [] }
   if (event.type === 'workflow-runtime/task-intended') {
     if (prior.intent || prior.taskId || prior.reportId || prior.review || prior.approval) throw new Error('Workflow task intent already exists')
     if (event.intent.executionId !== event.executionId || event.intent.stepId !== event.stepId || event.intent.projectId !== creation.projectId || event.intent.teamId !== creation.teamId) throw new Error('Workflow task intent escapes its execution grant')
+    if (creation.factoryAdmission && (event.sourceRound !== 0 || !isDeepStrictEqual(event.intent, factoryTaskIntentFor(creation.factoryAdmission, event.stepId)))) throw new Error('Factory task intent does not match admission')
     return replaceBinding(state, { ...prior, intent: event.intent, sourceRound: event.sourceRound ?? 0, ...('review' in event.intent && event.intent.review === undefined ? {} : 'review' in event.intent ? { review: event.intent.review } : {}) })
   }
   if (event.type === 'workflow-runtime/task-created') {
     if (!prior.intent || prior.taskId || prior.reportId) throw new Error('Workflow task creation lacks an unconsumed intent')
+    if (creation.factoryAdmission && event.taskId !== creation.factoryAdmission.intent.plannedSteps.find(step => step.stepId === event.stepId)?.taskId) throw new Error('Factory task identity differs from admission')
     return replaceBinding(state, { ...prior, taskId: event.taskId })
   }
   if (event.type === 'workflow-runtime/step-receipted') {
@@ -211,6 +232,7 @@ function reduce(state: State, raw: unknown): State {
 
 function validateSupportedTemplate(value: unknown): PinnedWorkflowDefinition {
   const template = validateWorkflowTemplate(value)
+  if (template.id === 'darkfactory' && template.steps.map(step => step.acceptance.kind === 'factory-stage' ? step.acceptance.stage : '').join(',') === 'reproduction,implementation,machine-verification,integration,release-acceptance') return template
   if (template.id === 'investigation-report' && template.steps.every(step => step.acceptance.kind === 'report-review')) return template
   if (template.id === 'implementation-test-review-integration'
     && template.steps.map(step => step.acceptance.kind).join(',') === 'artifact-submitted,checks-passed,report-review,integrated') return template
@@ -218,6 +240,36 @@ function validateSupportedTemplate(value: unknown): PinnedWorkflowDefinition {
     && template.steps.map(step => step.acceptance.kind).join(',') === 'report-review,externally-authorized-publication') return template
   throw new Error('Workflow template is unsupported by this workflow runtime')
 }
+function validateFactoryCreation(factory: z.output<typeof factoryRuntimeAdmissionSchema>, creation: { executionId: string; projectId: string; teamId: string; definition: unknown; parameters: unknown }): void {
+  const { workKey, intentDigest, admissionId, workflowId, definition, plannedSteps, ...input } = factory.intent
+  if (canonicalJson(planAdmission(input)) !== canonicalJson(factory.intent) || factory.id !== `df-admission-${digestJson([workKey, input.spec.specDigest]).slice(7)}` ||
+    creation.executionId !== workflowId || creation.projectId !== input.spec.projectId || creation.teamId !== input.registeredLeadId ||
+    canonicalJson(creation.definition) !== canonicalJson(definition) || canonicalJson(creation.parameters) !== canonicalJson(input.workflow.parameters)) throw new Error('Factory workflow differs from its immutable admission')
+}
+function factoryBindingFor(factory: z.output<typeof factoryRuntimeAdmissionSchema>, stepId: string): TeamTaskFactoryBinding {
+  const { spec, definition, workflowId } = factory.intent
+  const step = definition.steps.find(step => step.id === stepId)
+  if (!step) throw new Error('Factory stage is not in its pinned workflow')
+  return factoryTaskBindingSchema.parse({ admissionId: factory.id, specDigest: spec.specDigest, policyDigest: spec.policyDigest, workflowDigest: spec.workflowDigest,
+    sourceRevision: spec.source.sourceRevision, projectId: spec.projectId, executionId: workflowId, stepId,
+    plannedInputs: step.artifacts.requires.map(name => ({ name, artifactName: name, producerStepId: definition.steps.find(producer => producer.artifacts.produces.includes(name))!.id })),
+  })
+}
+
+/** Reconstruct the entire task payload from the pinned admission before append or replay effects. */
+function factoryTaskIntentFor(factory: z.output<typeof factoryRuntimeAdmissionSchema>, stepId: string): z.output<typeof intentSchema> | z.output<typeof codeIntentSchema> {
+  const { spec, definition, workflowId: executionId, registeredLeadId: teamId } = factory.intent
+  const plan = factory.intent.plannedSteps.find(step => step.stepId === stepId)
+  const step = definition.steps.find(step => step.id === stepId)
+  if (!plan || !step) throw new Error('Factory task intent is outside admission plan')
+  const common = { intentId: plan.intentId, projectId: spec.projectId, teamId, executionId, stepId, subject: step.title,
+    description: excerpt(`${spec.objective}\n\nPinned factory spec ${spec.id} (${spec.specDigest}). Stage activation and resolved inputs require host evidence.`, 16_384, '\n[truncated]'),
+    inputs: [], candidateRound: 0, factoryBinding: factoryBindingFor(factory, stepId) }
+  return step.acceptance.kind === 'factory-stage' && step.acceptance.stage === 'implementation'
+    ? codeIntentSchema.parse({ ...common, reviewGate: `df-gate-${digestJson([factory.id, stepId]).slice(7)}` })
+    : intentSchema.parse({ ...common, nonCodeCriteria: 'Only registered factory stage evidence can satisfy this task.' })
+}
+
 function assertProject(project: WorkflowRuntimeProject, projectId: string, teamId: string): void {
   if (project.id !== projectId || !project.teamIds.includes(teamId)) throw new Error('Workflow project or Lead team is not registered')
 }
@@ -291,6 +343,7 @@ export class WorkflowRuntime {
     // This pure validation/substitution precedes the runtime creation intent.
     const definition = pinWorkflowDefinition(template, input.parameters)
     validateTaskCompatibleDefinition(definition)
+    if (definition.id === 'darkfactory') throw new Error('Factory workflow requires host-only admission materialization')
     const publication = definition.steps.find(step => step.acceptance.kind === 'externally-authorized-publication')
     let publicationGrant: { readonly teamId: string; readonly authorization: string } | undefined
     if (publication?.acceptance.kind === 'externally-authorized-publication') {
@@ -311,12 +364,50 @@ export class WorkflowRuntime {
     return this.inspect(executionId)!
   }
 
+  /** Materialize every pinned factory task while all stage and Team execution gates remain held. */
+  async materializeFactoryAdmission(raw: AdmissionRecord, project: WorkflowRuntimeProject): Promise<{ workflowId: string; workflowDigest: string; taskIds: string[] }> {
+    const record = admissionRecordSchema.parse(raw)
+    assertAdmissionMatchesSpec(record.receipt, record.intent.spec)
+    if (record.id !== record.receipt.id || record.receipt.workflowId !== record.intent.workflowId || canonicalJson(record.receipt.taskIds) !== canonicalJson(record.intent.plannedSteps.map(step => step.taskId))) throw new FactoryMaterializationConflictError()
+    if (record.status === 'quarantined' || record.barrier !== 'closed') throw new Error('Factory admission cannot be materialized')
+    const factoryAdmission = { id: record.id, intent: record.intent }
+    const { workflowId: executionId, registeredLeadId: teamId, workflow, definition, spec } = record.intent
+    assertProject(project, record.projectId, teamId)
+    const registered = this.templates.get(`${workflow.template.id}@${workflow.template.version}`)
+    if (!registered || canonicalJson(registered) !== canonicalJson(workflow.template) || definition.id !== 'darkfactory') throw new Error('Factory workflow template is not registered')
+    validateTaskCompatibleDefinition(definition)
+    const creation = { executionId, projectId: record.projectId, teamId, template: workflow.template, parameters: workflow.parameters, definition, factoryAdmission }
+    validateFactoryCreation(factoryAdmission, creation)
+    const existing = this.creation(executionId)
+    if (existing && canonicalJson(existing) !== canonicalJson(creation)) throw new FactoryMaterializationConflictError()
+    if (!existing) await this.journal.append(() => ({ type: 'workflow-runtime/created', creation }))
+    await this.ensureWorkflow(this.creation(executionId)!)
+    for (const plan of record.intent.plannedSteps) {
+      let current = binding(this.journal.snapshot(), executionId, plan.stepId)
+      if (!current?.intent) {
+        const intent = factoryTaskIntentFor(factoryAdmission, plan.stepId)
+        await this.journal.append(() => ({ type: 'workflow-runtime/task-intended', executionId, stepId: plan.stepId, intent, sourceRound: 0 }))
+        current = binding(this.journal.snapshot(), executionId, plan.stepId)!
+      }
+      // Reinvoke the idempotent host transaction even on replay so the concrete
+      // Team record must still match the original full task payload.
+      const intent = current.intent!
+      const created = 'reviewGate' in intent
+        ? await this.tasks.createPinnedCodeTask?.(intent)
+        : await this.tasks.createPinnedTask(intent)
+      if (!created || created.taskId !== plan.taskId || current.taskId && current.taskId !== created.taskId) throw new FactoryMaterializationConflictError()
+      if (!current.taskId) await this.journal.append(() => ({ type: 'workflow-runtime/task-created', executionId, stepId: plan.stepId, taskId: created.taskId }))
+    }
+    return { workflowId: executionId, workflowDigest: spec.workflowDigest, taskIds: record.intent.plannedSteps.map(step => step.taskId) }
+  }
+
   /** Reconcile accepted receipts, then create and start every newly eligible bound task. */
   async scan(project: WorkflowRuntimeProject): Promise<WorkflowRuntimeView[]> {
     const dispatched: WorkflowRuntimeView[] = []
     for (const creation of this.journal.snapshot().creations.filter(value => value.projectId === project.id)) {
       assertProject(project, creation.projectId, creation.teamId)
       await this.ensureWorkflow(creation)
+      if (creation.factoryAdmission) continue
       await this.reconcileReceipts(creation)
       await this.reconcileCode(creation)
       await this.reconcilePublication(creation)
@@ -335,6 +426,7 @@ export class WorkflowRuntime {
     if (!creation) throw new Error('Workflow runtime execution is missing')
     assertProject(project, creation.projectId, creation.teamId)
     await this.ensureWorkflow(creation)
+    if (creation.factoryAdmission) return this.inspect(executionId)
     await this.reconcileReceipts(creation)
     await this.reconcileCode(creation)
     await this.reconcilePublication(creation)

@@ -117,6 +117,8 @@ function parseRow(bytes: Buffer, workspaceId: string, source: WorkspaceActivityS
   return { ref: { workspaceId, source, sequence: raw.data.sequence }, type: raw.data.type, ...(raw.data.observedAt === undefined ? {} : { timestampMs: raw.data.observedAt }), ...context(value) }
 }
 function context(value: unknown): Context {
+  const factory = z.object({ type: z.enum(['health/factory-escalated', 'health/factory-resolved']), input: z.object({ projectId: id }).passthrough() }).passthrough().safeParse(value)
+  if (factory.success) return { projectId: factory.data.input.projectId }
   const shape = z.object({ projectId: id.optional(), teamId: id.optional(), taskId: id.optional(), attemptId: id.optional(), generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), work: z.object({ projectId: id.optional(), teamId: id.optional(), taskId: id.optional() }).passthrough().optional() }).passthrough().safeParse(value)
   if (!shape.success) return {}; const work = shape.data.work
   return { ...(shape.data.projectId === undefined ? work?.projectId === undefined ? {} : { projectId: work.projectId } : { projectId: shape.data.projectId }), ...(shape.data.teamId === undefined ? work?.teamId === undefined ? {} : { teamId: work.teamId } : { teamId: shape.data.teamId }), ...(shape.data.taskId === undefined ? work?.taskId === undefined ? {} : { taskId: work.taskId } : { taskId: shape.data.taskId }), ...(shape.data.attemptId === undefined ? {} : { attemptId: shape.data.attemptId }), ...(shape.data.generation === undefined ? {} : { generation: shape.data.generation }) }

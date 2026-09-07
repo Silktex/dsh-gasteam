@@ -20,6 +20,7 @@ const referenceSchema = z.object({ kind: id, ref: text }).strict()
 export type ArtifactReference = z.output<typeof referenceSchema>
 
 const acceptanceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('factory-stage'), stage: z.enum(['reproduction', 'implementation', 'machine-verification', 'integration', 'release-acceptance']) }).strict(),
   z.object({ kind: z.literal('artifact-submitted'), artifact: artifactName }).strict(),
   z.object({ kind: z.literal('checks-passed'), source: artifactName, candidate: artifactName }).strict(),
   z.object({ kind: z.literal('integrated'), source: artifactName, candidate: artifactName }).strict(),
@@ -141,6 +142,7 @@ function sameReference(left: ArtifactReference | undefined, right: ArtifactRefer
   return left?.kind === right.kind && left.ref === right.ref
 }
 function eligible(execution: WorkflowExecution, step: WorkflowStepRecord, now: number): boolean {
+  if (definitionStep(execution, step.id).acceptance.kind === 'factory-stage') return false
   if (step.phase !== 'pending' || (step.notBefore !== undefined && now < step.notBefore) || !allDependenciesCompleted(execution, step.id)) return false
   return definitionStep(execution, step.id).artifacts.requires.every(name => availableArtifacts(execution).has(name))
 }

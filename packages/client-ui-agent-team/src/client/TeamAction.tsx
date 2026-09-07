@@ -499,9 +499,9 @@ export function TeamAction({
                 {healthLoading && <div className={css.notice}>{t('health.loading')}</div>}
                 {!healthLoading && healthProjectId.trim() !== '' && health?.length === 0 && <div className={css.notice}>{t('health.empty')}</div>}
                 {health !== null && health.map(escalation => <article key={escalation.id} className={css.healthIncident}>
-                  <div className={css.taskTitle}><strong>{t(`health.severity.${escalation.severity}`)}</strong><span>{t(`health.condition.${escalation.condition}`)}</span></div>
+                  <div className={css.taskTitle}><strong>{t(`health.severity.${escalation.severity}`)}</strong><span>{escalation.source === 'darkfactory' ? `Dark Factory · ${escalation.stage} · ${escalation.reason}` : t(`health.condition.${escalation.condition}`)}</span></div>
                   <p>{escalation.diagnostics}</p>
-                  <div className={css.meta}><span>{escalation.work.taskId}</span><span>{escalation.attemptId}</span></div>
+                  <div className={css.meta}>{escalation.source === 'darkfactory' ? <><span>{escalation.projectId}</span><span>{escalation.effectId}</span></> : <><span>{escalation.work.taskId}</span><span>{escalation.attemptId}</span></>}</div>
                   {escalation.acknowledgement === undefined
                     ? <button type="button" className={css.smallButton} disabled={acknowledging.has(escalation.id)} onClick={() => { void acknowledge(escalation) }}>{t('health.acknowledge')}</button>
                     : <div className={css.meta}>{t('health.acknowledged')} · {escalation.acknowledgement.actor}</div>}

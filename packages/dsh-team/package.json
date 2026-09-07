@@ -16,6 +16,10 @@
     "./supervisor": "./lib/supervisor.js",
     "./external-runtime-supervisor": "./lib/external-runtime-supervisor.js",
     "./coordinator": "./lib/coordinator.js",
+    "./darkfactory": {
+      "types": "./lib/types/darkfactory.d.ts",
+      "default": "./lib/darkfactory.js"
+    },
     "./remote": "./lib/remote.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",

@@ -136,6 +136,25 @@ async function waitNoAgent(ctx: Context, id: SessionId): Promise<void> {
 }
 
 describe('dsh-tool-team', () => {
+  it('renders factory inbox and acknowledgement variants through the existing scoped tool schemas', async () => {
+    const { ctx, lead } = await setup([])
+    const incident = { schemaVersion: 1 as const, id: 'factory-escalation-1', source: 'darkfactory' as const, projectId: 'project', policyRevision: 1, stage: 'ingress' as const, reason: 'PAYLOAD_INVALID', effectId: 'envelope:1', evidenceRefs: ['envelope:1'], severity: 'warning' as const, diagnostics: 'Payload needs reconciliation.', revision: 1, raisedAt: 0, cooldownUntil: 1000 }
+    ctx.provide('workspaceCoordinator', {
+      healthInbox: () => [incident],
+      acknowledgeHealth: (_caller: Agent, projectId: string, id: string, revision: number) => { expect([projectId, id, revision]).toEqual(['project', incident.id, 1]); return { ...incident, revision: 2, acknowledgement: { actor: lead.id, at: 1 } } },
+    } as never)
+    const tools = await ctx.plugin(coordinatorTools)
+    try {
+      const inbox = await execute(ctx, lead, 'team_health_inbox', { project_id: 'project' })
+      expect(inbox.isError, text(inbox)).not.toBe(true)
+      expect(JSON.parse(text(inbox))).toEqual([incident])
+      const ack = await execute(ctx, lead, 'team_health_ack', { project_id: 'project', escalation_id: incident.id, expected_revision: 1 })
+      expect(ack.isError, text(ack)).not.toBe(true)
+      expect(JSON.parse(text(ack))).toMatchObject({ source: 'darkfactory', revision: 2, acknowledgement: { actor: lead.id } })
+      expect(JSON.parse(text(ack))).not.toHaveProperty('work')
+    } finally { await tools.dispose() }
+  })
+
   it('selects only the built-in code workflow through the coordinator tool while preserving report workflow calls', async () => {
     const { ctx, lead } = await setup([])
     const requests: unknown[] = []

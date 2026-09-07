@@ -56,9 +56,12 @@ import type {
 } from './types.ts'
 
 export type * from './types.ts'
+export { factoryTaskBindingSchema } from './remote-schemas.ts'
 export type { TeamMembership } from './roster.ts'
 export { TeamId, TeamMessageId, TeamTaskId, TeamBatchId } from './types.ts'
 export { TeamError } from './error.ts'
+export { getErrorSinkPath, recordStructuredError, readStructuredErrors } from './error-sink.ts'
+export type { StructuredErrorRecord } from './error-sink.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

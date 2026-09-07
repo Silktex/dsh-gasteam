@@ -1,5 +1,6 @@
 /** Durable workspace startup, directory ownership, and registered-Team admission. */
 import { createHash, randomUUID } from 'node:crypto'
+import { stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -8,6 +9,9 @@ import type { Branded } from '@deepseek-ai/dsh-brand'
 import z from 'zod'
 import schema from '@deepseek-ai/schemastery'
 import { DurableJournal } from './durable-journal.ts'
+import { parseDarkFactoryConfig, preflightDarkFactory } from './darkfactory/config.ts'
+import type { darkFactoryConfigSchema } from './darkfactory/config.ts'
+import { DarkFactoryObserver } from './darkfactory/observer.ts'
 import { MAX_TIMER_TIMEOUT_MS, RetainedShutdown } from './runtime-drain.ts'
 import { ProjectCatalog } from './projects.ts'
 import type { ConfiguredPublicationGrant, ProjectRecord, RegisterProjectRequest } from './projects.ts'
@@ -28,7 +32,7 @@ import type { AttemptRecord } from './assignments.ts'
 import { WorkflowStore } from './workflows.ts'
 import { WorkflowRuntime, createWorkflowRequestSchema } from './workflow-runtime.ts'
 import type { CreateWorkflowRequest, WorkflowPublicationReceipt, WorkflowPublicationIntent, WorkflowRuntimeView } from './workflow-runtime.ts'
-import { implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate } from './workflow-templates.ts'
+import { implementationTestReviewIntegrationTemplate, investigationReportTemplate, releasePublicationTemplate, darkFactoryTemplate } from './workflow-templates.ts'
 import type { AttemptHealth, OperatorEscalation } from './health.ts'
 import { CoordinatorBatchStore } from './coordinator-batches.ts'
 import type { CreateWorkspaceBatchRequest, WorkspaceBatchNotification, WorkspaceBatchView, WorkspaceTaskRef } from './coordinator-batches.ts'
@@ -38,6 +42,8 @@ import { WorkspacePageSnapshotStore } from './workspace-pagination.ts'
 import { WorkspaceActivityReader } from './workspace-activity.ts'
 import type { WorkspaceActivityPage, WorkspaceActivityRequest } from './workspace-activity.ts'
 import type { RuntimeProviderCapabilities } from './runtime-provider.ts'
+import { readStructuredErrors } from './error-sink.ts'
+import type { SystemDiagnosticsView } from './system-diagnostics.ts'
 
 function ctxIntegrationFailed(ctx: Context, lead: Agent, integrationId: string): boolean {
   return ctx.agentTeams.listIntegrations(lead).some(integration => integration.id === integrationId && integration.phase === 'failed')
@@ -103,11 +109,12 @@ function reduce(state: State, raw: unknown): State {
     value.projectId !== next.projectId || value.teamId !== next.teamId), next] }
 }
 export interface PublicationConfig { readonly grants: readonly ConfiguredPublicationGrant[]; readonly publisher: { readonly identity: string; readonly revision: number; publish(intent: WorkflowPublicationIntent): Promise<WorkflowPublicationReceipt> } }
-export interface CoordinatorConfig { readonly directory: string; /** Bounds one complete close observation; timeout retains coordinator ownership. */ readonly shutdownDeadlineMs?: number | undefined; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined; /** Exact server-configured Agent allowed to coordinate across projects. */ readonly workspaceOperatorId?: string | undefined }
+export interface CoordinatorConfig { readonly directory: string; /** Strictly validated host policy; absent means disabled. */ readonly darkFactory?: z.input<typeof darkFactoryConfigSchema>; /** Bounds one complete close observation; timeout retains coordinator ownership. */ readonly shutdownDeadlineMs?: number | undefined; readonly execution?: ExecutionConfig | undefined; readonly publication?: PublicationConfig | undefined; /** Exact server-configured Agent allowed to coordinate across projects. */ readonly workspaceOperatorId?: string | undefined }
 export interface Config extends CoordinatorConfig { readonly scanIntervalMs: number }
 export const name = 'agent-team-workspace-coordinator'
 export const inject = ['agentTeams', 'agents', 'sessions', 'sessionPersistence', 'subagents']
 export const Config: schema<Config> = schema.object({
+  darkFactory: schema.transform(schema.any(), value => parseDarkFactoryConfig(value)).default({ schemaVersion: 1, enabled: false }),
   directory: schema.string().required(), scanIntervalMs: schema.number().step(1).min(1).default(1_000), shutdownDeadlineMs: schema.number().step(1).min(1).max(MAX_TIMER_TIMEOUT_MS).default(30_000),
   execution: schema.union([schema.const(undefined), schema.object({ modelProvider: schema.string().required(), model: schema.string().required(), maxRepairAttempts: schema.union([schema.const(undefined), schema.number().step(1).min(0).max(10)]), retryPolicy: schema.union([schema.const(undefined), schema.object({ maxAttempts: schema.number().step(1).min(1).max(100), initialDelayMs: schema.number().step(1).min(0), multiplier: schema.number().min(1).max(1_000_000), maxDelayMs: schema.number().step(1).min(0) })]), dispatchIntervalMs: schema.union([schema.const(undefined), schema.number().step(1).min(0)]), candidateRetention: schema.union([schema.const(undefined), schema.object({ delayMs: schema.number().step(1).min(0), commandTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), })]), integrationBatching: schema.union([schema.const(undefined), schema.object({ mode: schema.const('ordered'), maxCandidates: schema.number().step(1).min(1).max(64), maxSplitAttempts: schema.number().step(1).min(1).max(256) })]), health: schema.union([schema.const(undefined), schema.object({ dshDeadlineMs: schema.number().step(1).min(1), externalDeadlineMs: schema.number().step(1).min(1), escalationCooldownMs: schema.number().step(1).min(0), maxEscalationsPerCondition: schema.number().step(1).min(1).max(100), recovery: schema.union([schema.const(undefined), schema.object({ maxNudges: schema.number().step(1).min(1).max(3) })]) })]), externalCodex: schema.union([schema.const(undefined), schema.object({ projectId: schema.string().required(), directory: schema.string().required(), codeWorktreeDirectory: schema.union([schema.const(undefined), schema.string()]), cwd: schema.string().required(), executable: schema.string().required(), version: schema.string().required(), model: schema.string().required(), sandbox: schema.string().required(), maxSpoolBytes: schema.number().step(1).min(1).required(), terminateGraceMs: schema.number().step(1).min(1).required(), admissionMaxOutputBytes: schema.union([schema.const(undefined), schema.number().step(1).min(1)]), admissionTimeoutMs: schema.union([schema.const(undefined), schema.number().step(1).min(1)]) })]), maxConcurrent: schema.number().step(1).min(1).default(8) })]),
   // The publisher is a server object, never a model-supplied value.
@@ -175,6 +182,7 @@ export class WorkspaceCoordinator {
   private workflowStore: WorkflowStore | undefined
   private workflows: WorkflowRuntime | undefined
   private batches: CoordinatorBatchStore | undefined
+  private factoryObserver: DarkFactoryObserver | undefined
 
   private constructor(
     private readonly ctx: Context,
@@ -184,6 +192,16 @@ export class WorkspaceCoordinator {
   ) { this.shutdown = new RetainedShutdown(shutdownDeadlineMs); this.workspaceActivity = new WorkspaceActivityReader(directory, journal.snapshot().id!) }
 
   static async open(ctx: Context, config: CoordinatorConfig): Promise<WorkspaceCoordinator> {
+    const factory = parseDarkFactoryConfig(config.darkFactory)
+    // Executing modes remain gated before stores or dispatch. Observe preflight
+    // checks the owned catalog below; disabled configuration starts no factory service.
+    const factoryPreflight = preflightDarkFactory(factory, { projects: [], capabilities: [] })
+    if (factory.enabled && factory.mode !== 'observe' && !factoryPreflight.ok) {
+      // No host stores have been inspected yet, so report runtime availability
+      // rather than asserting that a persisted project is unregistered.
+      const unavailable = factoryPreflight.diagnostics.find(diagnostic => diagnostic.code === 'RUNTIME_UNIMPLEMENTED')
+      throw new Error(`Dark Factory startup preflight failed: ${unavailable?.code ?? factoryPreflight.diagnostics.map(diagnostic => diagnostic.code).join(', ')}`)
+    }
     if (config.execution !== undefined) executionConfigSchema.parse(config.execution)
     if (!isAbsolute(config.directory)) throw new Error('Coordinator directory must be absolute')
     const shutdownDeadlineMs = config.shutdownDeadlineMs ?? 30_000
@@ -201,6 +219,13 @@ export class WorkspaceCoordinator {
       if (journal.snapshot().id === undefined) await journal.append(() => ({ type: 'coordinator/created', id: randomUUID() }))
       if (config.publication && (!config.publication.grants.length || typeof config.publication.publisher.publish !== 'function' || !config.publication.publisher.identity || !Number.isInteger(config.publication.publisher.revision) || config.publication.publisher.revision < 1)) throw new Error('Publication configuration requires grants and an identified idempotent publisher')
       catalog = await ProjectCatalog.open(config.directory, config.publication?.grants)
+      if (factory.enabled) {
+        const preflight = preflightDarkFactory(factory, {
+          projects: catalog.list().map(project => ({ id: project.id, repositoryId: project.repositoryId, targetBranch: project.targetBranch, componentIds: [] })),
+          capabilities: ['project-ownership', 'ingestion', 'secret-resolution', 'policy-journal', 'ingress-scope', 'redaction', 'health-inbox'],
+        })
+        if (!preflight.ok) throw new Error(`Dark Factory startup preflight failed: ${preflight.diagnostics.map(diagnostic => diagnostic.code).join(', ')}`)
+      }
       coordinator = new WorkspaceCoordinator(ctx, journal, catalog, config.publication, config.workspaceOperatorId, shutdownDeadlineMs, config.directory)
       const activeCoordinator = coordinator
       if (journal.snapshot().operatorId !== config.workspaceOperatorId) {
@@ -208,7 +233,11 @@ export class WorkspaceCoordinator {
         await journal.append(() => ({ type: 'coordinator/workspace-operator-configured', operatorId: config.workspaceOperatorId! }))
       }
       const ownedCatalog = catalog
-      execution = await CoordinatorExecution.open(ctx, config.directory, config.execution, () => ownedCatalog.list(), projectId => journal.snapshot().controls.find(control => control.projectId === projectId)?.paused === true)
+      const factoryHistory = factory.enabled || await stat(join(config.directory, 'darkfactory-policy.jsonl')).then(value => value.isFile(), error => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return false
+        throw error
+      })
+      execution = await CoordinatorExecution.open(ctx, config.directory, config.execution, () => ownedCatalog.list(), projectId => journal.snapshot().controls.find(control => control.projectId === projectId)?.paused === true, { factoryHealth: factoryHistory })
       activeCoordinator.execution = execution
       activeCoordinator.batches = await CoordinatorBatchStore.open(config.directory)
       execution.setWorkspaceBatchBlocker(work => activeCoordinator.workspaceBatchBlocker(work))
@@ -219,12 +248,15 @@ export class WorkspaceCoordinator {
         codeStatus: async intent => await execution!.workflowCodeStatus(intent),
         approvePinnedIntegration: async receipt => await execution!.approveWorkflowIntegration(receipt),
         ...(config.publication === undefined ? {} : { publishAuthorizedRelease: async intent => await config.publication!.publisher.publish(intent), publicationPublisher: { identity: config.publication.publisher.identity, revision: config.publication.publisher.revision } }),
-      }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate, ...(config.publication === undefined ? [] : [releasePublicationTemplate])])
+      }, [investigationReportTemplate, implementationTestReviewIntegrationTemplate, darkFactoryTemplate, ...(config.publication === undefined ? [] : [releasePublicationTemplate])])
       activeCoordinator.workflowStore = workflowStore
       activeCoordinator.workflows = workflows
+      if (factory.enabled) activeCoordinator.factoryObserver = await DarkFactoryObserver.open(config.directory, factory,
+        (input, at, cooldown) => execution!.raiseFactoryEscalation(input, at, cooldown), catalog.list())
       await activeCoordinator.reconcile()
       return activeCoordinator
     } catch (error) {
+      await coordinator?.factoryObserver?.close()
       await workflows?.close()
       await workflowStore?.close()
       await execution?.close()
@@ -338,7 +370,9 @@ export class WorkspaceCoordinator {
       }) })),
       queue: current.dispatchStatus.map(request => ({ projectId: request.projectId, teamId: request.teamId, taskId: request.taskId, revision: request.revision, ...(request.enqueuedAt === undefined ? {} : { enqueuedAt: request.enqueuedAt }), state: request.state, blockers: request.blockers.map(blocker => ({ code: blocker.code })) })),
       integrations: current.projects.flatMap(project => project.teams.flatMap(team => { const lead = this.ctx.agents.get(SessionId(team.teamId)); return lead === undefined ? [] : this.ctx.agentTeams.listIntegrations(lead).map(integration => ({ integrationId: integration.id, projectId: project.project.id, teamId: team.teamId, phase: integration.phase, sourceCommit: integration.sourceCommit, ...(integration.failureKind === undefined ? {} : { failureKind: integration.failureKind }), ...(integration.error === undefined ? {} : { diagnostic: integration.error }) })) })),
-      escalations: current.escalations.map(escalation => ({ id: escalation.id, revision: escalation.revision, projectId: escalation.work.projectId, teamId: escalation.work.teamId, taskId: escalation.work.taskId, attemptId: escalation.attemptId, generation: escalation.generation, severity: escalation.severity, condition: escalation.condition, diagnostics: escalation.diagnostics })),
+      escalations: current.escalations.map(escalation => escalation.source === 'darkfactory'
+        ? { id: escalation.id, revision: escalation.revision, source: 'darkfactory' as const, projectId: escalation.projectId, stage: escalation.stage, reason: escalation.reason, effectId: escalation.effectId, evidenceRefs: escalation.evidenceRefs, severity: escalation.severity, diagnostics: escalation.diagnostics }
+        : { id: escalation.id, revision: escalation.revision, projectId: escalation.work.projectId, teamId: escalation.work.teamId, taskId: escalation.work.taskId, attemptId: escalation.attemptId, generation: escalation.generation, severity: escalation.severity, condition: escalation.condition, diagnostics: escalation.diagnostics }),
     }
   }
 
@@ -500,6 +534,26 @@ export class WorkspaceCoordinator {
     })
   }
 
+  async systemDiagnostics(caller: Agent, projectId: string): Promise<SystemDiagnosticsView> {
+    this.authorize(caller, projectId)
+    const view = this.view()
+    const project = view.projects.find(p => p.project.id === projectId)
+    const escalations = this.healthInbox(caller, projectId)
+    const activeAttempts = view.attempts.filter(a => a.projectId === projectId && a.phase !== 'terminal').length
+    const blockedDispatches = view.dispatchStatus.filter(r => r.projectId === projectId && r.blockers.length > 0).length
+    const recentErrors = await readStructuredErrors({ since: Date.now() - 24 * 60 * 60 * 1000, limit: 10 })
+    const healthy = escalations.length === 0 && blockedDispatches === 0 && recentErrors.filter(e => e.source === 'cordis' || e.source === 'coordinator').length === 0
+    return {
+      projectId,
+      healthy,
+      paused: project?.paused ?? false,
+      activeAttempts,
+      activeEscalations: escalations,
+      recentErrors,
+      blockedDispatches,
+    }
+  }
+
   async controlScheduling(caller: Agent, request: SchedulingControl): Promise<SchedulingView> {
     const control = schedulingControlSchema.parse(request)
     if (control.action === 'pause') await this.pause(caller, control.projectId, control.expectedRevision, control.paused)
@@ -538,7 +592,7 @@ export class WorkspaceCoordinator {
       runtimeCapabilities: this.execution?.routedCapabilities() ?? disabledRuntimeCapabilities(),
       // This mirrors the scheduler's authoritative batch fence for dashboard callers.
       readyTasks: this.projects.flatMap(project => project.paused ? [] : project.teams.flatMap(team =>
-        team.status !== 'available' ? [] : team.tasks.filter(task => task.status === 'pending' && task.blockedBy.every(id => team.tasks.find(task => task.id === id)?.status === 'completed')
+        team.status !== 'available' ? [] : team.tasks.filter(task => !task.factoryBinding && task.status === 'pending' && task.blockedBy.every(id => team.tasks.find(task => task.id === id)?.status === 'completed')
           && this.workspaceBatchBlocker({ projectId: project.project.id, teamId: team.teamId, taskId: task.id }) === undefined
           && !execution.attempts.some(attempt => attempt.teamId === team.teamId && attempt.taskId === task.id)
           && !execution.dispatchRequests.some(request => request.teamId === team.teamId && request.taskId === task.id && request.cancelReason !== undefined))
@@ -550,6 +604,7 @@ export class WorkspaceCoordinator {
     this.controller.abort(new Error('Coordinator is closing'))
     return this.shutdown.close(async () => {
       await this.pending
+      await this.factoryObserver?.close()
       await this.workspaceActivity.close()
       await this.workspacePages.close()
       await this.workflows?.close()
@@ -559,6 +614,9 @@ export class WorkspaceCoordinator {
       try { await this.catalog.close() } finally { await this.journal.close() }
     })
   }
+
+  /** Host diagnostics only; no ingress secret or source payload enters the dashboard. */
+  darkFactoryStatus(): { mode: 'observe'; address: string; port: number } | undefined { return this.factoryObserver?.status() }
 
   private run<T>(operation: () => Promise<T>): Promise<T> {
     if (this.controller.signal.aborted) return Promise.reject(new Error('Coordinator is closed'))

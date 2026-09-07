@@ -413,6 +413,12 @@ Test files below are proposed under `packages/agent-team/tests/darkfactory/`; fr
 | DF-18 compression | Attempt artifacts + usage / compression observation | `compression.spec.ts`: supported metadata, retrieval outage, cross-project denial, quality regression | `compression_observations_total` |
 | DF-19 operations | Coordinator/health/migration journal / control and restore receipts | `operations.spec.ts`: pause composition, redaction, cardinality/retention limits, restore/disable | `operational_escalations_total` |
 | DF-20 qualification | Qualification evidence artifact / gate receipt | `darkfactory-acceptance.spec.ts`: full healthy/rollback chains and real adapter conformance | `qualification_outcomes_total` |
+| DF-21 mutation-loop | Verification sandbox + test generator / hardened assertion receipt | `mutation-feedback.spec.ts`: surviving mutant AST diff fed to generator agent | `mutant_hardening_total` |
+| DF-22 pbt-invariants | Spec compiler + test runner / property-based scenario receipt | `pbt.spec.ts`: fast-check fuzzing of codecs and state machine invariants | `pbt_invariants_total` |
+| DF-23 hybrid-critics | Verification journal / 3-party static+dual-LLM critic verdict | `critics-hybrid.spec.ts`: Semgrep/AST linter + dual diverse LLM consensus | `hybrid_critic_verdicts_total` |
+| DF-24 attestation | Verification journal / in-toto SLSA v1.0 predicate | `attestation.spec.ts`: in-toto statement envelope with Ed25519 signature | `attestations_generated_total` |
+| DF-25 semantic-canary | Release journal / OpenTelemetry trace & eBPF socket verdict | `canary-semantic.spec.ts`: span exception ratios and TCP socket reset anomalies | `semantic_canary_verdicts_total` |
+| DF-26 refinery-bisect | Integration store / batched candidate bisection receipt | `refinery-bisect.spec.ts`: stacked branch verification with binary search bisect | `refinery_bisections_total` |
 
 ### 10.2 Unattended qualification and rollout — DF-20
 

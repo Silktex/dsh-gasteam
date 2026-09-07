@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-experimental-agent-team/coordinator'
-import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView, WorkspaceBatchView, WorkspaceBatchNotification } from '@deepseek-ai/dsh-experimental-agent-team/client'
+import type { OperatorEscalation, ReviewableReport, SchedulingView, WorkflowRuntimeView, WorkspaceBatchView, WorkspaceBatchNotification, SystemDiagnosticsView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'tool-team-coordinator'
@@ -35,12 +35,21 @@ const workflowSchema = { type: 'object', additionalProperties: false, properties
   } } },
 } } as const
 const workflowOutput = { schema: workflowSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
-const escalationSchema = { type: 'object', additionalProperties: false, properties: {
+const attemptEscalationSchema = { type: 'object', additionalProperties: false, properties: {
   id: { type: 'string', required: true }, attemptId: { type: 'string', required: true }, generation: { type: 'integer', required: true }, condition: { type: 'string', required: true, enum: ['stale', 'failed'] }, severity: { type: 'string', required: true, enum: ['warning', 'critical'] }, source: { type: 'string', required: true, enum: ['health'] }, diagnostics: { type: 'string', required: true }, revision: { type: 'integer', required: true }, cooldownUntil: { type: 'number', required: true },
   work: { type: 'object', additionalProperties: false, required: true, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true }, state: { type: 'string', required: true, enum: ['active', 'dependency-wait', 'operator-wait', 'failed', 'unavailable'] } } },
   acknowledgement: { type: 'object', additionalProperties: false, properties: { actor: { type: 'string', required: true }, at: { type: 'number', required: true } } },
   resolution: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true, enum: ['condition-cleared', 'accepted-terminal', 'handoff-replaced'] }, source: { type: 'string', required: true, enum: ['health-observation', 'accepted-report', 'accepted-submission', 'accepted-integration', 'operator-handoff'] }, at: { type: 'number', required: true }, replacementAttemptId: { type: 'string' } } },
 } } as const
+const factoryEscalationSchema = { type: 'object', additionalProperties: false, properties: {
+  schemaVersion: { type: 'integer', required: true, enum: [1] }, id: { type: 'string', required: true }, projectId: { type: 'string', required: true }, policyRevision: { type: 'integer', required: true },
+  source: { type: 'string', required: true, enum: ['darkfactory'] }, stage: { type: 'string', required: true, enum: ['ingress', 'trust', 'admission', 'verification', 'release', 'economics', 'operations'] },
+  reason: { type: 'string', required: true }, effectId: { type: 'string', required: true }, evidenceRefs: { type: 'array', required: true, items: { type: 'string' } },
+  severity: { type: 'string', required: true, enum: ['warning', 'critical'] }, diagnostics: { type: 'string', required: true }, revision: { type: 'integer', required: true }, raisedAt: { type: 'number', required: true }, cooldownUntil: { type: 'number', required: true },
+  acknowledgement: { type: 'object', additionalProperties: false, properties: { actor: { type: 'string', required: true }, at: { type: 'number', required: true } } },
+  resolution: { type: 'object', additionalProperties: false, properties: { reason: { type: 'string', required: true, enum: ['operator-resolved'] }, source: { type: 'string', required: true, enum: ['factory-reconciliation'] }, actor: { type: 'string', required: true }, evidenceRefs: { type: 'array', required: true, items: { type: 'string' } }, at: { type: 'number', required: true } } },
+} } as const
+const escalationSchema = { oneOf: [attemptEscalationSchema, factoryEscalationSchema] } as const
 const healthInboxOutput = { schema: { type: 'array', items: escalationSchema } as const, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const healthOutput = { schema: escalationSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
 const batchRefSchema = { type: 'object', additionalProperties: false, properties: { projectId: { type: 'string', required: true }, teamId: { type: 'string', required: true }, taskId: { type: 'string', required: true } } } as const
@@ -78,10 +87,39 @@ function workflow(value: WorkflowRuntimeView) { return { ...value, steps: value.
   ...(failure === undefined ? {} : { failure: { reason: failure.reason, evidence: { ...failure.evidence } } }),
   ...(retryNotBefore === undefined ? {} : { retryNotBefore }),
 })) } }
-function escalation(item: OperatorEscalation) { const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
+function escalation(item: OperatorEscalation) {
+  if (item.source === 'darkfactory') {
+    const { acknowledgement, resolution, ...rest } = item
+    return { ...rest, evidenceRefs: [...item.evidenceRefs], ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution: { ...resolution, evidenceRefs: [...resolution.evidenceRefs] } }) }
+  }
+  const { acknowledgement, resolution, ...rest } = item; return { ...rest, work: { ...item.work },
   ...(acknowledgement === undefined ? {} : { acknowledgement }), ...(resolution === undefined ? {} : { resolution: { reason: resolution.reason, source: resolution.source, at: resolution.at,
     ...(resolution.replacementAttemptId === undefined ? {} : { replacementAttemptId: resolution.replacementAttemptId }) } }) } }
 function escalations(value: readonly OperatorEscalation[]) { return value.map(escalation) }
+const diagnosticsSchema = { type: 'object', additionalProperties: false, properties: {
+  projectId: { type: 'string', required: true }, healthy: { type: 'boolean', required: true }, paused: { type: 'boolean', required: true },
+  activeAttempts: { type: 'integer', required: true }, blockedDispatches: { type: 'integer', required: true },
+  activeEscalations: { type: 'array', required: true, items: escalationSchema },
+  recentErrors: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+    timestamp: { type: 'string', required: true }, source: { type: 'string', required: true }, message: { type: 'string', required: true },
+    stack: { type: 'string' }, runtimeId: { type: 'string' }, attemptId: { type: 'string' }, operationId: { type: 'string' },
+  } } },
+} } as const
+const diagnosticsOutput = { schema: diagnosticsSchema, render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }] }
+function diagnostics(value: SystemDiagnosticsView) {
+  return {
+    projectId: value.projectId, healthy: value.healthy, paused: value.paused,
+    activeAttempts: value.activeAttempts, blockedDispatches: value.blockedDispatches,
+    activeEscalations: value.activeEscalations.map(escalation),
+    recentErrors: value.recentErrors.map(err => ({
+      timestamp: err.timestamp, source: err.source, message: err.message,
+      ...(err.stack === undefined ? {} : { stack: err.stack }),
+      ...(err.runtimeId === undefined ? {} : { runtimeId: err.runtimeId }),
+      ...(err.attemptId === undefined ? {} : { attemptId: err.attemptId }),
+      ...(err.operationId === undefined ? {} : { operationId: err.operationId }),
+    })),
+  }
+}
 export function apply(ctx: Context): void {
   const installed = new Map<Agent, (() => unknown)[]>()
   const install = (agent: Agent) => {
@@ -111,6 +149,11 @@ export function apply(ctx: Context): void {
       name: 'team_health_ack', description: 'Acknowledge one health escalation using its current revision. Acknowledgement does not change task ownership.',
       parameters: { project_id: { type: 'string', required: true }, escalation_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true } }, output: healthOutput,
       async execute(args, exec) { return escalation(await ctx.workspaceCoordinator.acknowledgeHealth(caller(exec.agent), args.project_id, args.escalation_id, args.expected_revision)) },
+    })))
+    disposers.push(agent.ctx.tools.register(defineTool({
+      name: 'team_system_diagnostics', description: 'Read coordinator system diagnostics including health escalations, worker states, and recent error telemetry.',
+      parameters: { project_id: { type: 'string', required: true } }, output: diagnosticsOutput,
+      async execute(args, exec) { return diagnostics(await ctx.workspaceCoordinator.systemDiagnostics(caller(exec.agent), args.project_id)) },
     })))
     disposers.push(agent.ctx.tools.register(defineTool({
       name: 'team_report_accept', description: 'Accept a terminal non-code worker report after reviewing its evidence against the task criteria. This records an immutable rationale. Pinned candidate-review tasks additionally require approved or rejected; rejected preserves the audited report while preventing that candidate from merging.',

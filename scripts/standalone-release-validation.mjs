@@ -142,6 +142,7 @@ for (const name of names) {
 }
 await Promise.all([
   import('@deepseek-ai/dsh-experimental-agent-team/coordinator'),
+  import('@deepseek-ai/dsh-experimental-agent-team/darkfactory'),
   import('@deepseek-ai/dsh-experimental-agent-team/git-integration'),
   import('@deepseek-ai/dsh-experimental-agent-team/git-worktrees'),
   import('@deepseek-ai/dsh-experimental-agent-team/integration-worker'),

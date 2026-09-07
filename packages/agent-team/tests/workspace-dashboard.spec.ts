@@ -66,3 +66,11 @@ it('preserves authoritative uncertain health rather than inventing active progre
   const view = projectWorkspaceDashboard({ ...input, attempts: [input.attempts[1]], workflows: [], batches: [], mergeBatches: [], queue: [], integrations: [], escalations: [] })
   expect(view.attempts).toEqual([expect.objectContaining({ phase: 'terminal', progress: { classification: 'unavailable', certainty: 'uncertain', observedAt: 11 } })])
 })
+
+it('projects factory incidents as project effects without fabricated attempt identities', () => {
+  const factory = { id: 'factory-escalation-1', source: 'darkfactory', revision: 1, projectId: 'api', stage: 'ingress', reason: 'PAYLOAD_INVALID', effectId: 'envelope:123', evidenceRefs: ['envelope:123'], severity: 'warning', diagnostics: 'Payload needs operator reconciliation.' }
+  const view = projectWorkspaceDashboard({ ...input, escalations: [factory] })
+  expect(view.escalations).toEqual([factory])
+  expect(view.escalations[0]).not.toHaveProperty('attemptId')
+  expect(view.escalations[0]).not.toHaveProperty('taskId')
+})

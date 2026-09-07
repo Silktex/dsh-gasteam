@@ -28,6 +28,7 @@ import {
 } from './types.ts'
 import { integrationSchema, assertIntegrationTransition } from './integration-projection.ts'
 import { assertTaskGraphCandidate } from './task-graph.ts'
+import { factoryTaskBindingSchema } from './remote-schemas.ts'
 
 const nonNegativeSafeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const positiveSafeInteger = nonNegativeSafeInteger.min(1)
@@ -91,6 +92,7 @@ const teamTaskSnapshotSchema = z.object({
   description: z.string(),
   nonCodeCriteria: z.string().min(1).refine(value => value.trim().length > 0).optional(),
   reviewGate: z.string().min(1).max(128).refine(value => value.trim().length > 0).optional(),
+  factoryBinding: factoryTaskBindingSchema.optional(),
   workflowBinding: z.object({ executionId: z.string().min(1).max(128), stepId: z.string().min(1).max(128),
     inputs: z.array(z.object({ name: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/), artifact: z.object({ kind: z.enum(['commit', 'file', 'report']), ref: z.string().min(1).max(16_384) }).strict() }).strict()).max(128) }).strict().optional(),
   reviewBinding: z.object({ projectId: z.string().min(1), teamId: z.string().min(1), executionId: z.string().min(1), candidateRound: z.number().int().nonnegative(),
@@ -452,6 +454,21 @@ function applyCurrentTeamEvent(state: TeamState, event: TeamSessionEvent): void 
       }
       if (prior !== undefined && JSON.stringify(prior.workflowBinding) !== JSON.stringify(task.workflowBinding)) {
         throw new Error(`team task "${task.id}" changed immutable workflow binding`)
+      }
+      if (prior !== undefined && JSON.stringify(prior.factoryBinding) !== JSON.stringify(task.factoryBinding)) {
+        throw new Error(`team task "${task.id}" changed immutable factory binding`)
+      }
+      if (task.factoryBinding !== undefined) {
+        if (task.workflowBinding?.executionId !== task.factoryBinding.executionId || task.workflowBinding.stepId !== task.factoryBinding.stepId) {
+          throw new Error('Factory and workflow task identities differ')
+        }
+        if ((task.status !== 'pending' && task.status !== 'deleted') || task.ownerId !== undefined || task.result !== undefined) {
+          throw new Error('Factory admission holds task execution')
+        }
+        if (prior !== undefined && (prior.status === 'deleted' || prior.subject !== task.subject || prior.description !== task.description
+          || JSON.stringify(prior.blockedBy) !== JSON.stringify(task.blockedBy) || JSON.stringify(prior.writeScopes) !== JSON.stringify(task.writeScopes))) {
+          throw new Error('Factory admission task materialization is immutable')
+        }
       }
       if (prior !== undefined && JSON.stringify(prior.reviewBinding) !== JSON.stringify(task.reviewBinding)) {
         throw new Error(`team task "${task.id}" changed immutable workflow review binding`)

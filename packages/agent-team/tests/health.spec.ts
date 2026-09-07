@@ -157,3 +157,39 @@ it('validates immutable bindings even when an unchanged uncertain patrol would b
   await store.assess(active({ runtime: { availability: 'available', execution: 'unknown' } }), 0)
   await expect(store.assess(active({ work: { projectId: 'project-1', teamId: 'team-1', taskId: 'forged-task', state: 'active' }, runtime: { availability: 'available', execution: 'unknown' } }), 1)).rejects.toThrow(/binding.*immutable/i)
 })
+
+it('raises one factory incident in the existing inbox without inventing work, and restores acknowledgement and resolution', async () => {
+  const { store, directory } = await fixture()
+  const input = { schemaVersion: 1 as const, projectId: 'project-1', policyRevision: 1, stage: 'ingress' as const, reason: 'DELIVERY_ID_CONFLICT', effectId: 'envelope:123', evidenceRefs: ['envelope:123'], severity: 'critical' as const, diagnostics: 'Authenticated delivery identity changed bytes.' }
+  const [first, duplicate] = await Promise.all([store.raiseFactoryEscalation(input, 100), store.raiseFactoryEscalation(input, 100)])
+  expect(duplicate).toEqual(first)
+  expect(store.listHealth()).toEqual([])
+  expect(store.listEscalations()).toHaveLength(1)
+  expect(first).toMatchObject({ source: 'darkfactory', projectId: 'project-1', revision: 1, cooldownUntil: 2100 })
+  for (const field of ['attemptId', 'generation', 'work', 'taskId', 'teamId']) expect(first).not.toHaveProperty(field)
+  const ack = await store.acknowledge(first.id, 1, 'lead-1', 101)
+  expect(ack).toMatchObject({ source: 'darkfactory', revision: 2, acknowledgement: { actor: 'lead-1', at: 101 } })
+  await expect(store.acknowledge(first.id, 1, 'lead-1', 102)).rejects.toThrow(/Stale/)
+  await expect(store.resolveFactoryEscalation({ projectId: 'other', id: first.id, expectedRevision: 2, actor: 'operator', evidenceRefs: ['reconciled'] }, 102)).rejects.toThrow(/mismatched/)
+  const resolved = await store.resolveFactoryEscalation({ projectId: 'project-1', id: first.id, expectedRevision: 2, actor: 'operator', evidenceRefs: ['reconciled'] }, 102)
+  expect(resolved).toMatchObject({ revision: 3, resolution: { source: 'factory-reconciliation', evidenceRefs: ['reconciled'] } })
+  await store.close()
+  const restored = await HealthStore.open(directory, config)
+  stores.push(restored)
+  expect(restored.listEscalations()).toEqual([resolved])
+  expect(await restored.raiseFactoryEscalation({ ...input, diagnostics: 'Duplicate cannot rewrite the original.' }, 10_000)).toEqual(resolved)
+  // Attempt health continues independently in the same journal.
+  await restored.assess(active({ runtime: { availability: 'available', execution: 'failed' } }), 10_001)
+  expect(restored.listEscalations().map(item => item.source)).toEqual(['darkfactory', 'health'])
+})
+
+it('round-trips factory health through the browser codec and rejects malformed authority input', async () => {
+  const { store } = await fixture()
+  const input = { schemaVersion: 1 as const, projectId: 'project-1', policyRevision: 1, stage: 'ingress' as const, reason: 'PAYLOAD_INVALID', effectId: 'envelope:456', evidenceRefs: ['envelope:456'], severity: 'warning' as const, diagnostics: 'Authenticated payload is unsupported.' }
+  await expect(store.raiseFactoryEscalation({ ...input, 'private-key': 'secret' } as never, 0)).rejects.toThrow('Invalid Dark Factory health input')
+  await expect(store.raiseFactoryEscalation({ ...input, evidenceRefs: [] }, 0)).rejects.toThrow('Invalid Dark Factory health input')
+  const record = await store.raiseFactoryEscalation(input, 0)
+  const { operatorEscalationSchema } = await import('../src/remote-schemas.ts')
+  expect(operatorEscalationSchema.parse(JSON.parse(JSON.stringify(record)))).toEqual(record)
+  expect(() => operatorEscalationSchema.parse({ ...record, attemptId: 'invented' })).toThrow()
+})

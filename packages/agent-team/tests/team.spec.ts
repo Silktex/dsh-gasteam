@@ -31,6 +31,8 @@ import { AssignmentStore, type AttemptRecord } from '../src/assignments.ts'
 import { acquireIntegrationOwnership } from '../src/integration-ownership.ts'
 import { DshAssignmentRuntime } from '../src/dsh-assignment-runtime.ts'
 import { RuntimeDrain } from '../src/runtime-drain.ts'
+import { createTaskSchema, updateTaskSchema, taskResultSchema, teamViewSchema } from '../src/remote-schemas.ts'
+import type { CreatePinnedTeamTaskRequest, UpdateTeamTaskRequest, CreateTeamTaskRequest } from '../src/types.ts'
 
 const SIGNAL = new AbortController().signal
 const roots: string[] = []
@@ -94,6 +96,89 @@ async function setupWorkers(script: ConstructorParameters<typeof MockAdapter>[0]
 function content(text: string) {
   return [{ type: 'text' as const, text }]
 }
+
+describe('factory task hold', () => {
+  const request = (): CreatePinnedTeamTaskRequest => ({
+    admissionKey: 'factory-test-step', subject: 'Pinned factory work', description: 'Registered workflow instruction',
+    workflowBinding: { executionId: 'factory-execution', stepId: 'implementation', inputs: [] },
+    factoryBinding: { admissionId: 'admission-1', specDigest: `sha256:${'a'.repeat(64)}`, policyDigest: `sha256:${'b'.repeat(64)}`,
+      workflowDigest: `sha256:${'c'.repeat(64)}`, sourceRevision: `sha256:${'e'.repeat(64)}`, projectId: 'project-1', executionId: 'factory-execution', stepId: 'implementation',
+      plannedInputs: [{ name: 'reproduction', producerStepId: 'reproduction', artifactName: 'result' }] },
+  })
+
+  it('holds raw Team mutations and acceptance despite host grants, while allowing observation and cancellation', async () => {
+    const { ctx, lead } = await setup([])
+    const remove = ctx.agentTeams.registerExecutionPolicy({ taskMutation: () => {}, wake: () => {}, acceptance: () => true, reportAcceptance: () => true })
+    try {
+      const task = await ctx.agentTeams.createPinnedTask(lead, request())
+      expect(task).toMatchObject({ status: 'pending', ready: false, factoryBinding: request().factoryBinding })
+      for (const action of ['claim', 'release', 'edit', 'set_dependencies', 'complete', 'reopen', 'reassign'] as const) {
+        await expect(ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 1, action, subject: 'changed', result: 'forged', owner: 'lead', blockedBy: [] }))
+          .rejects.toMatchObject({ code: 'TEAM_MANAGED_TASK', message: expect.stringContaining('Factory admission holds') })
+      }
+      await expect(ctx.agentTeams.acceptIntegratedTask(lead, { taskId: task.id, expectedRevision: 1, integrationId: 'integration-test' as TeamIntegrationId, submissionId: 'submission-test' }))
+        .rejects.toMatchObject({ code: 'TEAM_MANAGED_TASK', message: expect.stringContaining('Factory admission holds') })
+      const report = await ctx.agentTeams.createPinnedTask(lead, { ...request(), admissionKey: 'factory-report', nonCodeCriteria: 'Registered evidence required' })
+      await expect(ctx.agentTeams.acceptReportedTask(lead, { taskId: report.id, expectedRevision: 1, reportId: 'report-test' }))
+        .rejects.toMatchObject({ code: 'TEAM_MANAGED_TASK', message: expect.stringContaining('Factory admission holds') })
+      expect(ctx.agentTeams.getTask(lead, task.id)).toEqual(task)
+      expect(durable(lead).tasks.find(value => value.id === task.id)?.factoryBinding).toEqual(task.factoryBinding)
+      expect(taskResultSchema.parse({ ok: true, value: task })).toEqual({ ok: true, value: task })
+      expect(teamViewSchema.parse({ members: [], tasks: [task], batches: [], integrations: [] }).tasks[0]?.factoryBinding).toEqual(task.factoryBinding)
+      expect(await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 1, action: 'delete' })).toMatchObject({ status: 'deleted', ready: false, factoryBinding: task.factoryBinding })
+    } finally { remove(); await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('compares immutable host identity on replay and rejects public binding injection or removal', async () => {
+    const { ctx, lead } = await setup([])
+    try {
+      const input = request()
+      const task = await ctx.agentTeams.createPinnedTask(lead, input)
+      expect(await ctx.agentTeams.createPinnedTask(lead, input)).toEqual(task)
+      for (const factoryBinding of [undefined, { ...input.factoryBinding!, sourceRevision: `sha256:${'f'.repeat(64)}` }, { ...input.factoryBinding!, projectId: 'other-project' },
+        { ...input.factoryBinding!, specDigest: `sha256:${'d'.repeat(64)}` }, { ...input.factoryBinding!, plannedInputs: [] }]) {
+        const changed = { ...input, factoryBinding } as CreatePinnedTeamTaskRequest
+        await expect(ctx.agentTeams.createPinnedTask(lead, changed)).rejects.toMatchObject({ code: 'TEAM_INVALID_ARGUMENT' })
+      }
+      const forgedCreate = { subject: 'untrusted', description: 'untrusted', factoryBinding: input.factoryBinding }
+      expect(createTaskSchema.safeParse(forgedCreate).success).toBe(false)
+      await expect(ctx.agentTeams.createTask(lead, forgedCreate as CreateTeamTaskRequest)).rejects.toMatchObject({ code: 'TEAM_MANAGED_TASK' })
+      const forgedUpdate = { taskId: task.id, expectedRevision: 1, action: 'delete', factoryBinding: undefined } as UpdateTeamTaskRequest
+      expect(updateTaskSchema.safeParse(forgedUpdate).success).toBe(false)
+      await expect(ctx.agentTeams.updateTask(lead, forgedUpdate)).rejects.toMatchObject({ code: 'TEAM_MANAGED_TASK' })
+      await expect(ctx.agentTeams.createPinnedTask(lead, { ...input, admissionKey: 'mismatch', factoryBinding: { ...input.factoryBinding!, stepId: 'other-step' } }))
+        .rejects.toMatchObject({ code: 'TEAM_INVALID_ARGUMENT' })
+      expect(durable(lead).tasks).toHaveLength(1)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it.each(['remove-binding', 'execute', 'edit-materialization'] as const)('rejects persisted hold bypass: %s', async (tamper) => {
+    const { ctx, lead } = await setup([])
+    try {
+      await ctx.agentTeams.createPinnedTask(lead, request())
+      const prior = durable(lead).tasks[0]!
+      const { factoryBinding: _binding, ...withoutBinding } = prior
+      const task: TeamTaskSnapshot = tamper === 'remove-binding' ? { ...withoutBinding, revision: 2 }
+        : tamper === 'execute' ? { ...prior, revision: 2, status: 'in_progress', ownerId: lead.id }
+          : { ...prior, revision: 2, description: 'substituted instructions' }
+      lead.session.append('team/task', { version: 1, teamId: TeamId(lead.id), task })
+      expect(() => durable(lead)).toThrow(/factory|Factory/)
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+
+  it('keeps ordinary and legacy pinned tasks executable', async () => {
+    const { ctx, lead } = await setup([])
+    try {
+      const { factoryBinding: _binding, ...legacy } = request()
+      const tasks = [await ctx.agentTeams.createTask(lead, { subject: 'ordinary', description: 'ordinary' }), await ctx.agentTeams.createPinnedTask(lead, legacy)]
+      for (const task of tasks) {
+        expect(task.ready).toBe(true)
+        const claimed = await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: 1, action: 'claim' })
+        expect(await ctx.agentTeams.updateTask(lead, { taskId: task.id, expectedRevision: claimed.revision, action: 'complete', result: 'legacy evidence' })).toMatchObject({ status: 'completed' })
+      }
+    } finally { await teamInternals(ctx).disposeRuntime() }
+  })
+})
 
 interface TeamServiceInternals {
   readonly roster: {

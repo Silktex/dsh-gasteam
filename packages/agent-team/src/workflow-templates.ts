@@ -39,3 +39,16 @@ export const releasePublicationTemplate = {
     { id: 'publish', title: 'Publish {{release}}', dependsOn: ['prepare'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['release-candidate'] }, acceptance: { kind: 'externally-authorized-publication', authorization: 'release-manager' } },
   ],
 } satisfies WorkflowTemplate
+
+/** Factory stages require typed host-controller evidence; ordinary report review cannot complete them. */
+export const darkFactoryTemplate = {
+  format: 'agent-team-workflow/v1', id: 'darkfactory', version: 1,
+  parameters: { subject: { type: 'string', required: true } },
+  steps: [
+    { id: 'reproduce', title: 'Reproduce {{subject}}', retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { produces: ['reproduction'] }, acceptance: { kind: 'factory-stage', stage: 'reproduction' } },
+    { id: 'implement', title: 'Implement {{subject}}', dependsOn: ['reproduce'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['reproduction'], produces: ['source'] }, acceptance: { kind: 'factory-stage', stage: 'implementation' } },
+    { id: 'verify', title: 'Verify {{subject}}', dependsOn: ['implement'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['reproduction', 'source'], produces: ['verified-candidate'] }, acceptance: { kind: 'factory-stage', stage: 'machine-verification' } },
+    { id: 'integrate', title: 'Integrate {{subject}}', dependsOn: ['verify'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source', 'verified-candidate'], produces: ['integration'] }, acceptance: { kind: 'factory-stage', stage: 'integration' } },
+    { id: 'release', title: 'Accept canary for {{subject}}', dependsOn: ['integrate'], retry: { maxAttempts: 1, backoffMs: 0 }, artifacts: { requires: ['source', 'verified-candidate', 'integration'], produces: ['canary-accepted'] }, acceptance: { kind: 'factory-stage', stage: 'release-acceptance' } },
+  ],
+} satisfies WorkflowTemplate

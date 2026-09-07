@@ -13,7 +13,7 @@ function tsc(config) {
 tsc('tsconfig.host.json')
 tsc('tsconfig.client.json')
 const entries = {
-  'agent-team': ['index', 'invariant', 'git-worktrees', 'git-integration', 'integration-worker', 'supervisor', 'external-runtime-supervisor', 'coordinator'],
+  'agent-team': ['index', 'invariant', 'git-worktrees', 'git-integration', 'integration-worker', 'supervisor', 'external-runtime-supervisor', 'coordinator', 'darkfactory'],
   'tool-agent-team': ['index', 'invariant', 'coordinator'],
   'client-ui-agent-team': ['index', 'invariant'],
   'agent-team-profile': ['index', 'invariant'],

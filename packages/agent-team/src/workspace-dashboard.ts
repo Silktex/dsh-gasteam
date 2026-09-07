@@ -31,7 +31,7 @@ const attemptSchema = z.object({
 const workflowStepSchema = z.object({ stepId: id, revision: positive, phase: z.enum(['pending', 'running', 'completed', 'failed']), taskId: id.optional() }).strip()
 const workflowSchema = z.object({ executionId: id, projectId: id, teamId: id, steps: z.array(workflowStepSchema) }).strip()
 const batchSchema = z.object({ id, phase: z.enum(['active', 'blocked', 'failed', 'completed']), required: positive, completedRequired: revision, completionEpoch: revision }).strip()
-const queueBlockerSchema = z.object({ code: z.enum(['execution-disabled', 'shutdown', 'project-unavailable', 'paused', 'team-unavailable', 'task-unavailable', 'task-not-pending', 'task-owned', 'dependencies', 'global-capacity', 'project-capacity', 'pacing', 'cancelled', 'execution-failure', 'awaiting-acceptance', 'recovery-required', 'workspace-batch-dependency', 'provider-admission']) }).strip()
+const queueBlockerSchema = z.object({ code: z.enum(['execution-disabled', 'shutdown', 'project-unavailable', 'paused', 'team-unavailable', 'task-unavailable', 'task-not-pending', 'task-owned', 'dependencies', 'global-capacity', 'project-capacity', 'pacing', 'cancelled', 'execution-failure', 'awaiting-acceptance', 'recovery-required', 'workspace-batch-dependency', 'provider-admission', 'factory-admission-held']) }).strip()
 const queueSchema = z.object({ projectId: id, teamId: id, taskId: id, revision: positive, enqueuedAt: timestamp.optional(), state: z.enum(['ready', 'waiting', 'assigned', 'finished', 'cancelled', 'accepted']), blockers: z.array(queueBlockerSchema) }).strip()
 const mergeBatchMemberSchema = z.object({ integrationId: id, projectId: id.optional(), teamId: id.optional(), taskId: id.optional() }).strip()
 const mergeBatchSchema = z.object({ id, phase: z.enum(['active', 'closed']), members: z.array(mergeBatchMemberSchema).min(1).max(64) }).strict()
@@ -39,10 +39,20 @@ const integrationSchema = z.object({
   integrationId: id, projectId: id, teamId: id, phase: z.enum(['queued', 'running', 'verified', 'merged', 'failed']), sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
   failureKind: z.literal('verification').optional(), diagnostic: diagnostic.optional(),
 }).strip()
-const escalationSchema = z.object({
+const attemptEscalationSchema = z.object({
+  source: z.literal('health').optional(),
   id, revision: positive, projectId: id, teamId: id, taskId: id, attemptId: id, generation: positive,
   severity: z.enum(['warning', 'critical']), condition: z.enum(['stale', 'failed']), diagnostics: diagnostic,
 }).strip()
+
+const factoryReference = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/)
+const factoryEscalationSchema = z.object({
+  source: z.literal('darkfactory'), id, revision: positive, projectId: id,
+  stage: z.enum(['ingress', 'trust', 'admission', 'verification', 'release', 'economics', 'operations']),
+  reason: factoryReference, effectId: factoryReference, evidenceRefs: z.array(factoryReference).min(1).max(64),
+  severity: z.enum(['warning', 'critical']), diagnostics: diagnostic,
+}).strip()
+const escalationSchema = z.union([attemptEscalationSchema, factoryEscalationSchema])
 
 /** Deliberately small host input: prompts, paths, credentials, and raw histories are not part of this contract. */
 export const workspaceDashboardInputSchema = z.object({

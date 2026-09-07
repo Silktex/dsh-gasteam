@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "mode": "observe",
+  "projectIds": [
+    "REPLACE_PROJECT_ID"
+  ],
+  "policyRevision": 1,
+  "ownerId": "REPLACE_HOST_OPERATOR_ID",
+  "limits": {
+    "maxArtifactBytes": 1048576,
+    "maxArtifactTotalBytes": 67108864,
+    "maxJournalRecordBytes": 1048576,
+    "maxJournalBytes": 67108864,
+    "retentionDays": 30
+  },
+  "ingestion": {
+    "transport": {
+      "kind": "listener",
+      "host": "127.0.0.1",
+      "port": 9100
+    },
+    "routes": [
+      {
+        "id": "github-issues",
+        "projectId": "REPLACE_PROJECT_ID",
+        "providerVersion": "github-webhook-v1",
+        "signingKeyId": "REPLACE_WEBHOOK_KEY_ID",
+        "secretRef": {
+          "kind": "env",
+          "name": "GASTEAM_GITHUB_WEBHOOK_SECRET"
+        },
+        "repositoryIds": [
+          "REPLACE_GITHUB_REPOSITORY_ID"
+        ],
+        "senderIds": [
+          "REPLACE_GITHUB_ACTOR_ID"
+        ],
+        "ruleIds": [
+          "authorized-issue"
+        ],
+        "source": "github",
+        "bindings": {
+          "installationIds": [
+            "REPLACE_GITHUB_INSTALLATION_ID"
+          ],
+          "authorIds": [
+            "REPLACE_GITHUB_AUTHOR_ID"
+          ],
+          "automationRules": [
+            {
+              "ruleId": "authorized-issue",
+              "automationLabel": "darkfactory:execute"
+            }
+          ]
+        }
+      }
+    ],
+    "automationLabels": [
+      {
+        "label": "darkfactory:execute",
+        "ruleId": "authorized-issue"
+      }
+    ],
+    "maxBodyBytes": 1048576,
+    "requestsPerMinute": 30,
+    "maxQueueItems": 10000,
+    "reconciliationIntervalMs": 300000
+  },
+  "verification": {
+    "ruleIds": [
+      "authorized-issue"
+    ],
+    "checkIds": [
+      "UNUSED_OBSERVE_CHECK"
+    ],
+    "fixtureIds": [
+      "UNUSED_OBSERVE_FIXTURE"
+    ],
+    "sandbox": {
+      "cpuMillis": 10000,
+      "memoryBytes": 67108864,
+      "maxProcesses": 4,
+      "diskBytes": 67108864,
+      "deadlineMs": 10000,
+      "network": "disabled"
+    },
+    "commands": [
+      {
+        "id": "UNUSED_OBSERVE_COMMAND",
+        "executable": "node",
+        "args": [
+          "--test"
+        ],
+        "deadlineMs": 10000
+      }
+    ],
+    "mutation": {
+      "language": "typescript-javascript",
+      "applicablePaths": [
+        "src"
+      ],
+      "threshold": 0.9,
+      "maxSurvivors": 0,
+      "deadlineMs": 1000
+    },
+    "critics": {
+      "roleIds": [
+        "critic"
+      ],
+      "minimumIndependentProviders": 2,
+      "maxRetries": 1,
+      "benchmarkRevision": 1
+    },
+    "signer": {
+      "keyId": "UNUSED_EXAMPLE_PUBLIC_KEY",
+      "secretRef": {
+        "kind": "env",
+        "name": "UNUSED_OBSERVE_SIGNER_SECRET"
+      }
+    },
+    "trustedPublicKeys": [
+      {
+        "keyId": "UNUSED_EXAMPLE_PUBLIC_KEY",
+        "algorithm": "ed25519",
+        "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\n-----END PUBLIC KEY-----\n"
+      }
+    ]
+  },
+  "delivery": {
+    "enabled": false
+  },
+  "fleet": {
+    "redis": {
+      "endpoint": "rediss://example.invalid:6379",
+      "tls": true,
+      "secretRef": {
+        "kind": "env",
+        "name": "UNUSED_OBSERVE_REDIS_SECRET"
+      }
+    },
+    "fleetId": "UNUSED_OBSERVE_FLEET",
+    "hostId": "UNUSED_OBSERVE_HOST",
+    "fleetCaps": {
+      "dailyMoneyMicros": 1000000,
+      "monthlyMoneyMicros": 10000000,
+      "dailyTokens": 100000,
+      "monthlyTokens": 1000000
+    },
+    "projectCaps": [
+      {
+        "id": "REPLACE_PROJECT_ID",
+        "caps": {
+          "dailyMoneyMicros": 1000000,
+          "monthlyMoneyMicros": 10000000,
+          "dailyTokens": 100000,
+          "monthlyTokens": 1000000
+        }
+      }
+    ],
+    "hostCaps": [
+      {
+        "id": "UNUSED_OBSERVE_HOST",
+        "caps": {
+          "dailyMoneyMicros": 1000000,
+          "monthlyMoneyMicros": 10000000,
+          "dailyTokens": 100000,
+          "monthlyTokens": 1000000
+        }
+      }
+    ],
+    "requestCeiling": {
+      "moneyMicros": 10,
+      "inputTokens": 10,
+      "outputTokens": 10,
+      "reasoningTokens": 0,
+      "deadlineMs": 1000
+    },
+    "attemptCeiling": {
+      "moneyMicros": 100,
+      "tokens": 100,
+      "requests": 10,
+      "deadlineMs": 10000
+    },
+    "pricingSnapshots": [
+      {
+        "id": "UNUSED_OBSERVE_PRICING",
+        "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "currency": "USD"
+      }
+    ],
+    "routineWatermark": 0.95,
+    "reserveFraction": 0.1,
+    "quotas": [
+      {
+        "id": "UNUSED_OBSERVE_QUOTA",
+        "provider": "fixture",
+        "adapterId": "fixture",
+        "secretRef": {
+          "kind": "env",
+          "name": "UNUSED_OBSERVE_QUOTA_SECRET"
+        },
+        "ttlMs": 60000
+      }
+    ],
+    "emergencyPurposes": [
+      "canary-recovery"
+    ]
+  },
+  "models": {
+    "endpoint": "https://example.invalid/unused-observe-models",
+    "version": "UNUSED_OBSERVE_ADAPTER",
+    "credentialRef": {
+      "kind": "env",
+      "name": "UNUSED_OBSERVE_MODEL_SECRET"
+    },
+    "refreshIntervalMs": 1000,
+    "expiryMs": 2000,
+    "roleThresholds": [
+      {
+        "roleId": "critic",
+        "minimumScore": 0.9,
+        "benchmarkRevision": 1,
+        "requiredCapabilities": [
+          "tools"
+        ]
+      }
+    ],
+    "deploymentAllowlist": [
+      "UNUSED_OBSERVE_MODEL"
+    ],
+    "deploymentDenylist": [],
+    "fallbacks": [
+      {
+        "roleId": "critic",
+        "deploymentIds": [
+          "UNUSED_OBSERVE_MODEL"
+        ]
+      }
+    ],
+    "compression": {
+      "enabled": false
+    }
+  },
+  "notifications": {
+    "healthInbox": true,
+    "destinations": [],
+    "redaction": true,
+    "cooldownMs": 900000,
+    "maxRetries": 3,
+    "deadLetterLimit": 10,
+    "cardinalityCap": 1000
+  }
+}

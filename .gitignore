@@ -6,3 +6,9 @@ coverage/
 .env.*
 .dsh/
 *.tgz
+reports/
+.agents/*
+!.agents/skills/
+ORIGINAL_REQUEST.md
+PROJECT.md
+*.swp

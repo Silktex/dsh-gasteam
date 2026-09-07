@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -49,6 +49,33 @@ async function copyDistributionSources(output) {
   await cp(resolve(root, 'packages/tool-agent-team/src'), resolve(output, 'src/tool-agent-team'), { recursive: true })
   await cp(resolve(root, 'packages/client-ui-agent-team/src'), resolve(output, 'src/client-ui-agent-team'), { recursive: true })
   await cp(resolve(packageSource, 'src'), resolve(output, 'src/distribution'), { recursive: true })
+}
+
+/** Emit the actual SDK declaration closure, independently of a preceding build.
+ * Only declaration files ship here; runtime imports still use DSH singleton peers.
+ */
+async function buildHostDeclarations(output) {
+  const directory = resolve(output, 'lib/types')
+  const result = spawnSync(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'),
+    '-p', resolve(root, 'packages/agent-team/tsconfig.json'), '--emitDeclarationOnly',
+    '--composite', 'false', '--incremental', 'false', '--outDir', directory,
+  ], { cwd: root, stdio: 'inherit' })
+  if (result.status !== 0) throw new Error('dsh-team SDK declaration emission failed')
+  async function rewrite(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const filename = resolve(directory, entry.name)
+      if (entry.isDirectory()) await rewrite(filename)
+      else if (entry.name.endsWith('.d.ts')) {
+        const source = await readFile(filename, 'utf8')
+        // TypeScript preserves source .ts specifiers in declarations even when
+        // rewriteRelativeImportExtensions rewrites JS. Published declarations
+        // resolve beside .d.ts siblings through ordinary .js substitution.
+        const rewritten = source.replace(/((?:from\s+|import\s*\(\s*|import\s+|declare\s+module\s+)["'])(\.[^"']+)\.tsx?(["'])/g, '$1$2.js$3')
+        if (rewritten !== source) await writeFile(filename, rewritten)
+      }
+    }
+  }
+  await rewrite(directory)
 }
 
 async function buildHost(entry, outfile) {
@@ -136,6 +163,7 @@ export async function buildDshTeamDistribution(requestedOutput) {
     cp(resolve(root, 'docs/evidence/dashboard/activity.png'), resolve(output, 'docs/dashboard-activity.png')),
   ])
   await copyDistributionSources(output)
+  await buildHostDeclarations(output)
 
   const commit = sourceCommit()
   await writeFile(resolve(output, 'SOURCE.md'), `# Distribution source\n\nThis install-ready package was generated from [Silktex/dsh-gasteam](https://github.com/Silktex/dsh-gasteam/tree/${commit}) at commit \`${commit}\`. The matching TypeScript source snapshot is included under \`src/\`.\n`)
@@ -153,6 +181,7 @@ export async function buildDshTeamDistribution(requestedOutput) {
     supervisor: resolve(root, 'packages/agent-team/src/supervisor.ts'),
     'external-runtime-supervisor': resolve(root, 'packages/agent-team/src/external-runtime-supervisor.ts'),
     coordinator: resolve(root, 'packages/agent-team/src/coordinator.ts'),
+    darkfactory: resolve(root, 'packages/agent-team/src/darkfactory.ts'),
     remote: resolve(root, 'packages/agent-team/src/remote.ts'),
   }
 

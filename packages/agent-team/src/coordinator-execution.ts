@@ -33,7 +33,7 @@ import { GitIntegrationProvider } from './git-integration-provider.ts'
 import { GitMergeBatch } from './git-merge-batching.ts'
 import { MergeBatchRegistry } from './merge-batch-registry.ts'
 import { HealthStore, healthConfigSchema } from './health.ts'
-import type { AttemptHealth, OperatorEscalation } from './health.ts'
+import type { AttemptHealth, OperatorEscalation, FactoryEscalationInput, FactoryEscalation } from './health.ts'
 import { DshHealthRuntimeObserver } from './health-runtime-observation.ts'
 import { HealthRecoveryExecutor, HealthRecoveryStore } from './health-recovery.ts'
 import { TeamError } from './error.ts'
@@ -41,6 +41,7 @@ import { assignmentRetryPolicySchema } from './assignment-retry-policy.ts'
 import type { ProjectRecord } from './projects.ts'
 import type { CoordinatorProjectView } from './coordinator.ts'
 import type {} from './index.ts'
+import { FactoryMaterializationConflictError } from './workflow-runtime.ts'
 import type { WorkflowCodeStatus, WorkflowCodeTaskCreateIntent, WorkflowIntegrationApproval, WorkflowTaskCreateIntent } from './workflow-runtime.ts'
 
 export const executionConfigSchema = z.object({
@@ -78,7 +79,7 @@ const safeHandoffReplacement = (attempt: AttemptRecord): boolean => attempt.phas
 
 export type DispatchBlockCode = 'execution-disabled' | 'shutdown' | 'project-unavailable' | 'paused' | 'team-unavailable'
   | 'task-unavailable' | 'task-not-pending' | 'task-owned' | 'dependencies' | 'global-capacity' | 'project-capacity'
-  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required' | 'workspace-batch-dependency' | 'provider-admission'
+  | 'cancelled' | 'pacing' | 'execution-failure' | 'awaiting-acceptance' | 'recovery-required' | 'workspace-batch-dependency' | 'provider-admission' | 'factory-admission-held'
 export interface DispatchStatus extends DispatchRequest {
   readonly state: 'ready' | 'waiting' | 'assigned' | 'finished' | 'cancelled' | 'accepted'
   readonly blockers: { code: DispatchBlockCode; detail: string }[]
@@ -121,7 +122,7 @@ export class CoordinatorExecution {
     externalStore: ExternalRuntimeStore | undefined,
   ) {
     this.runtime = new DshAssignmentRuntime(ctx, assignments, 30_000, true)
-    this.dshHealth = health === undefined ? undefined : new DshHealthRuntimeObserver(ctx)
+    this.dshHealth = config?.health === undefined ? undefined : new DshHealthRuntimeObserver(ctx)
     this.external = external
     this.externalStore = externalStore
     this.removePolicy = ctx.agentTeams.registerExecutionPolicy({
@@ -165,7 +166,8 @@ export class CoordinatorExecution {
     })
   }
 
-  static async open(ctx: Context, directory: string, config: ExecutionConfig | undefined, projects: () => ProjectRecord[], isPaused: (projectId: string) => boolean = () => false): Promise<CoordinatorExecution> {
+  static async open(ctx: Context, directory: string, config: ExecutionConfig | undefined, projects: () => ProjectRecord[], isPaused: (projectId: string) => boolean = () => false, hostOptions: { factoryHealth?: boolean } = {}): Promise<CoordinatorExecution> {
+    const { factoryHealth } = z.object({ factoryHealth: z.boolean().default(false) }).strict().parse(hostOptions)
     const validated = config === undefined ? undefined : executionConfigSchema.parse(config)
     if (validated !== undefined && !ctx.agentTeams.worktreesEnabled) throw new Error('Coordinator execution requires isolated Team worktrees')
     const assignments = await AssignmentStore.open(directory, {
@@ -192,7 +194,7 @@ export class CoordinatorExecution {
                 let health: HealthStore | undefined
                 let healthRecovery: HealthRecoveryStore | undefined
                 try {
-                  health = validated?.health === undefined ? undefined : await HealthStore.open(directory, validated.health)
+                  health = validated?.health === undefined && !factoryHealth ? undefined : await HealthStore.open(directory, validated?.health ?? { dshDeadlineMs: 60_000, externalDeadlineMs: 60_000, escalationCooldownMs: 900_000, maxEscalationsPerCondition: 1 })
                   healthRecovery = validated?.health?.recovery === undefined ? undefined : await HealthRecoveryStore.open(directory)
                   if (healthRecovery !== undefined) await assignments.attributeLegacyHealthRecoveries(healthRecovery.list())
                   const retainedExternal = assignments.list().filter(record => record.provider === 'external' && record.phase !== 'terminal')
@@ -284,8 +286,16 @@ export class CoordinatorExecution {
   /** Reopen the exact registered Lead for a durable host admission. */
   async admittedLead(project: ProjectRecord, teamId: string): Promise<Agent> { return await this.leadFor(project, teamId) }
 
+  /** Host-only factory escalation into the same operator inbox. */
+  raiseFactoryEscalation(input: FactoryEscalationInput, observedAt: number, cooldownMs?: number): Promise<FactoryEscalation> {
+    if (!this.health) throw new Error('Health store is unavailable')
+    if (!this.projects().some(project => project.id === input.projectId)) throw new Error('Factory escalation project is not registered')
+    return this.health.raiseFactoryEscalation(input, observedAt, cooldownMs)
+  }
+
   healthInbox(projectId: string, teamId: string): OperatorEscalation[] {
-    return this.health?.listEscalations().filter(item => item.work.projectId === projectId && item.work.teamId === teamId) ?? []
+    if (!this.projects().some(project => project.id === projectId && project.teamIds.includes(teamId))) return []
+    return this.health?.listEscalations().filter(item => item.source === 'darkfactory' ? item.projectId === projectId : item.work.projectId === projectId && item.work.teamId === teamId) ?? []
   }
 
   acknowledgeHealth(id: string, expectedRevision: number, actor: string): Promise<OperatorEscalation> {
@@ -303,11 +313,12 @@ export class CoordinatorExecution {
     if (!project) throw new Error('Workflow task escapes its registered project Lead')
     const lead = await this.leadFor(project, intent.teamId)
     const task = await this.ctx.agentTeams.createPinnedTask(lead, {
-      admissionKey: intent.intentId, subject: intent.subject, description: intent.description, nonCodeCriteria: intent.nonCodeCriteria,
+      admissionKey: intent.intentId, ...(intent.factoryBinding ? { factoryBinding: intent.factoryBinding } : {}), subject: intent.subject, description: intent.description, nonCodeCriteria: intent.nonCodeCriteria,
       workflowBinding: { executionId: intent.executionId, stepId: intent.stepId, inputs: intent.inputs ?? [] },
       ...(intent.review === undefined ? {} : { reviewBinding: { projectId: intent.projectId, teamId: intent.teamId, executionId: intent.executionId,
         candidateRound: intent.candidateRound ?? 0, ...intent.review } }),
     })
+    if (intent.factoryBinding && (task.status !== 'pending' || task.ownerName !== undefined)) throw new FactoryMaterializationConflictError()
     return { taskId: task.id }
   }
 
@@ -316,8 +327,9 @@ export class CoordinatorExecution {
     const project = this.projects().find(project => project.id === intent.projectId && project.teamIds.includes(intent.teamId))
     if (!project) throw new Error('Workflow code task escapes its registered project Lead')
     const lead = await this.leadFor(project, intent.teamId)
-    const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: intent.intentId, subject: intent.subject, description: intent.description, reviewGate: intent.reviewGate,
+    const task = await this.ctx.agentTeams.createPinnedTask(lead, { admissionKey: intent.intentId, ...(intent.factoryBinding ? { factoryBinding: intent.factoryBinding } : {}), subject: intent.subject, description: intent.description, reviewGate: intent.reviewGate,
       workflowBinding: { executionId: intent.executionId, stepId: intent.stepId, inputs: intent.inputs ?? [] } })
+    if (intent.factoryBinding && (task.status !== 'pending' || task.ownerName !== undefined)) throw new FactoryMaterializationConflictError()
     return { taskId: task.id }
   }
 
@@ -438,6 +450,7 @@ export class CoordinatorExecution {
     if (!team || team.status !== 'available') block('team-unavailable', team?.diagnostic || 'Team state is unavailable')
     else if (!task) block('task-unavailable', 'Task is absent from current Team state')
     else {
+      if (task.factoryBinding) block('factory-admission-held', 'Factory stage activation is not authorized')
       if (task.status !== 'pending') block('task-not-pending', `Task status is ${task.status}`)
       if (task.ownerId !== undefined) block('task-owned', `Task is owned by ${task.ownerId}`)
       const blockedBy = task.blockedBy.filter(id => team.tasks.find(task => task.id === id)?.status !== 'completed')
@@ -749,7 +762,7 @@ export class CoordinatorExecution {
 
   /** Observational mapping only: no health result can wake, stop, or replace an assignment. */
   private async scanHealth(views: readonly CoordinatorProjectView[]): Promise<void> {
-    if (!this.health) return
+    if (!this.health || !this.config?.health) return
     const now = Date.now()
     for (const existing of this.health.listHealth()) {
       const replacement = this.assignments.list().find(attempt => attempt.handoff?.previousAttemptId === existing.attemptId)
@@ -863,7 +876,7 @@ export class CoordinatorExecution {
           }
         } catch { ownsLiveRuntime = false }
       }
-      const escalation = this.health?.listEscalations().find(item => item.attemptId === attemptId && item.generation === generation
+      const escalation = this.health?.listEscalations().find(item => item.source === 'health' && item.attemptId === attemptId && item.generation === generation
         && item.condition === 'stale' && item.resolution === undefined)
       return { attemptId: record?.attemptId ?? 'missing', generation: record?.generation ?? 0,
         healthRevision: currentHealth?.revision ?? 0, condition: 'stale' as const,
@@ -1097,6 +1110,7 @@ export class CoordinatorExecution {
    * checkpoint; provisioning retry never authorizes another repair.
    */
   private async reserveDispatch(work: DispatchWork, project: ProjectRecord, task: CoordinatorProjectView['teams'][number]['tasks'][number], previous: AttemptRecord | undefined): Promise<AttemptRecord> {
+    if (task.factoryBinding) throw new Error('Factory stage activation is not authorized')
     const provisioningRetry = previous?.provisioning !== undefined
     const repair = (previous === undefined ? undefined : this.repairFor(previous)) ?? (provisioningRetry ? previous?.repair : undefined)
     const external = provisioningRetry ? previous?.provider === 'external' : this.external?.ownsTask(project.id, task.nonCodeCriteria !== undefined) === true
@@ -1124,6 +1138,7 @@ export class CoordinatorExecution {
   }
 
   private async startAttempt(lead: Agent, record: AttemptRecord): Promise<AttemptRecord> {
+    if (this.ctx.agentTeams.getTask(lead, TeamTaskId(record.taskId)).factoryBinding) throw new Error('Factory stage activation is not authorized')
     if (record.provider === 'external') {
       if (this.external === undefined) throw new Error('External provider assignment has no admitted external provider policy')
       return await new RoutedExternalAssignmentRuntime(this.external).start(lead, record)

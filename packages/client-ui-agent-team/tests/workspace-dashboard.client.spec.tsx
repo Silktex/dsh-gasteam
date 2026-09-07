@@ -303,4 +303,40 @@ describe('WorkspaceDashboard', () => {
     expect(screen.queryByText('wrong-b')).toBeNull()
     freshA.resolve({ ok: true, value: page('fresh-a') }); expect(await screen.findByText('fresh-a')).toBeTruthy()
   })
+
+  it('renders Autofixer settings inside the workspace dashboard and synchronizes with project selection', async () => {
+    const onSave = vi.fn()
+    render(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok(view)} onSaveAutofixerConfig={onSave} t={english} />)
+    await screen.findByText('attempt-api')
+
+    // Verify Autofixer section renders
+    expect(screen.getByRole('heading', { name: new RegExp(en['autofixer.title']) })).toBeTruthy()
+
+    // Select project 'api' from dashboard projects list
+    fireEvent.click(screen.getAllByRole('button', { name: /^api/ })[0]!)
+
+    // Autofixer section offers syncing with selected project 'api'
+    const syncButton = await screen.findByRole('button', { name: new RegExp(en['autofixer.useSelectedProject']) })
+    expect(syncButton).toBeTruthy()
+    fireEvent.click(syncButton)
+
+    // Code preview now includes registered project 'api'
+    const code = screen.getByRole('region', { name: en['autofixer.promptHelper'] }).querySelector('code')
+    expect(code?.textContent).toContain('registered project "api" in GasTeam')
+
+    // Save configuration
+    fireEvent.click(screen.getByRole('button', { name: en['autofixer.save'] }))
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      targetScope: 'project',
+      projectId: 'api',
+    }))
+  })
+})
+
+it('renders factory incident source and effect without inventing a worker link', async () => {
+  const factory = { id: 'factory-escalation-1', source: 'darkfactory' as const, revision: 1, projectId: 'api', stage: 'ingress' as const, reason: 'PAYLOAD_INVALID', effectId: 'envelope:123', evidenceRefs: ['envelope:123'], severity: 'warning' as const, diagnostics: 'Payload needs reconciliation.' }
+  render(<WorkspaceDashboard sessionId={SESSION_A} load={() => ok({ ...view, escalations: [factory] })} t={english} />)
+  expect(await screen.findByText('Warning · Dark Factory · ingress · PAYLOAD_INVALID')).toBeTruthy()
+  expect(screen.getByText('api · envelope:123 · Revision 1')).toBeTruthy()
+  expect(screen.getByText('Payload needs reconciliation.')).toBeTruthy()
 })

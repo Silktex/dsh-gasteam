@@ -1,11 +1,15 @@
 import { afterEach, expect, it } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReportStore } from '../src/reports.ts'
 import { WorkflowRuntime, type WorkflowCodeStatus, type WorkflowCodeTaskCreateIntent, type WorkflowIntegrationApproval, type WorkflowTaskCreateIntent, type WorkflowTaskHost } from '../src/workflow-runtime.ts'
-import { WorkflowStore } from '../src/workflows.ts'
-import { releasePublicationTemplate } from '../src/workflow-templates.ts'
+import { WorkflowStore, pinWorkflowDefinition, validateWorkflowTemplate } from '../src/workflows.ts'
+import { darkFactoryTemplate, releasePublicationTemplate } from '../src/workflow-templates.ts'
+import { DarkFactoryAdmissionStore } from '../src/darkfactory/admission-store.ts'
+import { pinExecutableSpec } from '../src/darkfactory/contracts/spec.ts'
+import { digestJson } from '../src/darkfactory/json.ts'
+import { examples } from './darkfactory/fixtures.ts'
 
 const roots: string[] = []
 const closeables: { close(): Promise<void> }[] = []
@@ -99,6 +103,43 @@ async function codeFixture() {
   closeables.push(runtime, reports, workflows)
   return { directory, workflows, reports, host, runtime }
 }
+
+it.each(['intentId', 'subject', 'description', 'inputs', 'candidateRound', 'sourceRound', 'missingSourceRound', 'taskKind'] as const)('rejects factory %s replay tampering before any host effect', async field => {
+  const directory = await mkdtemp(join(tmpdir(), 'gasteam-factory-runtime-replay-'))
+  roots.push(directory)
+  const template = validateWorkflowTemplate(darkFactoryTemplate)
+  const workflow = { template, parameters: { subject: 'registered repair' } }
+  const { specDigest: _digest, ...payload } = examples.ExecutableSpecV1
+  const spec = pinExecutableSpec({ ...payload, workflowDigest: digestJson(pinWorkflowDefinition(template, workflow.parameters)) })
+  const admissions = await DarkFactoryAdmissionStore.open(directory, { projectId: spec.projectId, registeredLeadId: 'lead', workflowTemplates: [template] })
+  const workflows = await WorkflowStore.open(directory)
+  const reports = await ReportStore.open(directory)
+  closeables.push(admissions, workflows, reports)
+  const record = (await admissions.begin({ projectId: spec.projectId, expectedRevision: 0, intent: {
+    registeredLeadId: 'lead', spec, workflow, policyRefs: { policyRecordId: 'policy-record', decisionReceiptId: 'decision-record' },
+    compilerOutcome: { ...examples.CompilerOutcomeV1, source: spec.source, spec },
+    compilerCursor: { schemaVersion: 1, contextDigest: digestJson({ host: 'fixture' }), malformedAttempts: 0, phase: 'finished' },
+  } })).record
+  const host = new Host()
+  host.failTaskCreation = true
+  const runtime = await WorkflowRuntime.open(directory, workflows, reports, host, [template])
+  closeables.push(runtime)
+  await expect(runtime.materializeFactoryAdmission(record, { id: spec.projectId, teamIds: ['lead'] })).rejects.toThrow('injected task creation crash')
+  await runtime.close()
+  const filename = join(directory, 'workflow-runtime.jsonl')
+  const events = (await readFile(filename, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  const intended = events.find(event => event.type === 'workflow-runtime/task-intended')!
+  if (field === 'sourceRound') intended.sourceRound = 1
+  else if (field === 'missingSourceRound') delete intended.sourceRound
+  else if (field === 'candidateRound') intended.intent.candidateRound = 1
+  else if (field === 'inputs') intended.intent.inputs = [{ name: 'injected', artifact: { kind: 'file', ref: 'unregistered/path' } }]
+  else if (field === 'taskKind') { delete intended.intent.nonCodeCriteria; intended.intent.reviewGate = 'injected-gate' }
+  else intended.intent[field] = 'altered-payload'
+  await writeFile(filename, `${events.map(event => JSON.stringify(event)).join('\n')}\n`)
+  host.calls.length = 0
+  await expect(WorkflowRuntime.open(directory, workflows, reports, host, [template])).rejects.toMatchObject({ cause: { message: 'Factory task intent does not match admission' } })
+  expect(host.calls).toEqual([])
+})
 
 it('pins report template work to the registered Lead, creates each managed task once, and carries accepted evidence into the next step', async () => {
   const { workflows, reports, host, runtime } = await fixture()

@@ -4,6 +4,8 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { OperatorEscalation, SchedulingControl, SchedulingView, WorkspaceActivityPage, WorkspaceActivityRequest, WorkspaceDashboardCollection, WorkspaceDashboardPage, WorkspaceDashboardPageRequest, WorkspaceDashboardView } from '@deepseek-ai/dsh-experimental-agent-team/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TeamKey } from './locales.ts'
+import { AutofixerSettings } from './AutofixerSettings.tsx'
+import type { AutofixerConfig } from './autofixer-settings.ts'
 import css from './WorkspaceDashboard.module.css'
 
 export interface WorkspaceDashboardProps {
@@ -15,6 +17,8 @@ export interface WorkspaceDashboardProps {
   readonly controlScheduling?: (sessionId: SessionId, request: SchedulingControl) => Promise<RemoteResult<SchedulingView>>
   readonly loadHealth?: (sessionId: SessionId, projectId: string) => Promise<RemoteResult<OperatorEscalation[]>>
   readonly acknowledgeHealth?: (sessionId: SessionId, projectId: string, escalationId: string, expectedRevision: number) => Promise<RemoteResult<OperatorEscalation>>
+  readonly initialAutofixerConfig?: Partial<AutofixerConfig>
+  readonly onSaveAutofixerConfig?: (config: AutofixerConfig) => void | Promise<void>
   readonly t: (key: TeamKey) => string
 }
 
@@ -46,7 +50,7 @@ function Usage({ usage, t }: { readonly usage: WorkspaceDashboardView['attempts'
  * Presents only the browser-safe workspace projection. Its `load` capability is
  * supplied later by an operator-authorized Remote binding.
  */
-export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, loadScheduling, controlScheduling, loadHealth, acknowledgeHealth, t }: WorkspaceDashboardProps) {
+export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, loadScheduling, controlScheduling, loadHealth, acknowledgeHealth, initialAutofixerConfig, onSaveAutofixerConfig, t }: WorkspaceDashboardProps) {
   const [view, setView] = useState<WorkspaceDashboardView | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -274,7 +278,7 @@ export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, lo
           {selectedAttempt !== undefined && selectedRequest !== undefined && selectedAttempt.phase === 'terminal' && selectedAttempt.retryEligible !== undefined && <button type="button" disabled={operationLoading || selectedAttempt.retryEligible !== true} title={selectedAttempt.retryEligible === true ? undefined : t(`dashboard.retry.${selectedAttempt.retryReason ?? 'not-provisioning'}` as TeamKey)} onClick={() => { void applyControl({ action: 'retry', projectId, taskId: selectedRequest.taskId, expectedRevision: selectedRequest.revision, attemptId: selectedAttempt.attemptId, generation: selectedAttempt.generation, expectedAttemptRevision: selectedAttempt.revision }) }}>{t('dashboard.retry')}</button>}
           {selectedAttempt !== undefined && selectedRequest !== undefined && selectedAttempt.phase === 'active' && <button type="button" disabled={operationLoading || selectedAttempt.handoffEligible !== true} title={selectedAttempt.handoffEligible === true ? undefined : t(`dashboard.handoff.${selectedAttempt.handoffReason ?? 'not-active'}` as TeamKey)} onClick={() => { void applyControl({ action: 'handoff', projectId, taskId: selectedRequest.taskId, expectedRevision: selectedRequest.revision, attemptId: selectedAttempt.attemptId, generation: selectedAttempt.generation, expectedAttemptRevision: selectedAttempt.revision }) }}>{t('dashboard.reassignHandoff')}</button>}
         </div>}
-        {healthInbox.map(escalation => <div key={escalation.id} className={css.row}><span>{escalation.work.taskId} · {t(`health.condition.${escalation.condition}` as TeamKey)}</span><button type="button" disabled={operationLoading || escalation.acknowledgement !== undefined} onClick={() => { void acknowledge(escalation) }}>{t('dashboard.acknowledge')}</button></div>)}
+        {healthInbox.map(escalation => <div key={escalation.id} className={css.row}><span>{escalation.source === 'darkfactory' ? `Dark Factory · ${escalation.stage} · ${escalation.reason}` : `${escalation.work.taskId} · ${t(`health.condition.${escalation.condition}` as TeamKey)}`}</span><button type="button" disabled={operationLoading || escalation.acknowledgement !== undefined} onClick={() => { void acknowledge(escalation) }}>{t('dashboard.acknowledge')}</button></div>)}
       </section>}
       {loadPage !== undefined && <section className={css.section} aria-label={t('dashboard.pages')}>
         <h3>{t('dashboard.pages')} · {t(`dashboard.${collection === 'batches' ? 'workspaceBatches' : collection}` as TeamKey)}</h3>
@@ -320,8 +324,16 @@ export function WorkspaceDashboard({ sessionId, load, loadPage, loadActivity, lo
         {visibleIntegrations.map(integration => <article key={integration.integrationId} className={css.card}><strong>{integration.integrationId}</strong><span>{stateLabel(t, 'integration', integration.phase)} · {integration.projectId}/{integration.teamId}</span><span>{integration.sourceCommit}</span>{integration.failureKind === undefined ? null : <span>{t('dashboard.integration.verificationFailed')}</span>}{integration.diagnostic === undefined ? null : <p>{integration.diagnostic}</p>}</article>)}
       </DashboardSection>
       <DashboardSection title={t('dashboard.escalations')} truncated={view.escalationsTruncated} t={t}>
-        {visibleEscalations.map(escalation => <article key={escalation.id} className={css.card}><strong>{t(`health.severity.${escalation.severity}`)} · {t(`health.condition.${escalation.condition}`)}</strong><span>{escalation.projectId}/{escalation.taskId} · {escalation.attemptId} · {t('dashboard.revision')} {escalation.revision}</span><p>{escalation.diagnostics}</p></article>)}
+        {visibleEscalations.map(escalation => <article key={escalation.id} className={css.card}><strong>{t(`health.severity.${escalation.severity}`)} · {escalation.source === 'darkfactory' ? `Dark Factory · ${escalation.stage} · ${escalation.reason}` : t(`health.condition.${escalation.condition}`)}</strong><span>{escalation.source === 'darkfactory' ? `${escalation.projectId} · ${escalation.effectId}` : `${escalation.projectId}/${escalation.taskId} · ${escalation.attemptId}`} · {t('dashboard.revision')} {escalation.revision}</span><p>{escalation.diagnostics}</p></article>)}
       </DashboardSection>
+      <AutofixerSettings
+        projects={view.projects}
+        selectedProjectId={projectId}
+        onSelectProject={setProjectId}
+        initialConfig={initialAutofixerConfig}
+        onSave={onSaveAutofixerConfig}
+        t={t}
+      />
     </>}
   </section>
 }
@@ -333,7 +345,7 @@ function PageRows({ page, t }: { readonly page: WorkspaceDashboardPage; readonly
   if (page.collection === 'attempts') rows = (items as WorkspaceDashboardView['attempts']).map(item => <article key={item.attemptId} className={css.card}><strong>{item.attemptId}</strong><span>{item.projectId}/{item.taskId}</span><span>{stateLabel(t, 'attempt', item.phase)}</span><span>{item.progress === undefined ? t('dashboard.progress.unobserved') : `${t(`dashboard.progress.${item.progress.classification}` as TeamKey)} · ${t(`dashboard.progress.${item.progress.certainty}` as TeamKey)}`}</span><Usage usage={item.externalUsage} t={t} /></article>)
   else if (page.collection === 'workflows') rows = (items as WorkspaceDashboardView['workflows']).map(item => <article key={item.executionId} className={css.card}><strong>{item.executionId}</strong>{item.steps.map(step => <span key={step.stepId}>{step.stepId} · {stateLabel(t, 'workflow', step.phase)}</span>)}<Truncation value={item.stepsTruncated} t={t} /></article>)
   else if (page.collection === 'integrations') rows = (items as WorkspaceDashboardView['integrations']).map(item => <article key={item.integrationId} className={css.card}><strong>{item.integrationId}</strong><span>{stateLabel(t, 'integration', item.phase)} · {item.projectId}/{item.teamId}</span><span>{item.sourceCommit}</span>{item.diagnostic === undefined ? null : <p>{item.diagnostic}</p>}</article>)
-  else if (page.collection === 'escalations') rows = (items as WorkspaceDashboardView['escalations']).map(item => <article key={item.id} className={css.card}><strong>{t(`health.severity.${item.severity}` as TeamKey)} · {t(`health.condition.${item.condition}` as TeamKey)}</strong><span>{item.projectId}/{item.taskId} · {item.attemptId}</span><p>{item.diagnostics}</p></article>)
+  else if (page.collection === 'escalations') rows = (items as WorkspaceDashboardView['escalations']).map(item => <article key={item.id} className={css.card}><strong>{t(`health.severity.${item.severity}` as TeamKey)} · {item.source === 'darkfactory' ? `Dark Factory · ${item.stage} · ${item.reason}` : t(`health.condition.${item.condition}` as TeamKey)}</strong><span>{item.source === 'darkfactory' ? `${item.projectId} · ${item.effectId}` : `${item.projectId}/${item.taskId} · ${item.attemptId}`}</span><p>{item.diagnostics}</p></article>)
   else if (page.collection === 'queue') rows = (items as WorkspaceDashboardView['queue']).map(item => <article key={`${item.projectId}/${item.taskId}`} className={css.card}><strong>{item.projectId}/{item.taskId}</strong><span>{stateLabel(t, 'queue', item.state)} · {t('dashboard.revision')} {item.revision}</span><span>{item.blockers.map(blocker => blocker.code).join(', ')}</span><Truncation value={item.blockersTruncated} t={t} /></article>)
   else if (page.collection === 'batches') rows = (items as WorkspaceDashboardView['batches']).map(item => <article key={item.id} className={css.card}><strong>{item.id}</strong><span>{stateLabel(t, 'batch', item.phase)}</span><span>{item.completedRequired}/{item.required}</span></article>)
   else if (page.collection === 'mergeBatches') rows = (items as WorkspaceDashboardView['mergeBatches']).map(item => <article key={item.id} className={css.card}><strong>{item.id}</strong><span>{t(`dashboard.mergeBatch.${item.phase}` as TeamKey)}</span>{item.members.map(member => <span key={member.integrationId}>{member.integrationId}{member.projectId === undefined ? '' : ` · ${member.projectId}/${member.taskId ?? t('dashboard.activityNoTask')}`}</span>)}</article>)

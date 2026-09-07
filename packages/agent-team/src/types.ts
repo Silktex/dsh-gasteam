@@ -342,6 +342,19 @@ export interface TeamTaskWorkflowBinding {
   readonly inputs: readonly TeamTaskWorkflowInput[]
 }
 
+/** Immutable host admission identity. Presence holds execution until a future host activation protocol exists. */
+export interface TeamTaskFactoryBinding {
+  readonly admissionId: string
+  readonly specDigest: string
+  readonly policyDigest: string
+  readonly workflowDigest: string
+  readonly sourceRevision: string
+  readonly projectId: string
+  readonly executionId: string
+  readonly stepId: string
+  readonly plannedInputs: readonly { readonly name: string; readonly producerStepId: string; readonly artifactName: string }[]
+}
+
 /** Whole durable task snapshot; every mutation increments {@link revision}. */
 export interface TeamTaskSnapshot {
   readonly id: TeamTaskId
@@ -354,6 +367,7 @@ export interface TeamTaskSnapshot {
   readonly reviewGate?: string
   /** Host-only immutable workflow checkpoint identity and required inputs. */
   readonly workflowBinding?: TeamTaskWorkflowBinding
+  readonly factoryBinding?: TeamTaskFactoryBinding
   readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly ownerId?: SessionId
@@ -372,6 +386,7 @@ export interface TeamTaskView {
   readonly nonCodeCriteria?: string
   readonly reviewGate?: string
   readonly workflowBinding?: TeamTaskWorkflowBinding
+  readonly factoryBinding?: TeamTaskFactoryBinding
   readonly reviewBinding?: TeamTaskReviewBinding
   readonly status: TeamTaskStatus
   readonly blockedBy: TeamTaskId[]
@@ -491,6 +506,7 @@ export interface CreatePinnedTeamTaskRequest {
   readonly description: string
   /** Required host-only workflow identity and exact inputs, durable before dispatch. */
   readonly workflowBinding: TeamTaskWorkflowBinding
+  readonly factoryBinding?: TeamTaskFactoryBinding
   readonly nonCodeCriteria?: string
   /** Mutually exclusive with non-code criteria; copied into the durable task event before dispatch. */
   readonly reviewGate?: string
