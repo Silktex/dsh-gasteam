@@ -19,6 +19,9 @@
     backgroundMode: one-shot
 
 - insert:
+    - id: dsh-team
+      name: dsh-team
+
     - id: dsh-team-compat
       name: dsh-team/compat
 
