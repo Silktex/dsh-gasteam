@@ -20,6 +20,13 @@ export const zh = {
   'scene.agents': '代理',
   'scene.overseer': '监工',
   'dashboard.stale': '所选项目已不在最新概览中，已清除选择。',
+  'a11y.roster': '代理名单',
+  'state.idle': '空闲',
+  'state.working': '工作中',
+  'state.blocked': '受阻',
+  'state.error': '异常',
+  'state.done': '已完成',
+  'board.title': '通缉榜',
 } satisfies Record<string, string>
 
 /** Visual agents locale key union. */
@@ -42,4 +49,11 @@ export const en = {
   'scene.agents': 'Agents',
   'scene.overseer': 'Overseer',
   'dashboard.stale': 'The selected project is absent from the latest dashboard and was cleared.',
+  'a11y.roster': 'Agent roster',
+  'state.idle': 'Idle',
+  'state.working': 'Working',
+  'state.blocked': 'Blocked',
+  'state.error': 'Error',
+  'state.done': 'Done',
+  'board.title': 'Wanted board',
 } satisfies Record<TeamVisualKey, string>

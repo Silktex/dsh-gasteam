@@ -7,7 +7,8 @@ import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { NS } from './locales.ts'
-import { reconcileDashboard, type VisualSceneModel } from './reconcile.ts'
+import { reconcileDashboard, type VisualAgent, type VisualSceneModel } from './reconcile.ts'
+import { detectSceneTheme, type SceneTheme } from '../scenes/theme.ts'
 import { createVisualToggleStore, type VisualToggleStore } from './toggle.ts'
 import { SceneCanvas, type SceneAgent } from './SceneCanvas.tsx'
 import { AGENT_TINTS } from '../engine/sprites.ts'
@@ -27,8 +28,8 @@ import { badgeForState } from '../engine/badges.ts'
 import { palette } from './assets/palette.ts'
 import css from './VisualAgentsAction.module.css'
 
-/** Fixed overseer slot beside the plaque for the lead fox (normalized coords). */
-const OVERSEER_SLOT = { x: 0.5, y: 0.18 } as const
+/** Fixed overseer slot top-right beside the plaque band for the lead fox (normalized coords). */
+const OVERSEER_SLOT = { x: 0.85, y: 0.16 } as const
 
 /** Desk obstacle rects for the nav grid (desk footprint + 2% approach line). */
 const DESK_OBSTACLES = DESK_SLOTS.map(slot => ({ x: slot.x - 0.06, y: slot.y - 0.02, w: 0.12, h: 0.06 }))
@@ -73,6 +74,11 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
   const [projectId, setProjectId] = useState<string | null>(null)
   const [staleNotice, setStaleNotice] = useState(false)
   const [store] = useState<VisualToggleStore>(() => createVisualToggleStore(window.localStorage, false))
+  // Scene theme (M4): detected once from prefers-color-scheme, then tracked.
+  const [theme, setTheme] = useState<SceneTheme>(() => detectSceneTheme())
+  // A11y roster mirror (M4): updated ONLY in the refresh success path below,
+  // never from the 60fps actor stepping.
+  const [roster, setRoster] = useState<readonly VisualAgent[]>([])
   // Actors live outside React state intentionally — 60fps stepping must not
   // re-render; the canvas reads them through getAgents every frame.
   const actorsRef = useRef<readonly Actor[]>([])
@@ -95,7 +101,22 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
     setError(null)
     setProjectId(null)
     setStaleNotice(false)
+    setRoster([])
   }, [sessionId])
+
+  // Track prefers-color-scheme changes (guarded: matchMedia may be absent).
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (event: MediaQueryListEvent): void => {
+      setTheme(event.matches ? 'dark' : 'light')
+    }
+    if (typeof media.addEventListener !== 'function') return undefined
+    media.addEventListener('change', onChange)
+    return () => {
+      media.removeEventListener('change', onChange)
+    }
+  }, [])
 
   const refresh = useCallback(async (): Promise<void> => {
     const requestedSession = sessionId
@@ -128,6 +149,8 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
       setError(null)
       const scene = reconcileDashboard(result.value, nextProjectId)
       actorsRef.current = reconcileActors(actorsRef.current, scene, grid, Date.now())
+      // Roster mirror updates here ONLY (reconcile output), never per frame.
+      setRoster(scene.agents)
       return
     }
     setError(failureText(result.error))
@@ -157,6 +180,11 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
   )
   const scene = useMemo(() => view === null ? null : reconcileDashboard(view, projectId), [view, projectId])
   sceneRef.current = scene
+  // Wanted-board taskIds from the reconciled scene (first 8).
+  const tasks = useMemo(
+    () => scene === null ? undefined : scene.agents.slice(0, 8).map(agent => agent.taskId),
+    [scene],
+  )
 
   const getAgents = useCallback((): readonly SceneAgent[] => {
     const agents: SceneAgent[] = actorsRef.current.map((actor, index) => ({
@@ -236,8 +264,21 @@ export function VisualAgentsAction({ sessionId, load, t }: TeamVisualActionProps
                 </button>
               </div>
               {showCanvas
-                ? <SceneCanvas plaqueText={t('scene.projectPlaque', { projectId })} getAgents={getAgents} onFrame={handleFrame} />
+                ? (
+                  <SceneCanvas
+                    plaqueText={t('scene.projectPlaque', { projectId })}
+                    getAgents={getAgents}
+                    onFrame={handleFrame}
+                    theme={theme}
+                    tasks={tasks}
+                  />
+                )
                 : <div className={css.notice} role="status">{t('toggle.disabledNotice')}</div>}
+              <ul aria-label={t('a11y.roster')} className={css.visuallyHidden} aria-live="polite">
+                {roster.map(agent => (
+                  <li key={agent.id}>{`${agent.label} — ${t(`state.${agent.state}`)}`}</li>
+                ))}
+              </ul>
             </>
           )}
         </div>
