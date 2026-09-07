@@ -8,5 +8,6 @@ These pages describe the published-runtime plugin checkout and its opt-in Agent 
 - [Architecture decisions](autonomous-architecture.md): durable authority and recovery rules.
 - [Gas Town comparison](gastown-comparison.md): date-pinned capability comparison of reviewed Gas Town roles, primitives, and workflows against the GasTeam plugin.
 - [Completion evidence](completion-evidence.md): tested slices, limits, and unfinished acceptance work.
+- [Visual agents](visual-agents.md): opt-in pixel-art visual dashboard for per-project agent scenes.
 
 The repository uses published `@deepseek-ai/dsh@0.1.2-rc.1` dependencies. A DeepSeek Harness source checkout is not required. Commands that install or restart a profile are intentionally kept in [installation](installation.md). A disposable archive validation covered frozen install, build, CLI help, and Web/headless profile linking; clean external installation, service operation, and rollback remain open.
